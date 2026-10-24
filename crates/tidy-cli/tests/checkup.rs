@@ -137,7 +137,7 @@ fn memory_prints_one_snapshot_of_the_fake_table() {
 }
 
 #[test]
-fn security_prints_progress_then_every_check_and_saves_the_week() {
+fn security_prints_progress_then_every_check_and_saves_each_run() {
     let fx = Fixture::standard();
     let run = fx.tidyctl_with(&["security"], &fake_env(&fx));
     assert_eq!(run.code, 0, "{}\n{}", run.stdout, run.stderr);
@@ -169,14 +169,21 @@ fn security_prints_progress_then_every_check_and_saves_the_week() {
         ]
     );
     assert_eq!(check(report, "filevault")["status"], "green");
-    let week = report["week"].as_str().unwrap();
-    assert!(fx.tidy.join(format!("data/security/{week}.json")).is_file());
+    let id = report["id"].as_str().unwrap();
+    assert!(fx.tidy.join(format!("data/security/{id}.json")).is_file());
 
-    // A second run in the same week replaces the file and still compares with nothing.
-    let again = fx.tidyctl_with(&["security"], &fake_env(&fx));
+    // The next run, a minute later, is saved next to it and compares with it.
+    let mut env = fake_env(&fx);
+    for (k, v) in &mut env {
+        if k == "TIDY_TEST_NOW" {
+            *v = (fx.expected.plan.now + 60).to_string();
+        }
+    }
+    let again = fx.tidyctl_with(&["security"], &env);
     assert_eq!(again.code, 0);
-    assert_eq!(again.last()["first_run"], true);
-    assert_eq!(common::names(&fx.tidy.join("data/security")).len(), 1);
+    assert_eq!(again.last()["first_run"], false);
+    assert_eq!(again.last()["compared_to"], id);
+    assert_eq!(common::names(&fx.tidy.join("data/security")).len(), 2);
 }
 
 #[test]

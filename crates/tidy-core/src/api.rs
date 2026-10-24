@@ -78,8 +78,8 @@ pub enum Command {
     /// `include_updates` also runs `softwareupdate --list` (60 s timeout); without it the
     /// macOS updates row is gray ("checked on demand"). Answered with
     /// [`Event::SecurityProgress`] while signatures are checked, then
-    /// [`Event::SecurityResult`]. The report is marked against the latest earlier week and
-    /// saved as `security/<week>.json`. A request while a run is going is ignored.
+    /// [`Event::SecurityResult`]. The report is marked against the last saved run and
+    /// saved as `security/<id>.json`. A request while a run is going is ignored.
     RunSecurity { include_updates: bool },
     /// The latest saved Security report, so the screen can show it before a new run. None
     /// when there is none.
@@ -317,8 +317,8 @@ mod tests {
         });
         assert_eq!(h.last_checkup().await.map(|c| c.at), Some(7));
         assert_eq!(
-            h.last_security().await.map(|r| r.week),
-            Some("1970-W01".into())
+            h.last_security().await.map(|r| r.id),
+            Some("19700101-000000".into())
         );
         assert_eq!(h.next_reminder().await, Some(date));
     }

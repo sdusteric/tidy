@@ -26,7 +26,7 @@ use std::sync::Arc;
 use crate::env::{CommandRunner, Env};
 use crate::model::{
     CheckId, CheckResult, ChromeExtension, LaunchKind, LoginItem, Mark, Scope, SecurityReport,
-    Signer, Status, iso_week_id,
+    Signer, Status, run_id,
 };
 use crate::paths::AppPaths;
 use crate::store;
@@ -193,8 +193,8 @@ pub fn run_and_save_with(
     include_updates: bool,
     progress: Progress<'_>,
 ) -> SecurityReport {
-    let week = iso_week_id(env.now());
-    let previous = previous_report(&env.paths, &week);
+    let id = run_id(env.now());
+    let previous = previous_report(&env.paths, &id);
     let report = run(env, sources, include_updates, previous.as_ref(), progress);
     if let Err(e) = save_report(&env.paths, &report) {
         tracing::warn!("cannot save the security report: {e}");
@@ -404,47 +404,58 @@ fn chrome_row(read: &chrome::ChromeRead, exts: &[ChromeExtension], first_run: bo
 
 // ---------- Saved reports ----------
 
-/// Whether `name` is a saved report's file name: `2026-W43.json`. Returns the week.
-fn week_of_file(name: &str) -> Option<&str> {
-    let week = name.strip_suffix(".json")?;
-    let b = week.as_bytes();
-    let ok = b.len() == 8
-        && b[..4].iter().all(u8::is_ascii_digit)
-        && &b[4..6] == b"-W"
-        && b[6..].iter().all(u8::is_ascii_digit);
-    ok.then_some(week)
+/// How many saved runs are kept. Older ones are removed after each save; the marks only
+/// need the newest.
+pub const KEEP_RUNS: usize = 100;
+
+/// Whether `name` is a saved report's file name: `20261023-140211.json`. Returns the id.
+fn run_of_file(name: &str) -> Option<&str> {
+    let id = name.strip_suffix(".json")?;
+    let b = id.as_bytes();
+    let ok = b.len() == 15
+        && b[..8].iter().all(u8::is_ascii_digit)
+        && b[8] == b'-'
+        && b[9..].iter().all(u8::is_ascii_digit);
+    ok.then_some(id)
 }
 
-/// The weeks with a saved report, oldest first.
-pub fn saved_weeks(paths: &AppPaths) -> Vec<String> {
+/// The ids of the saved runs, oldest first.
+pub fn saved_runs(paths: &AppPaths) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(paths.security_dir()) else {
         return Vec::new();
     };
-    let mut weeks: Vec<String> = entries
+    let mut ids: Vec<String> = entries
         .filter_map(Result::ok)
-        .filter_map(|e| week_of_file(&e.file_name().to_string_lossy()).map(str::to_string))
+        .filter_map(|e| run_of_file(&e.file_name().to_string_lossy()).map(str::to_string))
         .collect();
-    weeks.sort();
-    weeks
+    ids.sort();
+    ids
 }
 
-/// Saves `report` as `security/<week>.json`, replacing an earlier run of the same week.
+/// Saves `report` as `security/<id>.json`, then removes all but the newest [`KEEP_RUNS`].
 pub fn save_report(paths: &AppPaths, report: &SecurityReport) -> io::Result<()> {
-    if week_of_file(&format!("{}.json", report.week)).is_none() {
+    if run_of_file(&format!("{}.json", report.id)).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("not a week id: {:?}", report.week),
+            format!("not a run id: {:?}", report.id),
         ));
     }
-    store::write_json_atomic(&paths.security_file(&report.week), report)
+    store::write_json_atomic(&paths.security_file(&report.id), report)?;
+    let runs = saved_runs(paths);
+    for old in &runs[..runs.len().saturating_sub(KEEP_RUNS)] {
+        if let Err(e) = std::fs::remove_file(paths.security_file(old)) {
+            tracing::warn!("cannot remove the old security report {old}: {e}");
+        }
+    }
+    Ok(())
 }
 
-/// The saved report of `week`. None when there is none or it does not parse (logged).
-pub fn load_report(paths: &AppPaths, week: &str) -> Option<SecurityReport> {
-    match store::read_json(&paths.security_file(week)) {
+/// The saved run `id`. None when there is none or it does not parse (logged).
+pub fn load_report(paths: &AppPaths, id: &str) -> Option<SecurityReport> {
+    match store::read_json(&paths.security_file(id)) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("cannot read the security report of {week}: {e}");
+            tracing::warn!("cannot read the security report {id}: {e}");
             None
         }
     }
@@ -452,19 +463,19 @@ pub fn load_report(paths: &AppPaths, week: &str) -> Option<SecurityReport> {
 
 /// The newest saved report, for the screen to show before a new run.
 pub fn latest_report(paths: &AppPaths) -> Option<SecurityReport> {
-    saved_weeks(paths)
+    saved_runs(paths)
         .iter()
         .rev()
-        .find_map(|w| load_report(paths, w))
+        .find_map(|id| load_report(paths, id))
 }
 
-/// The newest saved report from a week before `week`: what a run in `week` compares with.
-pub fn previous_report(paths: &AppPaths, week: &str) -> Option<SecurityReport> {
-    saved_weeks(paths)
+/// The newest saved report from before run `id`: what that run compares with.
+pub fn previous_report(paths: &AppPaths, id: &str) -> Option<SecurityReport> {
+    saved_runs(paths)
         .iter()
         .rev()
-        .filter(|w| w.as_str() < week)
-        .find_map(|w| load_report(paths, w))
+        .filter(|r| r.as_str() < id)
+        .find_map(|r| load_report(paths, r))
 }
 
 #[cfg(test)]
@@ -472,11 +483,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn week_file_names_are_strict() {
-        assert_eq!(week_of_file("2026-W43.json"), Some("2026-W43"));
-        assert_eq!(week_of_file("2026-W43.json.tmp"), None);
-        assert_eq!(week_of_file("2026-43.json"), None);
-        assert_eq!(week_of_file("notes.json"), None);
+    fn run_file_names_are_strict() {
+        assert_eq!(run_of_file("20261023-140211.json"), Some("20261023-140211"));
+        assert_eq!(run_of_file("20261023-140211.json.tmp"), None);
+        assert_eq!(run_of_file("2026-W43.json"), None);
+        assert_eq!(run_of_file("20261023140211.json"), None);
+        assert_eq!(run_of_file("notes.json"), None);
     }
 
     #[test]

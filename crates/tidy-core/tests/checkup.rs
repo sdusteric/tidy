@@ -11,7 +11,7 @@ use std::time::Duration;
 use tidy_core::api::{Command, CoreHandle, Event};
 use tidy_core::env::{Env, FixedClock, FixedMemory, FixedProbe, ReplayRunner, parse_tz};
 use tidy_core::model::{
-    CheckId, Checkup, CheckupCleanup, Class, Pressure, RunningSet, Status, iso_week_id,
+    CheckId, Checkup, CheckupCleanup, Class, Pressure, RunningSet, Status, run_id,
 };
 use tidy_core::reminder::{self, ReminderDate};
 use tidy_core::security::codesign::CodeSign;
@@ -197,15 +197,12 @@ fn a_check_up_of_the_fixture_home_logs_one_entry_with_the_three_parts() {
         Status::Gray
     );
     let sec = checkup.security.clone().unwrap();
-    assert_eq!(sec.week, iso_week_id(FIXTURE_NOW));
+    assert_eq!(sec.id, run_id(FIXTURE_NOW));
     assert_eq!(sec.amber, report.amber());
     assert_eq!(sec.headline(), report.headline());
     assert!(sec.first_run);
     assert!(!f.runner.ran("softwareupdate"));
-    assert_eq!(
-        security::saved_weeks(&f.env.paths),
-        [iso_week_id(FIXTURE_NOW)]
-    );
+    assert_eq!(security::saved_runs(&f.env.paths), [run_id(FIXTURE_NOW)]);
 
     // Memory: the fake table's figures and verdict.
     let mem = checkup.memory.unwrap();
@@ -251,7 +248,7 @@ fn a_check_up_of_the_fixture_home_logs_one_entry_with_the_three_parts() {
 }
 
 #[test]
-fn a_later_check_up_appends_compares_with_last_week_and_moves_the_reminder() {
+fn a_later_check_up_appends_compares_with_the_last_and_moves_the_reminder() {
     let f = fixture();
     let mut c = Core::start(&f);
     let (first, _) = done(&c.checkup(false));
@@ -269,7 +266,7 @@ fn a_later_check_up_appends_compares_with_last_week_and_moves_the_reminder() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(report.compared_to, Some(iso_week_id(FIXTURE_NOW)));
+    assert_eq!(report.compared_to, Some(run_id(FIXTURE_NOW)));
     assert_eq!(
         reminder::read_checkups(&f.env.paths),
         [first, second.clone()]
@@ -283,6 +280,6 @@ fn a_later_check_up_appends_compares_with_last_week_and_moves_the_reminder() {
         reminder,
         reminder::next_reminder(Some(second.at), second.at, &f.env.tz)
     );
-    assert_eq!(security::saved_weeks(&f.env.paths).len(), 2);
+    assert_eq!(security::saved_runs(&f.env.paths).len(), 2);
     c.rt.block_on(c.core.shutdown());
 }

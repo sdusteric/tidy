@@ -104,16 +104,15 @@ impl AppPaths {
         self.data.join("trash")
     }
 
-    /// The folder of saved Security runs: `data/security`, one file per ISO week.
+    /// The folder of saved Security runs: `data/security`, one file per run.
     pub fn security_dir(&self) -> PathBuf {
         self.data.join("security")
     }
 
-    /// The saved Security run of one ISO week (`2026-W43`, see
-    /// [`crate::model::iso_week_id`]): `data/security/2026-W43.json`. A second run in the same
-    /// week replaces it; the diff compares against the latest earlier week.
-    pub fn security_file(&self, week: &str) -> PathBuf {
-        self.security_dir().join(format!("{week}.json"))
+    /// The saved Security run `id` (its UTC time, see [`crate::model::run_id`]):
+    /// `data/security/20261023-140211.json`. A run compares against the newest earlier one.
+    pub fn security_file(&self, id: &str) -> PathBuf {
+        self.security_dir().join(format!("{id}.json"))
     }
 
     /// One line per check up: `data/checkups.jsonl`. The weekly reminder counts from the last

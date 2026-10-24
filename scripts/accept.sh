@@ -700,7 +700,7 @@ ac7() {
 
   # Core tests: captured real outputs (on and off variants), XProtect age with a FixedClock,
   # launch agent and daemon folders, the Apple and unsigned signers, Chrome Secure Preferences,
-  # the week over week diff, and softwareupdate never running.
+  # the diff against the last check, and softwareupdate never running.
   if run_named security-core "-p tidy-core --test security" \
     captured_outputs_from_this_mac_parse \
     off_and_disabled_variants_are_amber_with_their_button \
@@ -711,7 +711,8 @@ ac7() {
     apple_and_unsigned_programs_are_told_apart \
     login_items_carry_label_program_run_at_load_and_signer \
     chrome_secure_preferences_list_the_extensions_people_installed \
-    week_over_week_marks_new_and_changed_and_the_first_run_says_so \
+    each_check_marks_new_and_changed_against_the_last_and_the_first_run_says_so \
+    only_the_newest_runs_are_kept \
     a_run_without_include_updates_never_runs_softwareupdate \
     security_sources_use_no_scare_words; then
     detail="$detail core-tests"
@@ -768,22 +769,25 @@ ac7() {
       and ([.checks[] | select(.id == "macos_updates")][0].status == "gray")
       and .updates_checked == false' \
     >/dev/null 2>&1 || bad="$bad [the checks differ from design 5.4: $(tail -n 1 "$out" | jq -c '[.checks[] | {id, status}]' 2>/dev/null)]"
-  local week
-  week=$(tail -n 1 "$out" | jq -r '.week // empty' 2>/dev/null)
-  if [ -n "$week" ] && [ -s "$sec_home/data/security/$week.json" ]; then
+  local id
+  id=$(tail -n 1 "$out" | jq -r '.id // empty' 2>/dev/null)
+  if [ -n "$id" ] && [ -s "$sec_home/data/security/$id.json" ]; then
     detail="$detail tidyctl-security(${ms}ms)"
   else
-    bad="$bad [the week file $sec_home/data/security/$week.json was not saved]"
+    bad="$bad [the run file $sec_home/data/security/$id.json was not saved]"
   fi
   # A first run in a fresh TIDY_HOME says so and marks nothing.
   tail -n 1 "$out" | jq -e '.first_run == true' >/dev/null 2>&1 || bad="$bad [the first run did not say it is the first]"
 
-  # A second run in the same week compares with the first and marks nothing as New or Changed
-  # when nothing changed in between (login items can start or stop, so only the report shape).
+  # The next run (ids are whole seconds, so wait one) is saved next to the first and compares
+  # with it. Login items can start or stop in between, so the marks themselves are not checked.
+  sleep 1
   env TIDY_HOME="$sec_home" "$TIDYCTL" security >"$RUN/security2.out" 2>"$RUN/security2.err"
   rc=$?
   [ $rc -eq 0 ] || bad="$bad [second tidyctl security exit $rc]"
-  tail -n 1 "$RUN/security2.out" | jq -e '.event == "security"' >/dev/null 2>&1 || bad="$bad [second run printed no report]"
+  tail -n 1 "$RUN/security2.out" | jq -e --arg id "$id" '.event == "security" and .first_run == false and .compared_to == $id' \
+    >/dev/null 2>&1 || bad="$bad [second run did not compare with the first]"
+  [ "$(find "$sec_home/data/security" -name '*.json' | wc -l | tr -d ' ')" = 2 ] || bad="$bad [expected two saved runs]"
 
   if [ -z "$bad" ]; then
     pass AC7 "security:$detail"
@@ -819,7 +823,7 @@ ac8() {
   fi
   if run_named checkup-core "-p tidy-core --test checkup" \
     a_check_up_of_the_fixture_home_logs_one_entry_with_the_three_parts \
-    a_later_check_up_appends_compares_with_last_week_and_moves_the_reminder; then
+    a_later_check_up_appends_compares_with_the_last_and_moves_the_reminder; then
     detail="$detail core-tests"
   else
     bad="$bad [check up core tests failed, see $LAST_LOG]"

@@ -284,6 +284,6 @@ mod tests {
         stop.abort.store(true, Ordering::Relaxed);
         assert_eq!(run(&env, &sources(&base), false, &stop, &|_| {}), None);
         assert!(reminder::read_checkups(&env.paths).is_empty());
-        assert!(security::saved_weeks(&env.paths).is_empty());
+        assert!(security::saved_runs(&env.paths).is_empty());
     }
 }

@@ -1,5 +1,5 @@
 //! The Security screen (design sections 5.4 and 11): a list of checks with a status dot, a
-//! title and one plain sentence each, "New" and "Changed" marks against last week, amber
+//! title and one plain sentence each, "New" and "Changed" marks against the last check, amber
 //! buttons that open the right System Settings page, and under the Login items and Chrome
 //! extensions checks the items themselves.
 //!
@@ -352,14 +352,19 @@ pub fn security_rows(state: &SecurityState) -> Vec<SecRow> {
     rows
 }
 
-/// The line under the headline: what the marks mean, or that this is the first check, and how
-/// many checks could not run. When the checks ran is in the status bar.
-pub fn summary_line(report: &SecurityReport) -> String {
+/// The line under the headline: which check the marks compare with, or that this is the first
+/// check, and how many checks could not run. When this check ran is in the status bar.
+pub fn summary_line(report: &SecurityReport, now: u64) -> String {
     let mut parts = Vec::new();
     if report.first_run {
         parts.push(FIRST_CHECK_SENTENCE.to_string());
+    } else if let Some(at) = report.compared_at {
+        parts.push(format!(
+            "New and changed since your check {}",
+            format::ago(now, at)
+        ));
     } else if report.compared_to.is_some() {
-        parts.push("New and changed items are marked".to_string());
+        parts.push("New and changed since your last check".to_string());
     }
     let gray = report.gray();
     if gray > 0 {
@@ -847,7 +852,7 @@ impl TidyView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .child(summary_strip(t, report))
+                    .child(summary_strip(t, report, now))
                     .child(list)
                     .into_any_element()
             }
@@ -876,7 +881,7 @@ impl TidyView {
 }
 
 /// 64 pt: the headline as the Figure and one line under it.
-fn summary_strip(t: &Theme, report: &SecurityReport) -> Div {
+fn summary_strip(t: &Theme, report: &SecurityReport, now: u64) -> Div {
     div()
         .debug_selector(|| "summary".to_string())
         .flex_none()
@@ -905,7 +910,7 @@ fn summary_strip(t: &Theme, report: &SecurityReport) -> Div {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(summary_line(report)),
+                .child(summary_line(report, now)),
         )
 }
 
@@ -1092,15 +1097,21 @@ mod tests {
     #[test]
     fn the_summary_line_says_first_check_or_compares() {
         let mut r = report();
-        assert_eq!(summary_line(&r), "");
+        let now = r.at;
+        assert_eq!(summary_line(&r, now), "");
         r.first_run = true;
-        assert_eq!(summary_line(&r), FIRST_CHECK_SENTENCE);
+        assert_eq!(summary_line(&r, now), FIRST_CHECK_SENTENCE);
         r.first_run = false;
-        r.compared_to = Some("2026-W42".into());
+        r.compared_to = Some("20261021-090000".into());
+        assert_eq!(
+            summary_line(&r, now),
+            "New and changed since your last check"
+        );
+        r.compared_at = Some(now - 2 * 86_400);
         r.checks[5] = CheckResult::new(CheckId::MacosUpdates, Status::Gray, "Checked on demand.");
         assert_eq!(
-            summary_line(&r),
-            "New and changed items are marked \u{b7} 1 could not be checked"
+            summary_line(&r, now),
+            "New and changed since your check 2 days ago \u{b7} 1 could not be checked"
         );
     }
 

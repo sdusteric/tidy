@@ -1,4 +1,4 @@
-//! Week over week: marks what changed since the previous saved report (design section 5.4).
+//! Check over check: marks what changed since the previous saved report (design section 5.4).
 //!
 //! - A login item or Chrome extension whose key was not in the previous report is New.
 //! - A login item whose program or signer differs is Changed.
@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::model::{CheckId, Mark, SecurityReport};
 
 /// Marks New and Changed login items and New extensions against `previous`, and sets
-/// `first_run` and `compared_to`.
+/// `first_run`, `compared_to` and `compared_at`.
 pub fn mark_items(report: &mut SecurityReport, previous: Option<&SecurityReport>) {
     for item in &mut report.login_items {
         item.mark = None;
@@ -25,10 +25,12 @@ pub fn mark_items(report: &mut SecurityReport, previous: Option<&SecurityReport>
     let Some(prev) = previous else {
         report.first_run = true;
         report.compared_to = None;
+        report.compared_at = None;
         return;
     };
     report.first_run = false;
-    report.compared_to = Some(prev.week.clone());
+    report.compared_to = Some(prev.id.clone());
+    report.compared_at = Some(prev.at);
     let before: HashMap<String, _> = prev.login_items.iter().map(|i| (i.key(), i)).collect();
     for item in &mut report.login_items {
         item.mark = match before.get(&item.key()) {

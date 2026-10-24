@@ -2129,7 +2129,8 @@ fn agent(
 fn security_report(first_run: bool) -> SecurityReport {
     let mut r = SecurityReport::empty(NOW - 120);
     r.first_run = first_run;
-    r.compared_to = (!first_run).then(|| "2026-W42".to_string());
+    r.compared_to = (!first_run).then(|| "20261021-090000".to_string());
+    r.compared_at = (!first_run).then_some(NOW - 2 * 86_400);
     let mut firewall = check(
         CheckId::Firewall,
         Status::Amber,
@@ -2272,11 +2273,11 @@ fn rows_have_dots_marks_and_amber_buttons_but_gray_rows_have_none(cx: &mut TestA
     assert!(!has(cx, "sec-mark:FileVault"));
     // The summary says what to look at and what was compared.
     let line = model(cx).read_with(cx, |m, _| {
-        crate::views::security::summary_line(m.security.report.as_ref().unwrap())
+        crate::views::security::summary_line(m.security.report.as_ref().unwrap(), NOW)
     });
     assert_eq!(
         line,
-        "New and changed items are marked \u{b7} 1 could not be checked"
+        "New and changed since your check 2 days ago \u{b7} 1 could not be checked"
     );
     let status = model(cx).read_with(cx, |m, _| {
         crate::views::security::status_line(m.security.report.as_ref().unwrap(), NOW)
@@ -2305,11 +2306,11 @@ fn the_first_run_says_so(cx: &mut TestAppContext) {
     let (h, _view, cx) = on_security(cx);
     push(&h, cx, vec![Event::SecurityResult(security_report(true))]);
     let line = model(cx).read_with(cx, |m, _| {
-        crate::views::security::summary_line(m.security.report.as_ref().unwrap())
+        crate::views::security::summary_line(m.security.report.as_ref().unwrap(), NOW)
     });
     assert_eq!(
         line,
-        "This is your first check. Next week Tidy will show what changed. \u{b7} 1 could not be checked"
+        "This is your first check. Next time Tidy will show what changed. \u{b7} 1 could not be checked"
     );
     assert!(!has(cx, "sec-mark:Firewall") && !has(cx, "sec-login-mark:user:com.example.sync"));
 }
@@ -2550,7 +2551,7 @@ fn finished_checkup() -> Checkup {
             review_bytes: 2 * GB,
         }),
         security: Some(CheckupSecurity {
-            week: "2026-W43".into(),
+            id: "20261023-140211".into(),
             amber: 2,
             gray: 1,
             first_run: false,

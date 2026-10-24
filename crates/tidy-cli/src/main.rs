@@ -19,7 +19,7 @@
 //! destructive commands (`clean`, `trash`, `empty-trash`) refuse with 5 unless `TIDY_HOME` is
 //! set or `--real` is given (C23), and they take the instance lock; the read-only ones never
 //! do, so they work while the app runs. `memory`, `security` and `checkup` move nothing:
-//! `security` and `checkup` save their results (`security/<week>.json`, `checkups.jsonl`)
+//! `security` and `checkup` save their results (`security/<id>.json`, one per run, and `checkups.jsonl`)
 //! in Tidy's data folder, which is under `TIDY_HOME` when it is set. Without
 //! `--include-updates`, `softwareupdate` never runs.
 //!
@@ -905,7 +905,7 @@ mod tests {
                 review_bytes: 0,
             }),
             security: Some(CheckupSecurity {
-                week: "2026-W43".into(),
+                id: "20261023-140211".into(),
                 amber: 2,
                 gray: 1,
                 first_run: true,

@@ -16,7 +16,7 @@
 //! - [`Command::Shutdown`] stops the scans, asks a running action to stop after its current
 //!   item, waits a short grace for both, then replies. A running check up is told to stop
 //!   before its next part and then writes nothing; a Security run is left to finish on its
-//!   own thread (it only reads, then saves its week's file atomically).
+//!   own thread (it only reads, then saves its run's file atomically).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -1385,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn security_streams_each_signature_saves_the_week_and_compares_the_next() {
+    fn security_streams_each_signature_saves_the_run_and_compares_the_next() {
         let mut m = running_m2(Arc::new(FixedProbe::default()));
         assert_eq!(m.r.rt.block_on(m.r.core.last_security()), None);
         m.r.core.send(Command::RunSecurity {
@@ -1421,12 +1421,12 @@ mod tests {
         let saved = m.r.rt.block_on(m.r.core.last_security()).unwrap();
         assert_eq!(&saved, report);
         assert_eq!(
-            security::saved_weeks(&m.r.env.paths),
-            [crate::model::iso_week_id(TEST_NOW)]
+            security::saved_runs(&m.r.env.paths),
+            [crate::model::run_id(TEST_NOW)]
         );
 
-        // A week later a new agent shows up: it is New, and the run compares with last week.
-        m.clock.advance(7 * 86_400);
+        // An hour later a new agent shows up: it is New, and the run compares with the last.
+        m.clock.advance(3_600);
         std::fs::copy(
             user_agents(&m.r._tmp.path().canonicalize().unwrap()).join("com.example.ls.plist"),
             user_agents(&m.r._tmp.path().canonicalize().unwrap()).join("com.example.new.plist"),
@@ -1440,8 +1440,9 @@ mod tests {
             unreachable!()
         };
         assert!(!next.first_run);
-        assert_eq!(next.compared_to.as_deref(), Some(report.week.as_str()));
-        assert_eq!(security::saved_weeks(&m.r.env.paths).len(), 2);
+        assert_eq!(next.compared_to.as_deref(), Some(report.id.as_str()));
+        assert_eq!(next.compared_at, Some(report.at));
+        assert_eq!(security::saved_runs(&m.r.env.paths).len(), 2);
     }
 
     #[test]

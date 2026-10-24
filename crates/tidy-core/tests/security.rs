@@ -19,7 +19,7 @@ use tidy_core::env::{
 };
 use tidy_core::model::{
     CheckId, CheckResult, LaunchKind, Mark, Scope, SecurityReport, SettingsLink, Signer, Status,
-    iso_week_id,
+    run_id,
 };
 use tidy_core::security::codesign::{self, Signatures};
 use tidy_core::security::launchd::{self, LaunchdRoots};
@@ -740,21 +740,21 @@ fn chrome_secure_preferences_list_the_extensions_people_installed() {
     }
 }
 
-// ---------- Week over week ----------
+// ---------- Check over check ----------
 
 #[test]
-fn week_over_week_marks_new_and_changed_and_the_first_run_says_so() {
+fn each_check_marks_new_and_changed_against_the_last_and_the_first_run_says_so() {
     let sb = Sandbox::new();
     let clock = Arc::new(FixedClock::new(TEST_NOW));
     let runner = Arc::new(replay("commands-captured.json"));
     let env = sb.env(clock.clone(), runner.clone());
     let sources = sb.sources();
 
-    // Week 1: the first check.
+    // The first check.
     let first = security::run_and_save_with(&env, &sources, false, &mut no_progress());
     assert!(first.first_run);
     assert_eq!(first.compared_to, None);
-    assert_eq!(first.week, iso_week_id(TEST_NOW));
+    assert_eq!(first.id, run_id(TEST_NOW));
     assert!(first.checks.iter().all(|c| c.mark.is_none()));
     assert!(first.login_items.iter().all(|i| i.mark.is_none()));
     assert!(first.extensions.iter().all(|e| e.mark.is_none()));
@@ -766,10 +766,10 @@ fn week_over_week_marks_new_and_changed_and_the_first_run_says_so() {
     assert_eq!(row(&first, CheckId::LoginItems).status, Status::Green);
     assert_eq!(row(&first, CheckId::XProtect).status, Status::Green);
     assert_eq!(row(&first, CheckId::MacosUpdates).status, Status::Gray);
-    assert!(env.paths.security_file(&first.week).is_file());
+    assert!(env.paths.security_file(&first.id).is_file());
     assert_eq!(security::latest_report(&env.paths).as_ref(), Some(&first));
 
-    // A week later: a new agent, a changed program, a new extension, and FileVault and the
+    // The next check, a week later: a new agent, a changed program, a new extension, and FileVault and the
     // firewall flipped.
     clock.advance(7 * DAY);
     set_mtime(&sb.xprotect, clock.unix_now() - DAY);
@@ -795,8 +795,8 @@ fn week_over_week_marks_new_and_changed_and_the_first_run_says_so() {
 
     let second = security::run_and_save_with(&env, &sources, false, &mut no_progress());
     assert!(!second.first_run);
-    assert_eq!(second.compared_to.as_deref(), Some(first.week.as_str()));
-    assert_ne!(second.week, first.week);
+    assert_eq!(second.compared_to.as_deref(), Some(first.id.as_str()));
+    assert_ne!(second.id, first.id);
 
     // New items first.
     assert_eq!(second.login_items[0].label, "com.example.added");
@@ -826,7 +826,11 @@ fn week_over_week_marks_new_and_changed_and_the_first_run_says_so() {
     let li = row(&second, CheckId::LoginItems);
     assert_eq!(li.status, Status::Amber, "{li:?}");
     assert!(li.sentence.contains("1 new since the last check"), "{li:?}");
-    assert_eq!(li.mark, Some(Mark::Changed), "green last week, amber now");
+    assert_eq!(
+        li.mark,
+        Some(Mark::Changed),
+        "green at the last check, amber now"
+    );
     let ce = row(&second, CheckId::ChromeExtensions);
     assert_eq!(ce.status, Status::Amber, "{ce:?}");
     assert!(
@@ -849,25 +853,62 @@ fn week_over_week_marks_new_and_changed_and_the_first_run_says_so() {
         assert_plain(c);
     }
 
-    // A second run in the same week still compares with the week before, and replaces the
-    // week's file.
+    // A run a day later compares with the run just before it, not with the first: what was
+    // new or changed then is not marked again.
     clock.advance(DAY);
     let again = security::run_and_save_with(&env, &sources, false, &mut no_progress());
-    assert_eq!(again.week, second.week);
-    assert_eq!(again.compared_to.as_deref(), Some(first.week.as_str()));
-    assert_eq!(again.login_items[0].mark, Some(Mark::New));
+    assert_eq!(again.compared_to.as_deref(), Some(second.id.as_str()));
+    assert_eq!(again.compared_at, Some(second.at));
+    assert!(again.login_items.iter().all(|i| i.mark.is_none()));
+    assert!(again.extensions.iter().all(|e| e.mark.is_none()));
+    // Login items and extensions were amber only for what was new, so they turn green, and
+    // that is the one change.
+    let marked: Vec<_> = again
+        .checks
+        .iter()
+        .filter(|c| c.mark.is_some())
+        .map(|c| (c.id, c.status))
+        .collect();
     assert_eq!(
-        security::saved_weeks(&env.paths),
-        vec![first.week.clone(), second.week.clone()]
+        marked,
+        [
+            (CheckId::LoginItems, Status::Green),
+            (CheckId::ChromeExtensions, Status::Green)
+        ]
+    );
+    assert_eq!(
+        security::saved_runs(&env.paths),
+        vec![first.id.clone(), second.id.clone(), again.id.clone()]
     );
     assert_eq!(
         security::latest_report(&env.paths).map(|r| r.at),
         Some(again.at)
     );
     assert_eq!(
-        security::previous_report(&env.paths, &second.week).map(|r| r.week),
-        Some(first.week.clone())
+        security::previous_report(&env.paths, &again.id).map(|r| r.id),
+        Some(second.id.clone())
     );
+}
+
+#[test]
+fn only_the_newest_runs_are_kept() {
+    let sb = Sandbox::new();
+    let env = sb.env(
+        Arc::new(FixedClock::new(TEST_NOW)),
+        Arc::new(replay("commands-captured.json")),
+    );
+    let n = security::KEEP_RUNS as u64 + 2;
+    for i in 0..n {
+        security::save_report(&env.paths, &SecurityReport::empty(TEST_NOW + i * 60)).unwrap();
+    }
+    let runs = security::saved_runs(&env.paths);
+    assert_eq!(runs.len(), security::KEEP_RUNS);
+    assert_eq!(
+        runs[0],
+        run_id(TEST_NOW + 2 * 60),
+        "the two oldest are gone"
+    );
+    assert_eq!(runs.last(), Some(&run_id(TEST_NOW + (n - 1) * 60)));
 }
 
 #[test]

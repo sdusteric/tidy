@@ -144,7 +144,7 @@ A list of checks, each with a status dot (green, amber, gray for "could not chec
 
 Login items list "new since last check" first. Each item shows label, program path, signer (team name or "Apple" or "Not signed"), notarized yes or no (from `SecStaticCodeCheckValidity` and `SecAssessment`), and whether it runs at load. Signature checks run in the background, one item at a time.
 
-The first run has nothing to compare against and says "This is your first check. Next week Tidy will show what changed." Gray items say why ("Tidy couldn't read this without Full Disk Access") with no button that asks for access.
+The first run has nothing to compare against and says "This is your first check. Next time Tidy will show what changed." Gray items say why ("Tidy couldn't read this without Full Disk Access") with no button that asks for access.
 
 Copy rules: no "threat", "infected", "danger" or "risk score". An amber item says what is off and what it means in one sentence, for example "Firewall is off. Your Mac accepts incoming connections from apps that ask for them. Most home networks are fine either way."
 
@@ -532,11 +532,11 @@ A full run has FAIL 0 and SKIP 0. `ACCEPT_SKIP_GATES=1` and `ACCEPT_SKIP_BUNDLE=
 
 **tidy-core.**
 - `memory`: `MemoryProbe` seam (`LibcMemory` in production, `FixedMemory` for tests and `TIDY_TEST_MEMORY`). `group` is pure. Pressure is `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), swap is `vm.swapusage`, and Compressed is "Pages occupied by compressor" times the page size, the same figure `vm_stat` prints.
-- `security`: `system` (the status commands and `softwareupdate --list`), `launchd` (plist parsing, XML and binary), `codesign` (signer, notarized), `chrome` (Secure Preferences), `diff` (the week over week marks), `cf` (Core Foundation helpers). Seam: `CommandRunner` (`SystemRunner`, `ReplayRunner` for `TIDY_TEST_COMMANDS`). `SystemRunner` refuses `softwareupdate` under `TIDY_HOME` and in tests.
+- `security`: `system` (the status commands and `softwareupdate --list`), `launchd` (plist parsing, XML and binary), `codesign` (signer, notarized), `chrome` (Secure Preferences), `diff` (the marks against the last check), `cf` (Core Foundation helpers). Seam: `CommandRunner` (`SystemRunner`, `ReplayRunner` for `TIDY_TEST_COMMANDS`). `SystemRunner` refuses `softwareupdate` under `TIDY_HOME` and in tests.
 - `checkup` and `reminder`: the check up log and the reminder date math (`TIDY_TEST_TZ` fixes the zone).
 - Commands: `SnapshotMemory`, `RunSecurity { include_updates }`, `LastSecurity`, `RunCheckup { include_updates }`, `LastCheckup`, `NextReminder`. Events: `MemorySnapshot`, `SecurityProgress`, `SecurityResult`, `CheckupDone`.
 - Settings version 2 adds `reminder_enabled` and `include_updates`, both off.
-- Files in the data folder: `security/<ISO week>.json` (for example `2026-W43.json`; a second run in the same week replaces that file, so it compares with nothing and still reports the first check) and `checkups.jsonl`.
+- Files in the data folder: `security/<id>.json`, one per run, named for its UTC time (for example `20261023-140211.json`), and `checkups.jsonl`. Each run marks New and Changed against the run just before it, whenever that was, and the summary line says when ("New and changed since your check 2 days ago"). The newest 100 runs are kept. Security runs only when asked: the Run Check and Rescan buttons, a check up, or `tidyctl`. (Changed 2026-10-24 at the user's request; M2 first saved one file per ISO week.)
 
 **tidy-app.** `views/{checkup, memory, security}`; `macos.rs` holds the `Terminator` (`NSRunningApplication` terminate and forceTerminate) and `Notifier` (`UNUserNotificationCenter`) traits with `SystemTerminator`, `SystemNotifier` and the fakes the tests use. The app tests never construct the system ones.
 

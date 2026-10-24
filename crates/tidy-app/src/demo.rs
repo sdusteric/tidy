@@ -788,7 +788,8 @@ pub fn security_report(first_run: bool) -> SecurityReport {
     let marked = |m: Mark| (!first_run).then_some(m);
     let mut r = SecurityReport::empty(NOW - 2 * 60);
     r.first_run = first_run;
-    r.compared_to = (!first_run).then(|| "2026-W42".to_string());
+    r.compared_to = (!first_run).then(|| "20261021-090000".to_string());
+    r.compared_at = (!first_run).then_some(NOW - 2 * 86_400);
     r.updates_checked = false;
 
     let green = |id, sentence: &str| CheckResult::new(id, Status::Green, sentence);
@@ -801,13 +802,13 @@ pub fn security_report(first_run: bool) -> SecurityReport {
     let mut login = CheckResult::new(
         CheckId::LoginItems,
         Status::Amber,
-        "2 of 4 items need a look: one is new since last week and one is not signed.",
+        "2 of 4 items need a look: one is new since the last check and one is not signed.",
     );
     login.mark = marked(Mark::New);
     let mut chrome = CheckResult::new(
         CheckId::ChromeExtensions,
         Status::Amber,
-        "1 extension was added since last week. Open chrome://extensions in Chrome to review it.",
+        "1 extension was added since the last check. Open chrome://extensions in Chrome to review it.",
     );
     chrome.mark = marked(Mark::New);
     let mut xprotect = green(

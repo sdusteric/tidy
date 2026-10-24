@@ -12,7 +12,7 @@ The sidebar has five screens, in this order, reachable with Cmd-1 to Cmd-5:
 | Cleanup | Cmd-2 | Space you can get back, in five groups. Safe items are ticked, Review items are not. |
 | Large files | Cmd-3 | The biggest files and folders, or the ones not opened lately, with Reveal and Move to Trash. |
 | Memory | Cmd-4 | A verdict from memory pressure, three figures (Pressure, Swap used, Compressed), a pressure graph and the top apps by memory with a polite Quit. The only screen that polls: every 2 seconds, and only while it is visible. |
-| Security | Cmd-5 | FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against last week. It never asks for a permission. |
+| Security | Cmd-5 | FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against your last check. It never asks for a permission. |
 
 Cmd-R runs the current screen again.
 
@@ -28,7 +28,7 @@ It is a Rust + GPUI app built on the same stack and look as Haul. The design doc
 
 | Crate | Kind | Contents |
 |---|---|---|
-| `crates/tidy-core` | library, no UI | The model, the command and event API, the environment and its test seams (including `MemoryProbe` and `CommandRunner`), paths, settings, history storage, the instance lock, the Trash guard, the walker, the memory engine, the Security checks and their week-over-week diff, the check up log, the reminder date math and the core actor |
+| `crates/tidy-core` | library, no UI | The model, the command and event API, the environment and its test seams (including `MemoryProbe` and `CommandRunner`), paths, settings, history storage, the instance lock, the Trash guard, the walker, the memory engine, the Security checks and their diff against the last check, the check up log, the reminder date math and the core actor |
 | `crates/tidy-app` | library + `tidy` binary | The GPUI app: sidebar, the five screens, History sheet, dialogs, the Quit and notification wrappers (`Terminator`, `Notifier`), demo scenarios |
 | `crates/tidy-cli` | `tidyctl` binary | A headless driver of tidy-core that prints one JSON object per line |
 | `crates/tidy-fixtures` | library + `tidy-fixture-home` binary | Fake home folders with exact sizes and dates, the results the scans must produce, and fake Security command outputs and a fake process table |
@@ -56,7 +56,7 @@ TIDY_HOME="$D/tidy" TIDY_SCAN_ROOT="$D/home" TIDY_TEST_NOW=<printed> \
   TIDY_TEST_RUNNING=com.google.Chrome cargo run -p tidy-cli -- scan
 ```
 
-Memory, Security and Check up from the command line. `memory` and `security` only read; `checkup` writes `checkups.jsonl` and the week file into Tidy's data folder, so always set `TIDY_HOME`:
+Memory, Security and Check up from the command line. `memory` and `security` only read; `checkup` writes `checkups.jsonl` and the run's Security file into Tidy's data folder, so always set `TIDY_HOME`:
 
 ```sh
 T=$(mktemp -d)
@@ -77,7 +77,7 @@ TIDY_HOME="$D/tidy" TIDY_SCAN_ROOT="$D/home" TIDY_TEST_NOW=<printed> cargo run -
 | `trash PATH...`, `empty-trash` | Move paths to the Trash, delete what Tidy moved there (same rule) |
 | `history [--last N]` | Print history entries |
 | `memory` | One memory snapshot with the apps grouped under their responsible app |
-| `security [--include-updates]` | The Security checks, saved as `data/security/<week>.json` |
+| `security [--include-updates]` | The Security checks, saved as `data/security/<id>.json`, one file per run |
 | `checkup [--include-updates]` | Cleanup scan, Security checks and a memory snapshot; appends one entry to `data/checkups.jsonl` |
 
 The full offline acceptance run is `scripts/accept.sh offline`. It prints PASS, FAIL or SKIP for AC1 to AC9 (M1 and M2) and a summary; a full run has FAIL 0 and SKIP 0. AC6 and AC7 read this Mac, read-only (`sysctl`, `vm_stat`, `top`, `fdesetup`, `socketfilterfw`, `spctl`, `csrutil`, the launch agent folders and signatures); nothing is quit, signalled or asked for.

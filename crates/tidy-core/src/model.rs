@@ -660,6 +660,7 @@ impl HistoryEntry {
 
 /// (year, month, day) to days since 1970-01-01 in the proleptic Gregorian calendar (Howard
 /// Hinnant's `days_from_civil`).
+#[cfg(test)]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -670,18 +671,18 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The ISO 8601 week of Unix seconds `secs`, in UTC, as `YYYY-Www` (for example
-/// `2026-W43`). Weeks start on Monday and week 1 holds the year's first Thursday, so the
-/// days around New Year can belong to the neighbouring year. Security results are saved
-/// one file per week under this name (see [`crate::paths::AppPaths::security_file`]).
-pub fn iso_week_id(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    // 1970-01-01 was a Thursday; Monday is 1 and Sunday is 7.
-    let weekday = (days + 3).rem_euclid(7) + 1;
-    let thursday = days - weekday + 4;
-    let (year, _, _) = civil_from_days(thursday);
-    let week = (thursday - days_from_civil(year, 1, 1)) / 7 + 1;
-    format!("{year:04}-W{week:02}")
+/// The id of a Security run taken at Unix seconds `secs`: its UTC time as `YYYYMMDD-HHMMSS`
+/// (for example `20261023-140211`). Ids sort in time order, and each run is saved under its
+/// id (see [`crate::paths::AppPaths::security_file`]).
+pub fn run_id(secs: u64) -> String {
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    let t = secs % 86_400;
+    format!(
+        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        t / 3600,
+        t / 60 % 60,
+        t % 60
+    )
 }
 
 // ---------- Memory (M2) ----------
@@ -951,7 +952,7 @@ impl MemorySnapshot {
 
 /// What the first run says, since it has nothing to compare against (design section 5.4).
 pub const FIRST_CHECK_SENTENCE: &str =
-    "This is your first check. Next week Tidy will show what changed.";
+    "This is your first check. Next time Tidy will show what changed.";
 
 /// The checks of design section 5.4, in the order the Security screen lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1082,13 +1083,13 @@ impl SettingsLink {
     }
 }
 
-/// How a row compares with last week's results.
+/// How a row compares with the last check's results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mark {
-    /// Not in last week's results.
+    /// Not in the last check's results.
     New,
-    /// In last week's results with a different status (a check) or program or signer (a
+    /// In the last check's results with a different status (a check) or program or signer (a
     /// login item).
     Changed,
 }
@@ -1217,7 +1218,7 @@ pub struct LoginItem {
 }
 
 impl LoginItem {
-    /// The key that matches an item with last week's: scope and label.
+    /// The key that matches an item with the last check's: scope and label.
     pub fn key(&self) -> String {
         let scope = match self.scope {
             Scope::User => "user",
@@ -1257,25 +1258,30 @@ pub struct ChromeExtension {
 }
 
 impl ChromeExtension {
-    /// The key that matches an extension with last week's: profile and id.
+    /// The key that matches an extension with the last check's: profile and id.
     pub fn key(&self) -> String {
         format!("{}/{}", self.profile, self.id)
     }
 }
 
-/// One Security run, saved as `security/<week>.json`.
+/// One Security run, saved as `security/<id>.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityReport {
-    /// The ISO week of `at` ([`iso_week_id`]), the file name the report is saved under.
-    pub week: String,
+    /// [`run_id`] of `at`, the file name the report is saved under. Reports saved before
+    /// M2 shipped named this `week`.
+    #[serde(alias = "week")]
+    pub id: String,
     /// Unix seconds.
     pub at: u64,
-    /// No earlier week to compare against: the screen shows [`FIRST_CHECK_SENTENCE`] and
+    /// No earlier check to compare against: the screen shows [`FIRST_CHECK_SENTENCE`] and
     /// nothing is marked.
     pub first_run: bool,
-    /// The week the marks compare against, when there was one.
+    /// The id of the run the marks compare against, when there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compared_to: Option<String>,
+    /// When that run happened (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compared_at: Option<u64>,
     /// Whether `softwareupdate --list` ran. When false the macOS updates row is gray and
     /// says it is checked on demand.
     pub updates_checked: bool,
@@ -1290,7 +1296,7 @@ impl SecurityReport {
     /// A report with no rows, taken at `at`.
     pub fn empty(at: u64) -> SecurityReport {
         SecurityReport {
-            week: iso_week_id(at),
+            id: run_id(at),
             at,
             ..SecurityReport::default()
         }
@@ -1356,8 +1362,9 @@ impl CheckupCleanup {
 /// The Security card of a check up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckupSecurity {
-    /// The report's week, so the card can open that report.
-    pub week: String,
+    /// The report's id, so the card can open that report.
+    #[serde(alias = "week")]
+    pub id: String,
     pub amber: usize,
     pub gray: usize,
     pub first_run: bool,
@@ -1366,7 +1373,7 @@ pub struct CheckupSecurity {
 impl CheckupSecurity {
     pub fn from_report(report: &SecurityReport) -> CheckupSecurity {
         CheckupSecurity {
-            week: report.week.clone(),
+            id: report.id.clone(),
             amber: report.amber(),
             gray: report.gray(),
             first_run: report.first_run,
@@ -1713,16 +1720,12 @@ mod tests {
     // ----- M2 -----
 
     #[test]
-    fn iso_weeks() {
-        // 2026-10-23 (TEST_NOW) is a Friday in week 43.
-        assert_eq!(iso_week_id(1_792_764_131), "2026-W43");
-        assert_eq!(iso_week_id(0), "1970-W01", "a Thursday");
-        // Monday 2026-10-19 00:00 UTC starts week 43; the Sunday before ends week 42.
-        assert_eq!(iso_week_id(1_792_368_000), "2026-W43");
-        assert_eq!(iso_week_id(1_792_367_999), "2026-W42");
-        // Around New Year: 2021-01-03 (Sunday) is in 2020-W53, 2024-12-30 in 2025-W01.
-        assert_eq!(iso_week_id(1_609_632_000), "2020-W53");
-        assert_eq!(iso_week_id(1_735_516_800), "2025-W01");
+    fn run_ids() {
+        // TEST_NOW is 2026-10-23 14:02:11 UTC.
+        assert_eq!(run_id(1_792_764_131), "20261023-140211");
+        assert_eq!(run_id(0), "19700101-000000");
+        assert_eq!(run_id(86_399), "19700101-235959");
+        assert!(run_id(1_792_764_131) < run_id(1_792_764_132));
         for (y, m, d) in [(1970, 1, 1), (2000, 2, 29), (2024, 12, 31), (2026, 10, 23)] {
             assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
         }
@@ -1866,7 +1869,7 @@ mod tests {
     #[test]
     fn security_report_counts_and_headlines() {
         let mut r = SecurityReport::empty(1_792_764_131);
-        assert_eq!(r.week, "2026-W43");
+        assert_eq!(r.id, "20261023-140211");
         assert_eq!(r.headline(), "All good");
         r.checks = vec![
             CheckResult::new(CheckId::FileVault, Status::Green, "On."),
@@ -1880,7 +1883,7 @@ mod tests {
         assert_eq!(r.headline(), "2 things to look at");
         assert_eq!(r.check(CheckId::Sip).unwrap().status, Status::Amber);
         let c = CheckupSecurity::from_report(&r);
-        assert_eq!((c.amber, c.gray, c.week.as_str()), (2, 1, "2026-W43"));
+        assert_eq!((c.amber, c.gray, c.id.as_str()), (2, 1, "20261023-140211"));
         assert_eq!(c.headline(), "2 things to look at");
         let back: SecurityReport =
             serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();

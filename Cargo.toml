@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/tidy-core", "crates/tidy-app", "crates/tidy-cli", "crates/tidy-fixtures"]
+
+# scripts/bundle.sh reads this version for CFBundleShortVersionString.
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+# Pins copied from Haul (../haul/Cargo.toml) so the lockfile and the gpui screenshot path stay
+# the same. Tidy has no network crates: no librqbit, reqwest, axum or tower-http.
+[workspace.dependencies]
+tokio = { version = "=1.54.0", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "=1.0.154"
+libc = "0.2"
+dirs = "=7.0.0"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+gpui-kit = "=0.8.0"
+objc2 = "=0.6.5"
+block2 = "0.6"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder", "NSWorkspace", "NSRunningApplication", "block2", "objc2-uniform-type-identifiers"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSString", "NSThread", "NSURL", "NSError", "NSBundle", "NSArray", "NSProcessInfo", "NSFileManager", "NSDictionary", "NSValue"] }
+objc2-uniform-type-identifiers = { version = "0.3", features = ["UTType"] }
+tempfile = "3"
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Smaller, faster release binary: whole-program optimization trims code the app never runs,
+# which also lowers the resident memory of the running app.
+[profile.release]
+lto = "fat"
+codegen-units = 1

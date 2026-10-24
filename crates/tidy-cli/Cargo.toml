@@ -1,0 +1,20 @@
+[package]
+name = "tidy-cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "tidyctl"
+path = "src/main.rs"
+
+[dependencies]
+tidy-core = { path = "../tidy-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tidy-fixtures = { path = "../tidy-fixtures" }
+tempfile.workspace = true
+serde_json.workspace = true

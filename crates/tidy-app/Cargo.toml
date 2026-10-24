@@ -1,0 +1,42 @@
+[package]
+name = "tidy-app"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tidy"
+path = "src/main.rs"
+
+[dependencies]
+tidy-core = { path = "../tidy-core" }
+gpui-kit.workspace = true
+tokio.workspace = true
+objc2.workspace = true
+block2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation = { workspace = true, features = ["std"] }
+objc2-uniform-type-identifiers.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+# Only for the `shot-export` feature (offscreen demo screenshots, see demo.rs).
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+gpui = { package = "gpui-pre", version = "=0.3.9", optional = true, features = ["test-support"] }
+gpui-macos-shot = { package = "gpui-pre-macos", version = "=0.3.9", optional = true, features = ["test-support"] }
+
+[features]
+# Builds a demo-only screenshot path: with TIDY_DEMO and TIDY_DEMO_SHOT=<file.png>, the app
+# renders its window's first frame offscreen with Metal and writes it as a PNG. Needs gpui's
+# test-support (Window::render_to_image). Never enabled in the shipped bundle; scripts/shots.sh
+# builds a separate bundle with it for SHOTS_RENDER=1.
+# (gpui-kit/test-support would also pull gpui-fast, whose pins conflict with the lockfile.)
+shot-export = ["dep:gpui", "dep:gpui-macos-shot", "dep:image"]
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+tempfile.workspace = true

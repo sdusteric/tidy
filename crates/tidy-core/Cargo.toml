@@ -1,0 +1,24 @@
+[package]
+name = "tidy-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Move to Trash goes through NSFileManager (see trash.rs).
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["std"] }
+# Package detection asks UTType about unknown folder extensions (see packages.rs).
+objc2-uniform-type-identifiers.workspace = true
+
+[dev-dependencies]
+tidy-fixtures = { path = "../tidy-fixtures" }
+tempfile.workspace = true
+tracing-subscriber.workspace = true

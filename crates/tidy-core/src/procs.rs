@@ -133,7 +133,7 @@ pub fn uses_path(running: &RunningSet, path: &Path) -> bool {
 
 // ---------- libproc ----------
 
-fn list_pids() -> Option<Vec<i32>> {
+pub(crate) fn list_pids() -> Option<Vec<i32>> {
     const PROC_ALL_PIDS: u32 = 1;
     // SAFETY: proc_listpids with a null buffer returns the size needed; with a buffer it
     // writes at most `buffersize` bytes of i32 pids and returns the bytes written.
@@ -160,7 +160,7 @@ fn list_pids() -> Option<Vec<i32>> {
     }
 }
 
-fn pid_path(pid: i32) -> Option<String> {
+pub(crate) fn pid_path(pid: i32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is `buffersize` bytes; the call returns the length it wrote.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
@@ -171,7 +171,7 @@ fn pid_path(pid: i32) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn pid_name(pid: i32) -> Option<String> {
+pub(crate) fn pid_name(pid: i32) -> Option<String> {
     let mut buf = [0u8; 64];
     // SAFETY: the buffer is `buffersize` bytes; the call returns the length it wrote.
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };

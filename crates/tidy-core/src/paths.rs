@@ -1,8 +1,8 @@
 //! Where Tidy keeps its files, and which parts of the home folder it never looks at.
 //!
 //! With `TIDY_HOME` set every Tidy folder moves under that one directory (table 8.1 of the
-//! design): `data/` (settings, history, lock and the stand-in Trash), `cache/` (the saved
-//! scans) and `logs/`. Without it the folders are the usual macOS ones under `~/Library`.
+//! design): `data/` (settings, history, lock, the stand-in Trash, and from M2 the weekly
+//! security results and `checkups.jsonl`), `cache/` (the saved scans) and `logs/`. Without it the folders are the usual macOS ones under `~/Library`.
 
 use std::ffi::OsString;
 use std::io;
@@ -102,6 +102,24 @@ impl AppPaths {
     /// The folder `DirTrash` moves items into: `data/trash`. Only used under `TIDY_HOME`.
     pub fn dir_trash(&self) -> PathBuf {
         self.data.join("trash")
+    }
+
+    /// The folder of saved Security runs: `data/security`, one file per ISO week.
+    pub fn security_dir(&self) -> PathBuf {
+        self.data.join("security")
+    }
+
+    /// The saved Security run of one ISO week (`2026-W43`, see
+    /// [`crate::model::iso_week_id`]): `data/security/2026-W43.json`. A second run in the same
+    /// week replaces it; the diff compares against the latest earlier week.
+    pub fn security_file(&self, week: &str) -> PathBuf {
+        self.security_dir().join(format!("{week}.json"))
+    }
+
+    /// One line per check up: `data/checkups.jsonl`. The weekly reminder counts from the last
+    /// line.
+    pub fn checkups_file(&self) -> PathBuf {
+        self.data.join("checkups.jsonl")
     }
 }
 
@@ -240,6 +258,15 @@ mod tests {
             PathBuf::from("/tmp/th/cache/last-large.json")
         );
         assert_eq!(p.dir_trash(), PathBuf::from("/tmp/th/data/trash"));
+        assert_eq!(p.security_dir(), PathBuf::from("/tmp/th/data/security"));
+        assert_eq!(
+            p.security_file("2026-W43"),
+            PathBuf::from("/tmp/th/data/security/2026-W43.json")
+        );
+        assert_eq!(
+            p.checkups_file(),
+            PathBuf::from("/tmp/th/data/checkups.jsonl")
+        );
     }
 
     #[test]
@@ -258,6 +285,11 @@ mod tests {
         assert!(p.cache.ends_with("Library/Caches/Tidy"));
         assert!(p.logs.ends_with("Library/Logs/Tidy"));
         assert_eq!(p.history_file(), p.data.join("history.jsonl"));
+        assert!(
+            p.security_dir()
+                .ends_with("Library/Application Support/Tidy/security")
+        );
+        assert_eq!(p.checkups_file(), p.data.join("checkups.jsonl"));
     }
 
     #[test]

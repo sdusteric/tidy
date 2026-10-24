@@ -89,8 +89,80 @@ impl LargeView {
     }
 }
 
+/// The width of everything in a Large files row except the text column, in points: the row
+/// padding (20), checkbox (16), tile (32), date column (150), size column (80), trailing
+/// actions (60) and the gaps between those and the text column (50).
+pub const ROW_FIXED_W: f32 = 408.;
+/// What one tag ("App data", "Package") takes with its gap, in points.
+pub const TAG_W: f32 = 74.;
+/// The fewest characters a path line is cut to.
+pub const MIN_PATH_COLS: usize = 12;
+/// The advance of a character in the 12 pt mono font when the text system can't tell.
+pub const FALLBACK_CHAR_W: f32 = 7.2;
+
+/// The width of the name and path column of a row, for a window `viewport_w` points wide
+/// and a row with `tags` tags.
+pub fn text_col_width(viewport_w: f32, tags: usize) -> f32 {
+    (viewport_w
+        - metrics::SIDEBAR_W
+        - 1.
+        - 2. * metrics::LIST_INSET
+        - ROW_FIXED_W
+        - TAG_W * tags as f32)
+        .max(0.)
+}
+
+/// How many mono characters fit in `width` points when one takes `char_w`. One column is kept
+/// back so rounding never lets the last character touch the edge.
+pub fn path_columns(width: f32, char_w: f32) -> usize {
+    let cols = if char_w > 0. {
+        (width / char_w).floor() as usize
+    } else {
+        0
+    };
+    cols.saturating_sub(1).max(MIN_PATH_COLS)
+}
+
+/// The path line of a row: `~/Movies/2025/.../trip.mov`, shortened in the middle so it fits
+/// the text column of a window `viewport_w` points wide. A name too long for even that keeps
+/// both ends with "..." between. The element also ends in an ellipsis when the font is wider
+/// than measured, so a path is never cut mid-character.
+pub fn path_text(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    viewport_w: f32,
+    tags: usize,
+    char_w: f32,
+) -> String {
+    let cols = path_columns(text_col_width(viewport_w, tags), char_w);
+    format::middle_truncate(&format::display_path(path, root), cols)
+}
+
+/// The advance of one character of the 12 pt mono font, measured with the window's text
+/// system.
+pub(crate) fn mono_char_width(window: &Window) -> f32 {
+    let system = window.text_system();
+    let font = Font {
+        family: MONO_FONT.into(),
+        features: FontFeatures::default(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+    };
+    let id = system.resolve_font(&font);
+    system
+        .advance(id, px(12.), 'm')
+        .map(|s| f32::from(s.width))
+        .ok()
+        .filter(|w| *w > 0.)
+        .unwrap_or(FALLBACK_CHAR_W)
+}
+
 /// What a row needs besides its own data.
 struct RowEnv {
+    /// The window's width and the width of one mono character, to fit path lines.
+    viewport_w: f32,
+    char_w: f32,
     model: Entity<TidyModel>,
     view: WeakEntity<TidyView>,
     hovered: Option<String>,
@@ -149,7 +221,8 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
     let reveal_path = e.path.clone();
     let selector_rel = rel.clone();
 
-    let path_line = format::middle_truncate(&format::display_path(&e.path, &env.root), 56);
+    let tags = usize::from(e.app_data) + usize::from(e.kind == LargeKind::Package);
+    let path_line = path_text(&e.path, &env.root, env.viewport_w, tags, env.char_w);
     let second: AnyElement = if let Some(reason) = skipped {
         div()
             .text_size(px(12.))
@@ -183,6 +256,7 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
             .text_color(t.text_2)
             .whitespace_nowrap()
             .overflow_hidden()
+            .text_ellipsis()
             .child(path_line)
             .into_any_element()
     };
@@ -701,6 +775,8 @@ impl TidyView {
             uniform_list("large-rows", count, move |range, window, cx| {
                 let t = Theme::of(window);
                 let env = RowEnv {
+                    viewport_w: f32::from(window.viewport_size().width),
+                    char_w: mono_char_width(window),
                     model: env_model.clone(),
                     view: env_view.clone(),
                     hovered: hovered.clone(),
@@ -829,6 +905,67 @@ mod tests {
     use super::*;
     use crate::app::LargeState;
     use core::prelude::v1::test;
+
+    const LONG: &str =
+        "/Users/demo/Library/Application Support/LTX Studio/models/ltx-video-13b.safetensors";
+
+    #[test]
+    fn long_paths_are_shortened_to_fit_the_text_column() {
+        let root = std::path::Path::new("/Users/demo");
+        for viewport in [760., 900., 1400.] {
+            for tags in [0, 1, 2] {
+                let text = path_text(
+                    std::path::Path::new(LONG),
+                    root,
+                    viewport,
+                    tags,
+                    FALLBACK_CHAR_W,
+                );
+                let width = text.chars().count() as f32 * FALLBACK_CHAR_W;
+                let room = text_col_width(viewport, tags);
+                // Never wider than the column, unless the column is smaller than the minimum.
+                assert!(
+                    width <= room || text.chars().count() <= MIN_PATH_COLS,
+                    "{viewport} {tags}: {text} is {width} wide in {room}"
+                );
+                let full = format::display_path(std::path::Path::new(LONG), root);
+                if text.chars().count() < full.chars().count() {
+                    assert!(text.contains("..."), "{text}");
+                }
+            }
+        }
+        // At the default window the file name survives and the middle is replaced.
+        let at_900 = path_text(std::path::Path::new(LONG), root, 900., 0, FALLBACK_CHAR_W);
+        assert!(at_900.starts_with("~/"), "{at_900}");
+        assert!(at_900.ends_with("ltx-video-13b.safetensors"), "{at_900}");
+        assert!(at_900.contains("/.../"), "{at_900}");
+    }
+
+    #[test]
+    fn a_short_path_is_left_alone_and_a_wider_window_keeps_more() {
+        let root = std::path::Path::new("/Users/demo");
+        let short = std::path::Path::new("/Users/demo/Movies/trip.mov");
+        assert_eq!(
+            path_text(short, root, 900., 0, FALLBACK_CHAR_W),
+            "~/Movies/trip.mov"
+        );
+        let narrow = path_text(std::path::Path::new(LONG), root, 760., 0, FALLBACK_CHAR_W);
+        let wide = path_text(std::path::Path::new(LONG), root, 1400., 0, FALLBACK_CHAR_W);
+        assert!(narrow.chars().count() <= wide.chars().count());
+        assert!(
+            !wide.contains("..."),
+            "a 1400 pt window fits the whole path: {wide}"
+        );
+    }
+
+    #[test]
+    fn column_math_has_a_floor() {
+        assert_eq!(text_col_width(100., 2), 0.);
+        assert_eq!(path_columns(0., 7.2), MIN_PATH_COLS);
+        assert_eq!(path_columns(100., 0.), MIN_PATH_COLS);
+        assert_eq!(path_columns(7.2 * 40., 7.2), 39);
+    }
+
     use tidy_core::model::{FolderNode, LargeItem, LargeScan, MB, UseSource};
 
     const NOW: u64 = 1_792_764_131;

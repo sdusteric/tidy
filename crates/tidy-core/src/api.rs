@@ -2,6 +2,11 @@
 //! section 9). The UI never touches the disk or the Trash itself; it sends a [`Command`] and
 //! renders the [`Event`]s that come back.
 //!
+//! M2 adds the memory snapshot, the security run, the check up and the reminder date. The
+//! core only reports processes: quitting an app is done by the app itself through
+//! `NSRunningApplication` (a polite `terminate`, Force Quit only after a confirm), and the
+//! app schedules the reminder notification itself from the date the core computes.
+//!
 //! Both channels are unbounded, so sending never blocks and is safe from the UI thread. The
 //! app drains events with Haul's batched pump (every 100 ms), so progress events never flood
 //! repaints.
@@ -11,7 +16,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::model::{HistoryEntry, LargeScan, Plan, RunningSet};
+use crate::model::{
+    Checkup, HistoryEntry, LargeScan, MemorySnapshot, Plan, RunningSet, SecurityReport,
+};
+use crate::reminder::ReminderDate;
 use crate::settings::Settings;
 
 /// Which scan a progress or stop event is about.
@@ -59,6 +67,43 @@ pub enum Command {
     LoadHistory {
         reply: oneshot::Sender<Vec<HistoryEntry>>,
     },
+
+    // ----- M2 -----
+    /// Read the memory figures and the process table once and group the processes into app
+    /// rows. Answered with [`Event::MemorySnapshot`]. The Memory screen sends this every 2
+    /// seconds while it is visible and never otherwise; a request while one is being read is
+    /// ignored.
+    SnapshotMemory,
+    /// Run the Security checks of design section 5.4, read-only and without any prompt.
+    /// `include_updates` also runs `softwareupdate --list` (60 s timeout); without it the
+    /// macOS updates row is gray ("checked on demand"). Answered with
+    /// [`Event::SecurityProgress`] while signatures are checked, then
+    /// [`Event::SecurityResult`]. The report is marked against the latest earlier week and
+    /// saved as `security/<week>.json`. A request while a run is going is ignored.
+    RunSecurity { include_updates: bool },
+    /// The latest saved Security report, so the screen can show it before a new run. None
+    /// when there is none.
+    LastSecurity {
+        reply: oneshot::Sender<Option<SecurityReport>>,
+    },
+    /// Run a check up (design section 5.5): the Cleanup scan, the Security run (with
+    /// `softwareupdate` only when `include_updates`) and a memory snapshot. Each part answers
+    /// with its usual event ([`Event::CleanupPlan`], [`Event::SecurityResult`],
+    /// [`Event::MemorySnapshot`]), so the other screens update too. Then the summary is
+    /// appended to `checkups.jsonl` and [`Event::CheckupDone`] follows with the next
+    /// reminder date. A request while a check up is going is ignored.
+    RunCheckup { include_updates: bool },
+    /// The latest check up from `checkups.jsonl`, for the date under the Run Check up button.
+    LastCheckup {
+        reply: oneshot::Sender<Option<Checkup>>,
+    },
+    /// When the weekly reminder should fire: 10:00 local time seven days after the last
+    /// check up (see [`crate::reminder::next_reminder`]). The app asks on launch when the
+    /// reminder is on, and reschedules its single notification with the answer.
+    NextReminder {
+        reply: oneshot::Sender<ReminderDate>,
+    },
+
     /// Stop everything cleanly, then reply on the channel.
     Shutdown(oneshot::Sender<()>),
 }
@@ -96,8 +141,21 @@ pub enum Event {
     RunningChanged(RunningSet),
     /// The settings changed and were saved.
     SettingsChanged(Settings),
+    /// A memory snapshot (after [`Command::SnapshotMemory`] or during a check up).
+    MemorySnapshot(MemorySnapshot),
+    /// `done` of `total` steps of a Security run (the checks, then one per signature check).
+    SecurityProgress { done: usize, total: usize },
+    /// A Security run finished and was saved.
+    SecurityResult(SecurityReport),
+    /// A check up finished and is in `checkups.jsonl`. `reminder` is the next reminder date,
+    /// counted from this check up.
+    CheckupDone {
+        checkup: Checkup,
+        reminder: ReminderDate,
+    },
     /// Something the user asked for could not be done. `what` names the action (`scan`,
-    /// `large`, `clean`, `trash`, `empty_trash`, `settings`), `message` is a plain sentence.
+    /// `large`, `clean`, `trash`, `empty_trash`, `settings`, and from M2 `memory`,
+    /// `security`, `checkup`), `message` is a plain sentence.
     Failed { what: String, message: String },
 }
 
@@ -124,6 +182,37 @@ impl CoreHandle {
             rx.await.unwrap_or_default()
         } else {
             Vec::new()
+        }
+    }
+
+    /// Asks the core for the latest saved Security report. None when there is none or the
+    /// core is gone.
+    pub async fn last_security(&self) -> Option<SecurityReport> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::LastSecurity { reply }) {
+            rx.await.ok().flatten()
+        } else {
+            None
+        }
+    }
+
+    /// Asks the core for the latest check up. None when there is none or the core is gone.
+    pub async fn last_checkup(&self) -> Option<Checkup> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::LastCheckup { reply }) {
+            rx.await.ok().flatten()
+        } else {
+            None
+        }
+    }
+
+    /// Asks the core when the weekly reminder should fire. None when the core is gone.
+    pub async fn next_reminder(&self) -> Option<ReminderDate> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::NextReminder { reply }) {
+            rx.await.ok()
+        } else {
+            None
         }
     }
 
@@ -190,6 +279,48 @@ mod tests {
         let h = CoreHandle::new(tx);
         h.shutdown().await;
         assert!(h.history().await.is_empty());
+        assert_eq!(h.last_security().await, None);
+        assert_eq!(h.last_checkup().await, None);
+        assert_eq!(h.next_reminder().await, None);
+    }
+
+    #[tokio::test]
+    async fn m2_queries_get_their_replies() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = CoreHandle::new(tx);
+        let date = ReminderDate {
+            at: 1,
+            year: 2026,
+            month: 10,
+            day: 30,
+            hour: 10,
+            minute: 0,
+        };
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    Command::LastCheckup { reply } => {
+                        let _ = reply.send(Some(Checkup {
+                            at: 7,
+                            ..Checkup::default()
+                        }));
+                    }
+                    Command::LastSecurity { reply } => {
+                        let _ = reply.send(Some(SecurityReport::empty(0)));
+                    }
+                    Command::NextReminder { reply } => {
+                        let _ = reply.send(date);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        assert_eq!(h.last_checkup().await.map(|c| c.at), Some(7));
+        assert_eq!(
+            h.last_security().await.map(|r| r.week),
+            Some("1970-W01".into())
+        );
+        assert_eq!(h.next_reminder().await, Some(date));
     }
 
     #[test]

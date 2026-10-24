@@ -7,8 +7,16 @@
 //! - Clean, Move to Trash and Empty Trash run on `spawn_blocking` one at a time, in the order
 //!   they were asked for. They never overlap, so two actions never move the same item.
 //! - The process list is read only when the UI asks ([`Command::CheckRunning`]).
+//! - A memory snapshot is read only when asked ([`Command::SnapshotMemory`]); a request while
+//!   one is being read is ignored, so a slow read never piles up behind the 2 s refresh.
+//! - A Security run and a check up run on `spawn_blocking`, at most one of each at a time; a
+//!   second request while one runs is ignored, and so is a Security run while a check up
+//!   (which includes one) runs. Signature checks are reported one at a time with
+//!   [`Event::SecurityProgress`].
 //! - [`Command::Shutdown`] stops the scans, asks a running action to stop after its current
-//!   item, waits a short grace for both, then replies.
+//!   item, waits a short grace for both, then replies. A running check up is told to stop
+//!   before its next part and then writes nothing; a Security run is left to finish on its
+//!   own thread (it only reads, then saves its week's file atomically).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -19,12 +27,19 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::api::{Command, CoreHandle, Event, ScanKind};
+use crate::checkup::{self, CheckupOutcome, CheckupStop};
 use crate::clean::{self, NOT_IN_PLAN};
 use crate::cleanup::{CleanupProgress, load_last_cleanup, scan_cleanup};
 use crate::env::Env;
 use crate::history;
 use crate::large::{self, LargeOpts};
-use crate::model::{HistoryEntry, Item, LARGE_RECORD_MIN, LargeScan, Plan, RunningSet};
+use crate::memory;
+use crate::model::{
+    HistoryEntry, Item, LARGE_RECORD_MIN, LargeScan, MemorySnapshot, Plan, RunningSet,
+    SecurityReport,
+};
+use crate::reminder;
+use crate::security::{self, Sources};
 use crate::walk::{ProgressFn, WalkProgress};
 
 /// How long [`Command::Shutdown`] waits for scans and a running action to stop.
@@ -37,6 +52,17 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// commands can run while the app is open. Safe to call from inside or outside the runtime;
 /// it never blocks on it.
 pub fn start(env: Env, rt: tokio::runtime::Handle) -> (CoreHandle, mpsc::UnboundedReceiver<Event>) {
+    let sources = Sources::for_env(&env);
+    start_with_sources(env, sources, rt)
+}
+
+/// [`start`] with the folders and signature checker the Security checks read, so tests can
+/// point them at fixtures. [`start`] uses [`Sources::for_env`].
+pub fn start_with_sources(
+    env: Env,
+    sources: Sources,
+    rt: tokio::runtime::Handle,
+) -> (CoreHandle, mpsc::UnboundedReceiver<Event>) {
     if let Err(e) = env.paths.create_all() {
         tracing::warn!("cannot create Tidy's folders: {e}");
     }
@@ -45,6 +71,7 @@ pub fn start(env: Env, rt: tokio::runtime::Handle) -> (CoreHandle, mpsc::Unbound
     let (done_tx, done_rx) = mpsc::unbounded_channel();
     let actor = Actor {
         env,
+        sources,
         events: ev_tx,
         done: done_tx,
         last_running: None,
@@ -53,6 +80,11 @@ pub fn start(env: Env, rt: tokio::runtime::Handle) -> (CoreHandle, mpsc::Unbound
         large_scan: None,
         job: None,
         queue: VecDeque::new(),
+        memory_busy: false,
+        memory_failing: false,
+        security_busy: false,
+        checkup: None,
+        checkup_scanning: false,
     };
     rt.spawn(actor.run(cmd_rx, done_rx));
     (CoreHandle::new(cmd_tx), ev_rx)
@@ -93,10 +125,21 @@ enum Done {
         empty_trash: bool,
         entry: Option<HistoryEntry>,
     },
+    /// A memory snapshot, or why the figures could not be read.
+    Memory(Result<MemorySnapshot, String>),
+    /// None when the run panicked.
+    Security(Option<SecurityReport>),
+    /// An event of a running check up. The check up sends its events through the actor,
+    /// in order, so the actor takes its Cleanup plan before the app sees it.
+    CheckupEvent(Event),
+    /// None when the check up was aborted or panicked.
+    Checkup(Option<CheckupOutcome>),
 }
 
 struct Actor {
     env: Env,
+    /// Where the Security checks read from.
+    sources: Sources,
     events: mpsc::UnboundedSender<Event>,
     done: mpsc::UnboundedSender<Done>,
     /// The process list last sent with `RunningChanged`.
@@ -110,6 +153,17 @@ struct Actor {
     /// The stop flag of the running action.
     job: Option<Arc<AtomicBool>>,
     queue: VecDeque<Job>,
+    /// A memory snapshot is being read.
+    memory_busy: bool,
+    /// The last snapshot failed, so a failing probe reports once, not every 2 s.
+    memory_failing: bool,
+    /// A Security run (not the check up's) is going.
+    security_busy: bool,
+    /// The stop flags of the running check up.
+    checkup: Option<Arc<CheckupStop>>,
+    /// The running check up is still in its Cleanup scan. A `ScanCleanup` then waits for
+    /// that scan's plan instead of starting a second scan.
+    checkup_scanning: bool,
 }
 
 impl Actor {
@@ -155,6 +209,9 @@ impl Actor {
                 for flag in [&self.cleanup_scan, &self.large_scan].into_iter().flatten() {
                     flag.store(true, Ordering::Relaxed);
                 }
+                if let Some(stop) = &self.checkup {
+                    stop.cancel.store(true, Ordering::Relaxed);
+                }
             }
             Command::Ignore { path } => {
                 let mut s = self.env.settings.clone();
@@ -186,6 +243,42 @@ impl Actor {
                     });
                 let _ = reply.send(entries);
             }
+            // ----- M2 -----
+            Command::SnapshotMemory => self.start_memory_snapshot(),
+            Command::RunSecurity { include_updates } => self.start_security(include_updates),
+            Command::LastSecurity { reply } => {
+                let paths = self.env.paths.clone();
+                let last = tokio::task::spawn_blocking(move || security::latest_report(&paths))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("cannot read the security reports: {e}");
+                        None
+                    });
+                let _ = reply.send(last);
+            }
+            Command::RunCheckup { include_updates } => self.start_checkup(include_updates),
+            Command::LastCheckup { reply } => {
+                let paths = self.env.paths.clone();
+                let last = tokio::task::spawn_blocking(move || reminder::last_checkup(&paths))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("cannot read the check ups: {e}");
+                        None
+                    });
+                let _ = reply.send(last);
+            }
+            Command::NextReminder { reply } => {
+                let paths = self.env.paths.clone();
+                let last = tokio::task::spawn_blocking(move || reminder::last_checkup(&paths))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("cannot read the check ups: {e}");
+                        None
+                    });
+                let date =
+                    reminder::next_reminder(last.map(|c| c.at), self.env.now(), &self.env.tz);
+                let _ = reply.send(date);
+            }
             // Handled in `run`; kept so the match stays exhaustive.
             Command::Shutdown(done) => {
                 let _ = done.send(());
@@ -198,6 +291,11 @@ impl Actor {
     fn start_cleanup_scan(&mut self) {
         if self.cleanup_scan.is_some() {
             tracing::debug!("a cleanup scan is already running");
+            return;
+        }
+        if self.checkup_scanning {
+            // The check up's scan sends the plan this request asks for.
+            tracing::debug!("the check up is scanning for Cleanup");
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -267,6 +365,72 @@ impl Actor {
                     failed: true,
                 },
             });
+        });
+    }
+
+    // ----- Memory, Security, Check up -----
+
+    fn start_memory_snapshot(&mut self) {
+        if self.memory_busy {
+            tracing::debug!("a memory snapshot is already being read");
+            return;
+        }
+        self.memory_busy = true;
+        let env = self.env.clone();
+        let done = self.done.clone();
+        tokio::task::spawn_blocking(move || {
+            let snap =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| memory::take(&env)))
+                    .unwrap_or_else(|_| Err(std::io::Error::other("the memory read panicked")))
+                    .map_err(|e| e.to_string());
+            let _ = done.send(Done::Memory(snap));
+        });
+    }
+
+    fn start_security(&mut self, include_updates: bool) {
+        if self.security_busy || self.checkup.is_some() {
+            tracing::debug!("a security run is already going");
+            return;
+        }
+        self.security_busy = true;
+        let env = self.env.clone();
+        let sources = self.sources.clone();
+        let events = self.events.clone();
+        let done = self.done.clone();
+        tokio::task::spawn_blocking(move || {
+            let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut progress = |done: usize, total: usize| {
+                    let _ = events.send(Event::SecurityProgress { done, total });
+                };
+                security::run_and_save_with(&env, &sources, include_updates, &mut progress)
+            }))
+            .ok();
+            let _ = done.send(Done::Security(report));
+        });
+    }
+
+    fn start_checkup(&mut self, include_updates: bool) {
+        if self.checkup.is_some() {
+            tracing::debug!("a check up is already going");
+            return;
+        }
+        let stop = Arc::new(CheckupStop::new());
+        self.checkup = Some(stop.clone());
+        self.checkup_scanning = true;
+        let env = self.env.clone();
+        let sources = self.sources.clone();
+        let done = self.done.clone();
+        tokio::task::spawn_blocking(move || {
+            // Every event goes through the actor (see `Done::CheckupEvent`).
+            let emit = |e: Event| {
+                let _ = done.send(Done::CheckupEvent(e));
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                checkup::run(&env, &sources, include_updates, &stop, &emit)
+            }))
+            .ok()
+            .flatten();
+            let _ = done.send(Done::Checkup(outcome));
         });
     }
 
@@ -379,6 +543,65 @@ impl Actor {
                 }
                 self.start_next_job();
             }
+            Done::Memory(result) => {
+                self.memory_busy = false;
+                match result {
+                    Ok(snap) => {
+                        self.memory_failing = false;
+                        self.emit(Event::MemorySnapshot(snap));
+                    }
+                    Err(e) => {
+                        tracing::warn!("cannot read the memory figures: {e}");
+                        if !self.memory_failing {
+                            self.memory_failing = true;
+                            self.failed("memory", "Tidy couldn't read the memory figures.");
+                        }
+                    }
+                }
+            }
+            Done::Security(report) => {
+                self.security_busy = false;
+                match report {
+                    Some(report) => self.emit(Event::SecurityResult(report)),
+                    None => self.failed("security", "The security check stopped unexpectedly."),
+                }
+            }
+            Done::CheckupEvent(event) => {
+                match &event {
+                    // The plan the app is about to show is the one Clean takes items from.
+                    Event::CleanupPlan(plan) => {
+                        self.checkup_scanning = false;
+                        self.plan = Some(plan.clone());
+                    }
+                    Event::ScanStopped {
+                        kind: ScanKind::Cleanup,
+                    } => self.checkup_scanning = false,
+                    Event::Failed { what, .. } if what == "scan" => {
+                        self.checkup_scanning = false;
+                    }
+                    _ => {}
+                }
+                self.emit(event);
+            }
+            Done::Checkup(outcome) => {
+                self.checkup_scanning = false;
+                let aborted = self
+                    .checkup
+                    .take()
+                    .is_some_and(|stop| stop.abort.load(Ordering::Relaxed));
+                match outcome {
+                    // The plan was taken when its `CleanupPlan` came through: taking it again
+                    // here could replace a newer plan from a scan that ended since.
+                    Some(out) => {
+                        self.emit(Event::CheckupDone {
+                            checkup: out.checkup,
+                            reminder: out.reminder,
+                        });
+                    }
+                    None if aborted => {}
+                    None => self.failed("checkup", "The check up stopped unexpectedly."),
+                }
+            }
         }
     }
 
@@ -393,6 +616,10 @@ impl Actor {
     /// Queued actions are dropped.
     async fn stop_all(&mut self, done_rx: &mut mpsc::UnboundedReceiver<Done>) {
         self.queue.clear();
+        if let Some(stop) = &self.checkup {
+            stop.abort.store(true, Ordering::Relaxed);
+            stop.cancel.store(true, Ordering::Relaxed);
+        }
         for flag in [&self.cleanup_scan, &self.large_scan, &self.job]
             .into_iter()
             .flatten()
@@ -441,7 +668,9 @@ enum Work {
 mod tests {
     use super::*;
     use crate::env::{FixedProbe, ProcessProbe, TEST_NOW};
-    use crate::model::{Action, HistoryItem, ItemResult, Source, TrasherKind, from_unix_secs};
+    use crate::model::{
+        Action, Checkup, HistoryItem, ItemResult, Source, TrasherKind, from_unix_secs,
+    };
     use crate::settings::Settings;
     use std::path::Path;
     use std::sync::{Condvar, Mutex};
@@ -467,12 +696,20 @@ mod tests {
         let base = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(base.join("home")).unwrap();
         let env = Env::for_tests(&base.join("home"), &base.join("tidy")).with_procs(procs);
+        running_env(tmp, env, probe)
+    }
+
+    /// Starts the core on `env`, with Security sources that read only folders inside `tmp`
+    /// and a signature checker that answers from a table.
+    fn running_env(tmp: tempfile::TempDir, env: Env, probe: Arc<FixedProbe>) -> Running {
+        let base = tmp.path().canonicalize().unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .unwrap();
-        let (core, events) = start(env.clone(), rt.handle().clone());
+        let (core, events) =
+            start_with_sources(env.clone(), test_sources(&base), rt.handle().clone());
         Running {
             _tmp: tmp,
             rt,
@@ -533,6 +770,43 @@ mod tests {
         }
     }
 
+    /// The user LaunchAgents folder of [`test_sources`].
+    fn user_agents(base: &Path) -> PathBuf {
+        base.join("launchd/user")
+    }
+
+    fn test_sources(base: &Path) -> Sources {
+        let launchd = base.join("launchd");
+        Sources {
+            launchd: crate::security::launchd::LaunchdRoots {
+                user_agents: user_agents(base),
+                system_agents: launchd.join("agents"),
+                system_daemons: launchd.join("daemons"),
+            },
+            xprotect: vec![base.join("xprotect/Info.plist")],
+            chrome: base.join("chrome"),
+            uid: 501,
+            signatures: Arc::new(TableSignatures),
+        }
+    }
+
+    /// Answers `/bin/ls` as Apple and everything else as not signed, without reading a file.
+    struct TableSignatures;
+
+    impl crate::security::codesign::Signatures for TableSignatures {
+        fn check(&self, program: &Path) -> crate::security::codesign::Signature {
+            use crate::model::Signer;
+            crate::security::codesign::Signature {
+                signer: if program == Path::new("/bin/ls") {
+                    Signer::Apple
+                } else {
+                    Signer::Unsigned
+                },
+                notarized: None,
+            }
+        }
+    }
+
     /// A process probe that blocks until opened, so a test can act while a scan is
     /// guaranteed to be running.
     #[derive(Default)]
@@ -546,14 +820,28 @@ mod tests {
             *self.open.lock().unwrap() = true;
             self.cv.notify_all();
         }
-    }
 
-    impl ProcessProbe for Gate {
-        fn running(&self) -> RunningSet {
+        fn wait(&self) {
             let mut open = self.open.lock().unwrap();
             while !*open {
                 open = self.cv.wait(open).unwrap();
             }
+        }
+    }
+
+    /// Opens the gate when dropped, so a failing test does not leave a blocking task waiting
+    /// forever (the runtime waits for it when it is dropped).
+    struct OpenOnDrop(Arc<Gate>);
+
+    impl Drop for OpenOnDrop {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
+    impl ProcessProbe for Gate {
+        fn running(&self) -> RunningSet {
+            self.wait();
             RunningSet::default()
         }
     }
@@ -885,5 +1173,494 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn reminder_and_last_checkup_come_from_the_checkup_log() {
+        let r = running();
+        let core = r.core.clone();
+        // No check up yet: seven days from now, 10:00 in the test zone (UTC).
+        let date = r.rt.block_on(core.next_reminder()).unwrap();
+        assert_eq!((date.month, date.day, date.hour), (10, 30, 10));
+        assert_eq!(r.rt.block_on(core.last_checkup()), None);
+        let at = TEST_NOW + 3 * 86_400;
+        reminder::append_checkup(
+            &r.env.paths,
+            &Checkup {
+                at,
+                ..Checkup::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.rt.block_on(core.last_checkup()).map(|c| c.at), Some(at));
+        let date = r.rt.block_on(core.next_reminder()).unwrap();
+        assert_eq!(
+            (date.year, date.month, date.day, date.hour),
+            (2026, 11, 2, 10)
+        );
+        assert_eq!(date.at, 1_793_613_600, "2026-11-02T10:00:00Z");
+    }
+
+    // ----- M2 -----
+
+    use crate::env::{CommandOutput, FixedClock, FixedMemory, MemoryTable, NoMemory, ReplayRunner};
+    use crate::model::{CheckId, Pressure, ProcInfo, Status, VmStats};
+
+    fn memory_table(level: u32) -> MemoryTable {
+        let app = "/Applications/Big.app/Contents/MacOS/Big";
+        MemoryTable {
+            own_pid: 0,
+            processes: vec![
+                ProcInfo {
+                    pid: 100,
+                    ppid: 1,
+                    name: "Big".into(),
+                    path: Some(app.into()),
+                    footprint: Some(3 << 30),
+                    ..ProcInfo::default()
+                },
+                ProcInfo {
+                    pid: 101,
+                    ppid: 100,
+                    name: "Big Helper".into(),
+                    footprint: Some(1 << 30),
+                    ..ProcInfo::default()
+                },
+                ProcInfo {
+                    pid: 1,
+                    ppid: 0,
+                    uid: 0,
+                    name: "launchd".into(),
+                    ..ProcInfo::default()
+                },
+            ],
+            vm: VmStats {
+                pressure_level: level,
+                total_bytes: 16 << 30,
+                ..VmStats::default()
+            },
+        }
+    }
+
+    /// The captured outputs of this Mac's status commands (FileVault on, firewall off).
+    fn replay() -> ReplayRunner {
+        ReplayRunner::new()
+            .with(
+                "/usr/bin/fdesetup status",
+                CommandOutput::ok("FileVault is On.\n"),
+            )
+            .with(
+                "/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate",
+                CommandOutput::ok("Firewall is disabled. (State = 0)\n"),
+            )
+            .with(
+                "/usr/sbin/spctl --status",
+                CommandOutput::ok("assessments enabled\n"),
+            )
+            .with(
+                "/usr/bin/csrutil status",
+                CommandOutput::ok("System Integrity Protection status: enabled.\n"),
+            )
+    }
+
+    struct M2 {
+        r: Running,
+        memory: Arc<FixedMemory>,
+        runner: Arc<ReplayRunner>,
+        clock: Arc<FixedClock>,
+    }
+
+    fn running_m2(procs: Arc<dyn ProcessProbe>) -> M2 {
+        let runner = Arc::new(replay());
+        running_m2_with(procs, runner.clone(), runner)
+    }
+
+    /// A command runner that waits for a gate before every command, so a test can act while
+    /// a check up is guaranteed to be in its Security part.
+    struct GatedRunner {
+        gate: Arc<Gate>,
+        inner: Arc<ReplayRunner>,
+    }
+
+    impl crate::env::CommandRunner for GatedRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            timeout: Duration,
+        ) -> std::io::Result<CommandOutput> {
+            self.gate.wait();
+            self.inner.run(program, args, timeout)
+        }
+    }
+
+    /// [`running_m2`] whose Security commands go through `env_runner` (which may wrap
+    /// `runner`, the replay the test inspects).
+    fn running_m2_with(
+        procs: Arc<dyn ProcessProbe>,
+        env_runner: Arc<dyn crate::env::CommandRunner>,
+        runner: Arc<ReplayRunner>,
+    ) -> M2 {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("home")).unwrap();
+        let memory = Arc::new(FixedMemory::new(memory_table(1)));
+        let clock = Arc::new(FixedClock::new(TEST_NOW));
+        let env = Env::for_tests(&base.join("home"), &base.join("tidy"))
+            .with_procs(procs)
+            .with_memory(memory.clone())
+            .with_runner(env_runner)
+            .with_clock(clock.clone());
+        // Two user agents: one Apple program, one unsigned.
+        let agents = user_agents(&base);
+        std::fs::create_dir_all(&agents).unwrap();
+        for (label, program) in [
+            ("com.example.ls", "/bin/ls"),
+            ("com.example.odd", "/opt/odd"),
+        ] {
+            std::fs::write(
+                agents.join(format!("{label}.plist")),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+                     <key>Label</key><string>{label}</string>\
+                     <key>Program</key><string>{program}</string>\
+                     <key>RunAtLoad</key><true/></dict></plist>\n"
+                ),
+            )
+            .unwrap();
+        }
+        let r = running_env(tmp, env, Arc::new(FixedProbe::default()));
+        M2 {
+            r,
+            memory,
+            runner,
+            clock,
+        }
+    }
+
+    #[test]
+    fn memory_snapshots_come_on_request_with_the_grouped_rows() {
+        let mut m = running_m2(Arc::new(FixedProbe::default()));
+        m.r.core.send(Command::SnapshotMemory);
+        let snap = match m.r.next() {
+            Event::MemorySnapshot(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(snap.at, TEST_NOW);
+        assert_eq!(snap.pressure, Pressure::Normal);
+        assert_eq!(snap.apps[0].name, "Big");
+        assert_eq!(snap.apps[0].footprint, 4 << 30);
+        assert_eq!(snap.apps[0].helpers, 1);
+        assert!(
+            snap.apps
+                .iter()
+                .any(|a| a.name == crate::model::SYSTEM_PROCESSES)
+        );
+        m.memory.set_vm(memory_table(4).vm);
+        m.r.core.send(Command::SnapshotMemory);
+        match m.r.next() {
+            Event::MemorySnapshot(s) => assert_eq!(s.pressure, Pressure::Critical),
+            other => panic!("{other:?}"),
+        }
+        assert!(!m.runner.ran("softwareupdate"));
+    }
+
+    #[test]
+    fn unreadable_memory_figures_fail_once_until_they_read_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("home")).unwrap();
+        let env =
+            Env::for_tests(&base.join("home"), &base.join("tidy")).with_memory(Arc::new(NoMemory));
+        let mut r = running_env(tmp, env, Arc::new(FixedProbe::default()));
+        r.core.send(Command::SnapshotMemory);
+        assert!(matches!(r.next(), Event::Failed { what, .. } if what == "memory"));
+        // A second failure is quiet: the next event is the scan's.
+        r.core.send(Command::SnapshotMemory);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        r.core.send(Command::LoadHistory { reply: tx });
+        r.rt.block_on(rx).unwrap();
+        r.core.send(Command::ScanCleanup);
+        assert!(matches!(r.next_result(), Event::CleanupPlan(_)));
+    }
+
+    #[test]
+    fn security_streams_each_signature_saves_the_week_and_compares_the_next() {
+        let mut m = running_m2(Arc::new(FixedProbe::default()));
+        assert_eq!(m.r.rt.block_on(m.r.core.last_security()), None);
+        m.r.core.send(Command::RunSecurity {
+            include_updates: false,
+        });
+        let events = m.r.until(|e| matches!(e, Event::SecurityResult(_)));
+        let steps: Vec<(usize, usize)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SecurityProgress { done, total } => Some((*done, *total)),
+                _ => None,
+            })
+            .collect();
+        // Every check, plus one step per program (two agents).
+        let total = CheckId::ALL.len() + 2;
+        assert_eq!(steps.len(), total + 1, "{steps:?}");
+        assert!(steps.iter().enumerate().all(|(i, s)| *s == (i, total)));
+        let Some(Event::SecurityResult(report)) = events.last() else {
+            unreachable!()
+        };
+        assert!(report.first_run);
+        assert_eq!(report.checks.len(), CheckId::ALL.len());
+        assert_eq!(
+            report.check(CheckId::Firewall).unwrap().status,
+            Status::Amber
+        );
+        assert_eq!(
+            report.check(CheckId::MacosUpdates).unwrap().status,
+            Status::Gray
+        );
+        assert_eq!(report.login_items.len(), 2);
+        assert!(!m.runner.ran("softwareupdate"));
+        let saved = m.r.rt.block_on(m.r.core.last_security()).unwrap();
+        assert_eq!(&saved, report);
+        assert_eq!(
+            security::saved_weeks(&m.r.env.paths),
+            [crate::model::iso_week_id(TEST_NOW)]
+        );
+
+        // A week later a new agent shows up: it is New, and the run compares with last week.
+        m.clock.advance(7 * 86_400);
+        std::fs::copy(
+            user_agents(&m.r._tmp.path().canonicalize().unwrap()).join("com.example.ls.plist"),
+            user_agents(&m.r._tmp.path().canonicalize().unwrap()).join("com.example.new.plist"),
+        )
+        .unwrap();
+        m.r.core.send(Command::RunSecurity {
+            include_updates: false,
+        });
+        let events = m.r.until(|e| matches!(e, Event::SecurityResult(_)));
+        let Some(Event::SecurityResult(next)) = events.last() else {
+            unreachable!()
+        };
+        assert!(!next.first_run);
+        assert_eq!(next.compared_to.as_deref(), Some(report.week.as_str()));
+        assert_eq!(security::saved_weeks(&m.r.env.paths).len(), 2);
+    }
+
+    #[test]
+    fn a_check_up_runs_the_three_parts_logs_them_and_sends_the_reminder() {
+        let mut m = running_m2(Arc::new(FixedProbe::default()));
+        m.r.put(".npm/_cacache/a.bin", 2 * MIB);
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        let events = m.r.until(|e| matches!(e, Event::CheckupDone { .. }));
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::CleanupPlan(_) => Some("plan"),
+                Event::SecurityResult(_) => Some("security"),
+                Event::MemorySnapshot(_) => Some("memory"),
+                Event::CheckupDone { .. } => Some("done"),
+                Event::Failed { .. } => Some("failed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["plan", "security", "memory", "done"]);
+        let Some(Event::CheckupDone { checkup, reminder }) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(checkup.at, TEST_NOW);
+        assert!(!checkup.include_updates);
+        let cleanup = checkup.cleanup.unwrap();
+        assert_eq!(cleanup.safe_bytes, 2 * MIB as u64);
+        assert_eq!(cleanup.safe_items, 1);
+        let sec = checkup.security.as_ref().unwrap();
+        assert!(sec.first_run);
+        assert!(sec.amber >= 1, "the firewall is off");
+        assert_eq!(checkup.memory.unwrap().pressure, Pressure::Normal);
+        // 2026-10-23 plus seven days, 10:00 UTC.
+        assert_eq!(
+            (reminder.year, reminder.month, reminder.day, reminder.hour),
+            (2026, 10, 30, 10)
+        );
+        assert_eq!(
+            reminder::read_checkups(&m.r.env.paths),
+            std::slice::from_ref(checkup)
+        );
+        assert_eq!(
+            m.r.rt.block_on(m.r.core.last_checkup()).as_ref(),
+            Some(checkup)
+        );
+        assert_eq!(m.r.rt.block_on(m.r.core.next_reminder()), Some(*reminder));
+        assert!(!m.runner.ran("softwareupdate"));
+
+        // The Cleanup card's Clean uses the check up's plan.
+        m.r.core.send(Command::Clean {
+            item_ids: vec!["dev.npm-cacache:.npm/_cacache".into()],
+        });
+        let done = m.r.until(|e| matches!(e, Event::CleanDone(_)));
+        assert!(matches!(done[0], Event::ItemTrashed { .. }), "{done:?}");
+    }
+
+    #[test]
+    fn a_security_run_is_ignored_while_a_check_up_runs_and_cancel_stops_its_scan() {
+        let gate = Arc::new(Gate::default());
+        let mut m = running_m2(gate.clone());
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        // The check up's scan waits on the process list. Both of these are ignored or
+        // answered by the check up itself.
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        m.r.core.send(Command::RunSecurity {
+            include_updates: false,
+        });
+        // A Cleanup scan asked for now waits for the check up's scan instead of starting a
+        // second one, so only one scan answers (here with ScanStopped, after the Cancel).
+        m.r.core.send(Command::ScanCleanup);
+        m.r.core.send(Command::Cancel);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        m.r.core.send(Command::LoadHistory { reply: tx });
+        m.r.rt.block_on(rx).unwrap();
+        gate.open();
+        let events = m.r.until(|e| matches!(e, Event::CheckupDone { .. }));
+        let stopped = events
+            .iter()
+            .filter(|e| {
+                **e == Event::ScanStopped {
+                    kind: ScanKind::Cleanup,
+                }
+            })
+            .count();
+        assert_eq!(stopped, 1, "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::CleanupPlan(_))),
+            "{events:?}"
+        );
+        let results = events
+            .iter()
+            .filter(|e| matches!(e, Event::SecurityResult(_)))
+            .count();
+        assert_eq!(results, 1);
+        let Some(Event::CheckupDone { checkup, .. }) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(checkup.cleanup, None);
+        assert!(checkup.security.is_some() && checkup.memory.is_some());
+        // Nothing else was queued: the next event answers the next command.
+        m.r.core.send(Command::SnapshotMemory);
+        assert!(matches!(m.r.next_result(), Event::MemorySnapshot(_)));
+        assert_eq!(reminder::read_checkups(&m.r.env.paths).len(), 1);
+    }
+
+    /// Regression: the check up's plan reaches the app while Security still runs. A Clean
+    /// sent then must take its items from that plan, not from an older Cleanup scan, so what
+    /// moves and what history records is what the user saw.
+    #[test]
+    fn clean_during_a_check_up_uses_the_plan_the_check_up_just_sent() {
+        let gate = Arc::new(Gate::default());
+        let runner = Arc::new(replay());
+        let gated = Arc::new(GatedRunner {
+            gate: gate.clone(),
+            inner: runner.clone(),
+        });
+        let mut m = running_m2_with(Arc::new(FixedProbe::default()), gated, runner);
+        let _open = OpenOnDrop(gate.clone());
+        // P1: the npm cache at 2 MiB.
+        m.r.put(".npm/_cacache/a.bin", 2 * MIB);
+        m.r.core.send(Command::ScanCleanup);
+        let p1 = match m.r.next_result() {
+            Event::CleanupPlan(p) => p,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(p1.items.len(), 1, "{p1:?}");
+
+        // Later the npm cache grows and a pnpm cache appears.
+        m.r.put(".npm/_cacache/b.bin", 3 * MIB);
+        m.r.put("Library/Caches/pnpm/c.bin", 2 * MIB);
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        // P2 arrives while Security waits on the gate.
+        let p2 = match m.r.until(|e| matches!(e, Event::CleanupPlan(_))).pop() {
+            Some(Event::CleanupPlan(p)) => p,
+            other => panic!("{other:?}"),
+        };
+        let ids: Vec<String> = p2
+            .items
+            .iter()
+            .filter(|i| i.ticked)
+            .map(|i| i.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 2, "{p2:?}");
+        assert!(ids.iter().any(|id| p1.item(id).is_none()), "a new item");
+        let want: u64 = p2
+            .items
+            .iter()
+            .filter(|i| i.ticked)
+            .map(|i| i.bytes_alloc)
+            .sum();
+
+        m.r.core.send(Command::Clean {
+            item_ids: ids.clone(),
+        });
+        let events = m.r.until(|e| matches!(e, Event::CleanDone(_)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::ItemSkipped { .. })),
+            "{events:?}"
+        );
+        let trashed = events
+            .iter()
+            .filter(|e| matches!(e, Event::ItemTrashed { .. }))
+            .count();
+        assert_eq!(trashed, 2, "{events:?}");
+        let Some(Event::CleanDone(entry)) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(entry.trashed_bytes, want, "history records P2's sizes");
+        assert!(
+            entry.trashed_bytes > p1.items[0].bytes_alloc,
+            "not P1's 2 MiB"
+        );
+
+        gate.open();
+        let events = m.r.until(|e| matches!(e, Event::CheckupDone { .. }));
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Failed { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// The Security screen's Move to Trash for a user login item sends `TrashPaths` with the
+    /// plist under `~/Library/LaunchAgents` (the scan root's, see `Sources::for_env`). The
+    /// guard lets it through: that folder is inside the home folder and on no denylist. Here
+    /// the home is a temp folder and the Trash is a `DirTrash`.
+    #[test]
+    fn a_user_launch_agent_plist_can_go_to_the_trash() {
+        let mut r = running();
+        let plist = r.put("Library/LaunchAgents/com.example.helper.plist", 4096);
+        assert_eq!(
+            Sources::for_env(&r.env).launchd.user_agents,
+            plist.parent().unwrap()
+        );
+        r.core.send(Command::TrashPaths {
+            paths: vec![plist.clone()],
+        });
+        let events = r.until(|e| matches!(e, Event::CleanDone(_)));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::ItemTrashed { id, .. } if *id == plist.to_string_lossy())
+            ),
+            "{events:?}"
+        );
+        assert!(!plist.exists());
+        let Some(Event::CleanDone(entry)) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(entry.trasher, TrasherKind::Dir);
+        // The folder itself stays.
+        assert!(r.env.at("Library/LaunchAgents").is_dir());
     }
 }

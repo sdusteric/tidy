@@ -19,6 +19,7 @@ icon_assets!(
         Archive,
         Disc,
         AppWindow,
+        Puzzle,
         X
     ]
 );
@@ -63,9 +64,15 @@ mod tests {
             IconName::Archive,
             IconName::Disc,
             IconName::AppWindow,
+            IconName::Puzzle,
+            IconName::Stethoscope,
+            IconName::ShieldCheck,
             IconName::X,
             // From gpui-kit's default set.
             IconName::HardDrive,
+            IconName::MemoryStick,
+            IconName::Cpu,
+            IconName::SquareTerminal,
             IconName::Ellipsis,
             IconName::RefreshCw,
             IconName::ChevronRight,

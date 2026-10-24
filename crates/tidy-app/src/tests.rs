@@ -13,16 +13,23 @@ use gpui_kit::*;
 use tidy_core::api::{Command, CoreHandle, Event, ScanKind};
 use tidy_core::env::FixedClock;
 use tidy_core::model::{
-    Action, Class, FolderNode, Group, HistoryEntry, HistoryItem, Item, ItemResult, LargeItem,
-    LargeKind, LargeScan, MB, Plan, RunningSet, Source, TrashSummary, TrasherKind, UseSource,
+    Action, AppMemory, CheckId, CheckResult, Checkup, CheckupCleanup, CheckupMemory,
+    CheckupSecurity, ChromeExtension, Class, FolderNode, Group, HistoryEntry, HistoryItem, Item,
+    ItemResult, LargeItem, LargeKind, LargeScan, LaunchKind, LoginItem, MB, Mark, MemoryKind,
+    MemorySnapshot, Plan, Pressure, RunningSet, Scope, SecurityReport, SettingsLink, Signer,
+    Source, Status, SwapUsage, TrashSummary, TrasherKind, UseSource,
 };
+use tidy_core::reminder::ReminderDate;
 use tidy_core::settings::Settings;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::{
-    Core, EMPTY_TRASH_REFUSED, LargeFilter, LargeMode, Model, Notice, OpenKind, Opener,
-    PUMP_PERIOD, RUNNING_PERIOD, STALE_SCAN_SECS, Screen, Tokio, graceful_shutdown, spawn_pump,
+    Core, EMPTY_TRASH_REFUSED, LargeFilter, LargeMode, MEMORY_PERIOD, Model, Notice, Notify,
+    OpenKind, Opener, PUMP_PERIOD, QUIT_WAIT, RUNNING_PERIOD, STALE_SCAN_SECS, Screen,
+    SettingsOpener, Terminate, Tokio, graceful_shutdown, spawn_pump,
 };
+use crate::macos::Permission;
+use crate::macos::fakes::{FakeNotifier, FakeTerminator};
 use crate::views::cleanup::{CleanRow, MenuEntry, cleanup_rows};
 use crate::views::dialogs::{APP_DATA_NOTE, CLONE_NOTE, DialogKind};
 use crate::views::main_window::{TidyView, open_main_window};
@@ -37,6 +44,11 @@ struct Harness {
     commands: UnboundedReceiver<Command>,
     events: UnboundedSender<Event>,
     opened: Opened,
+    /// The System Settings pages the app was asked to open.
+    settings_opened: Rc<RefCell<Vec<SettingsLink>>>,
+    /// Fakes: no test ever signals a process or touches the notification center.
+    terminator: Rc<FakeTerminator>,
+    notifier: Rc<FakeNotifier>,
     clock: Arc<FixedClock>,
 }
 
@@ -55,6 +67,11 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> Harness {
     let (events, event_rx) = unbounded_channel();
     let opened: Opened = Rc::new(RefCell::new(Vec::new()));
     let rec = opened.clone();
+    let settings_opened: Rc<RefCell<Vec<SettingsLink>>> = Rc::new(RefCell::new(Vec::new()));
+    let settings_rec = settings_opened.clone();
+    let terminator = Rc::new(FakeTerminator::default());
+    let notifier = Rc::new(FakeNotifier::default());
+    let (term_global, notify_global) = (terminator.clone(), notifier.clone());
     let clock = Arc::new(FixedClock::new(NOW));
     let now_clock = clock.clone();
     cx.update(|cx| {
@@ -65,6 +82,11 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> Harness {
         cx.set_global(Opener(Box::new(move |kind, path: &Path, _cx| {
             rec.borrow_mut().push((kind, path.to_path_buf()))
         })));
+        cx.set_global(SettingsOpener(Box::new(move |link, _cx| {
+            settings_rec.borrow_mut().push(link)
+        })));
+        cx.set_global(Terminate(term_global));
+        cx.set_global(Notify(notify_global));
         let m = cx.new(|_| crate::app::TidyModel::new(settings));
         cx.set_global(Model(m.clone()));
         spawn_pump(m.downgrade(), event_rx, PUMP_PERIOD, cx);
@@ -73,6 +95,9 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> Harness {
         commands,
         events,
         opened,
+        settings_opened,
+        terminator,
+        notifier,
         clock,
     }
 }
@@ -1581,4 +1606,1395 @@ fn the_app_only_sends_commands_it_never_touches_the_disk(cx: &mut TestAppContext
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ====================================================================================
+// M2: sidebar, Memory, Security, Check up
+// ====================================================================================
+
+/// Commands of one kind, in order, out of a drained list.
+fn count_cmds(cmds: &[Command], pick: impl Fn(&Command) -> bool) -> usize {
+    cmds.iter().filter(|c| pick(c)).count()
+}
+
+fn is_snapshot(c: &Command) -> bool {
+    matches!(c, Command::SnapshotMemory)
+}
+
+fn date(day: i8) -> ReminderDate {
+    ReminderDate {
+        at: NOW + 7 * DAY,
+        year: 2026,
+        month: 10,
+        day,
+        hour: 10,
+        minute: 0,
+    }
+}
+
+/// Answers the first `NextReminder` in `cmds` with `d`. Returns false when there was none.
+fn answer_next_reminder(cmds: Vec<Command>, d: ReminderDate) -> bool {
+    for c in cmds {
+        if let Command::NextReminder { reply } = c {
+            let _ = reply.send(d);
+            return true;
+        }
+    }
+    false
+}
+
+// ---------- sidebar and shortcuts ----------
+
+#[::gpui::test]
+fn the_sidebar_lists_five_screens_in_order_and_cmd_1_to_5_switch(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    let titles: Vec<&str> = Screen::ALL.iter().map(|s| s.title()).collect();
+    assert_eq!(
+        titles,
+        ["Check up", "Cleanup", "Large files", "Memory", "Security"]
+    );
+    let shortcuts: Vec<&str> = Screen::ALL.iter().map(|s| s.shortcut()).collect();
+    assert_eq!(
+        shortcuts,
+        [
+            "\u{2318}1",
+            "\u{2318}2",
+            "\u{2318}3",
+            "\u{2318}4",
+            "\u{2318}5"
+        ]
+    );
+    // Top to bottom in the sidebar.
+    let ys: Vec<Pixels> = Screen::ALL
+        .iter()
+        .map(|s| {
+            bounds(cx, crate::views::sidebar::selector_for(*s))
+                .expect("row")
+                .origin
+                .y
+        })
+        .collect();
+    assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
+
+    for (keystroke, screen, root) in [
+        ("cmd-1", Screen::Checkup, "checkup"),
+        ("cmd-2", Screen::Cleanup, "cleanup"),
+        ("cmd-3", Screen::Large, "large"),
+        ("cmd-4", Screen::Memory, "memory"),
+        ("cmd-5", Screen::Security, "security"),
+    ] {
+        keys(cx, keystroke);
+        assert_eq!(
+            model(cx).read_with(cx, |m, _| m.screen),
+            screen,
+            "{keystroke}"
+        );
+        assert!(has(cx, root), "{keystroke} shows {root}");
+    }
+    // Clicking a row switches too.
+    click(cx, "sidebar-checkup");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Checkup);
+    click(cx, "sidebar-security");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Security);
+    let _ = h.drain();
+}
+
+#[::gpui::test]
+fn cmd_r_rescans_each_new_screen(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-4");
+    let cmds = h.drain();
+    assert_eq!(count_cmds(&cmds, is_snapshot), 1, "{cmds:?}");
+    keys(cx, "cmd-r");
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 1);
+    keys(cx, "cmd-5");
+    h.drain();
+    keys(cx, "cmd-r");
+    let cmds = h.drain();
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::RunSecurity {
+                include_updates: false
+            }
+        )),
+        "{cmds:?}"
+    );
+    keys(cx, "cmd-1");
+    h.drain();
+    keys(cx, "cmd-r");
+    let cmds = h.drain();
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::RunCheckup {
+                include_updates: false
+            }
+        )),
+        "{cmds:?}"
+    );
+}
+
+// ---------- Memory ----------
+
+fn mem_app(name: &str, pid: i32, mb: u64, helpers: u32) -> AppMemory {
+    AppMemory {
+        id: format!("app:/Applications/{name}.app"),
+        name: name.to_string(),
+        kind: MemoryKind::App,
+        pid,
+        pids: std::iter::once(pid)
+            .chain((0..helpers as i32).map(|i| pid + 1000 + i))
+            .collect(),
+        bundle_id: Some(format!("com.example.{}", name.to_lowercase())),
+        app_path: Some(PathBuf::from(format!("/Applications/{name}.app"))),
+        footprint: mb * MB,
+        helpers,
+        quittable: true,
+        members: Vec::new(),
+    }
+}
+
+fn id_of(name: &str) -> String {
+    format!("app:/Applications/{name}.app")
+}
+
+fn mem_snapshot(pressure: Pressure) -> MemorySnapshot {
+    let system = AppMemory {
+        id: "system".into(),
+        name: "System processes".into(),
+        kind: MemoryKind::System,
+        pid: 0,
+        pids: vec![],
+        bundle_id: None,
+        app_path: None,
+        footprint: 900 * MB,
+        helpers: 0,
+        quittable: false,
+        members: vec!["WindowServer".into(), "kernel_task".into()],
+    };
+    // Finder is marked quittable on purpose: the app must not offer Quit for it anyway.
+    let finder = mem_app("Finder", 300, 700, 0);
+    MemorySnapshot {
+        at: NOW,
+        pressure,
+        pressure_level: match pressure {
+            Pressure::Normal => 1,
+            Pressure::Warning => 2,
+            Pressure::Critical => 4,
+        },
+        total_bytes: 16 * GB,
+        swap: SwapUsage {
+            total: 2 * GB,
+            used: 1_200 * MB,
+            free: 800 * MB,
+        },
+        compressed_bytes: 3_400 * MB,
+        pages: Default::default(),
+        apps: vec![
+            mem_app("Chrome", 100, 4_200, 12),
+            mem_app("Slack", 101, 1_100, 3),
+            system,
+            finder,
+        ],
+    }
+}
+
+fn on_memory(cx: &mut TestAppContext) -> (Harness, Entity<TidyView>, &mut VisualTestContext) {
+    let mut h = setup(cx);
+    let (view, cx) = open_main(cx);
+    keys(cx, "cmd-4");
+    h.drain();
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Normal))],
+    );
+    (h, view, cx)
+}
+
+#[::gpui::test]
+fn memory_polls_every_2_seconds_only_while_it_is_visible(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    // Cleanup is showing: nothing polls, however long we wait.
+    advance(cx, 20_000);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 0);
+
+    // Opening the screen reads once at once, then every 2 seconds.
+    keys(cx, "cmd-4");
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 1);
+    advance(cx, MEMORY_PERIOD.as_millis() as u64 - 100);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 0, "not before 2 s");
+    advance(cx, 100);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 1);
+    advance(cx, 6_000);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 3);
+
+    // Leaving the screen stops it.
+    keys(cx, "cmd-2");
+    h.drain();
+    advance(cx, 30_000);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 0);
+    keys(cx, "cmd-3");
+    advance(cx, 30_000);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 0);
+}
+
+#[::gpui::test]
+fn memory_does_not_poll_while_macos_is_not_showing_the_window(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_memory(cx);
+    // Minimized, hidden, covered or on another Space: no reads at all.
+    cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    advance(cx, 20_000);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 0);
+    // Back in view: one read at once, then every 2 seconds again.
+    cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    cx.run_until_parked();
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 1);
+    advance(cx, MEMORY_PERIOD.as_millis() as u64);
+    assert_eq!(count_cmds(&h.drain(), is_snapshot), 1);
+}
+
+#[::gpui::test]
+fn memory_shows_the_verdict_three_figures_and_the_top_apps(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = on_memory(cx);
+    for sel in [
+        "memory-verdict",
+        "memory-figure-pressure",
+        "memory-figure-swap",
+        "memory-figure-compressed",
+        "memory-graph",
+    ] {
+        assert!(has(cx, sel), "{sel}");
+    }
+    let (rows, snapshot) = model(cx).read_with(cx, |m, _| {
+        (
+            crate::views::memory::memory_rows(&m.memory),
+            m.memory.snapshot.clone().unwrap(),
+        )
+    });
+    assert_eq!(snapshot.verdict(), Pressure::Normal.verdict());
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["Chrome", "Slack", "System processes", "Finder"]);
+    assert_eq!(rows[0].meta().0, "12 helpers");
+    assert_eq!(crate::format::size(rows[0].bytes), "4.2 GB");
+    assert_eq!(crate::format::size(snapshot.swap.used), "1.2 GB");
+    assert_eq!(crate::format::size(snapshot.compressed_bytes), "3.4 GB");
+    // A Quit button on the apps; none on the System row or on Finder.
+    assert!(has(cx, &format!("memory-quit:{}", id_of("Chrome"))));
+    assert!(has(cx, &format!("memory-quit:{}", id_of("Slack"))));
+    assert!(has(cx, "memory-row:system") && !has(cx, "memory-quit:system"));
+    assert!(has(cx, &format!("memory-row:{}", id_of("Finder"))));
+    assert!(!has(cx, &format!("memory-quit:{}", id_of("Finder"))));
+}
+
+#[::gpui::test]
+fn the_verdict_follows_the_pressure(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    for p in [Pressure::Warning, Pressure::Critical, Pressure::Normal] {
+        push(&h, cx, vec![Event::MemorySnapshot(mem_snapshot(p))]);
+        let shown = model(cx).read_with(cx, |m, _| m.memory.snapshot.as_ref().unwrap().verdict());
+        assert_eq!(shown, p.verdict());
+        let (first, rest) = crate::views::memory::verdict_parts(p);
+        assert!(p.verdict().starts_with(first) && p.verdict().ends_with(rest));
+    }
+}
+
+#[::gpui::test]
+fn quit_sends_a_polite_terminate_then_says_quit_requested(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    click(cx, &format!("memory-quit:{}", id_of("Chrome")));
+    // Exactly one polite request, for the main process of that row. Nothing else was signalled.
+    assert_eq!(*h.terminator.polite.borrow(), [100]);
+    assert!(h.terminator.forced.borrow().is_empty());
+    let rows = model(cx).read_with(cx, |m, _| crate::views::memory::memory_rows(&m.memory));
+    assert_eq!(rows[0].meta(), ("Quit requested".to_string(), false));
+    // The button is gone while the request is out.
+    assert!(!has(cx, &format!("memory-quit:{}", id_of("Chrome"))));
+    // Pressing it again (through the model) does not send a second request.
+    model(cx).update(cx, |m, cx| m.quit_app(&id_of("Chrome"), cx));
+    assert_eq!(*h.terminator.polite.borrow(), [100]);
+}
+
+#[::gpui::test]
+fn after_10_seconds_the_row_says_still_open_and_force_quit_needs_a_confirm(
+    cx: &mut TestAppContext,
+) {
+    let (h, view, cx) = on_memory(cx);
+    let id = id_of("Chrome");
+    click(cx, &format!("memory-quit:{id}"));
+    advance(cx, QUIT_WAIT.as_millis() as u64 - 100);
+    let meta = |cx: &mut VisualTestContext| {
+        model(cx).read_with(cx, |m, _| {
+            crate::views::memory::memory_rows(&m.memory)[0].meta()
+        })
+    };
+    assert_eq!(meta(cx).0, "Quit requested", "not yet after 9.9 s");
+    advance(cx, 100);
+    assert_eq!(
+        meta(cx),
+        (
+            "Still open. The app may be asking to save.".to_string(),
+            true
+        )
+    );
+    // Force Quit is only behind the "..." menu and a confirm.
+    assert!(h.terminator.forced.borrow().is_empty());
+    assert!(!has(cx, "memory-force-quit"));
+    click(cx, &format!("memory-more:{id}"));
+    assert!(has(cx, "memory-force-quit"));
+    click(cx, "memory-force-quit");
+    let dialog = dialog_of(&view, cx).expect("a dialog is open");
+    assert_eq!(dialog.title, "Force Quit Chrome?");
+    assert_eq!(
+        dialog.body.as_deref(),
+        Some("Unsaved changes in Chrome will be lost.")
+    );
+    assert!(dialog.destructive);
+    assert!(
+        h.terminator.forced.borrow().is_empty(),
+        "nothing before the confirm"
+    );
+    // Cancel does nothing.
+    click(cx, "dialog-cancel");
+    assert!(h.terminator.forced.borrow().is_empty());
+    // Confirm forces the main process of that row, and only it.
+    click(cx, &format!("memory-more:{id}"));
+    click(cx, "memory-force-quit");
+    click(cx, "dialog-confirm");
+    assert_eq!(*h.terminator.forced.borrow(), [100]);
+    assert_eq!(*h.terminator.polite.borrow(), [100]);
+}
+
+#[::gpui::test]
+fn a_row_goes_when_the_app_exits(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    let id = id_of("Slack");
+    click(cx, &format!("memory-quit:{id}"));
+    // The app exits: the next snapshot may still list it for a moment, but the row is gone.
+    h.terminator.exited.borrow_mut().insert(101);
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Normal))],
+    );
+    assert!(!has(cx, &format!("memory-row:{id}")));
+    // And a snapshot without it keeps it gone.
+    let mut without = mem_snapshot(Pressure::Normal);
+    without.apps.retain(|a| a.pid != 101);
+    push(&h, cx, vec![Event::MemorySnapshot(without)]);
+    assert!(!has(cx, &format!("memory-row:{id}")));
+    assert!(model(cx).read_with(cx, |m, _| m.memory.quits.is_empty()
+        && m.memory.exited.is_empty()));
+}
+
+#[::gpui::test]
+fn an_exit_seen_by_the_timer_removes_the_row_too(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    let id = id_of("Slack");
+    click(cx, &format!("memory-quit:{id}"));
+    h.terminator.exited.borrow_mut().insert(101);
+    advance(cx, QUIT_WAIT.as_millis() as u64);
+    assert!(!has(cx, &format!("memory-row:{id}")));
+}
+
+#[::gpui::test]
+fn tidy_finder_and_system_can_never_be_quit(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    // Even straight through the model, these rows are refused.
+    let mut snapshot = mem_snapshot(Pressure::Normal);
+    let own = std::process::id() as i32;
+    let mut tidy = mem_app("Tidy", own, 80, 0);
+    tidy.bundle_id = Some("dev.sdusteric.tidy".into());
+    let mut ws = mem_app("WindowServer", 400, 300, 0);
+    ws.kind = MemoryKind::Process;
+    ws.id = "pid:400".into();
+    let mut login = mem_app("loginwindow", 401, 30, 0);
+    login.kind = MemoryKind::Process;
+    login.id = "pid:401".into();
+    snapshot.apps.extend([tidy, ws, login]);
+    push(&h, cx, vec![Event::MemorySnapshot(snapshot)]);
+    let tidy_id = id_of("Tidy");
+    for id in [
+        id_of("Finder"),
+        tidy_id.clone(),
+        "pid:400".to_string(),
+        "pid:401".to_string(),
+        "system".to_string(),
+    ] {
+        assert!(!has(cx, &format!("memory-quit:{id}")), "{id}");
+        model(cx).update(cx, |m, cx| m.quit_app(&id, cx));
+        model(cx).update(cx, |m, cx| m.force_quit(&id, cx));
+    }
+    assert!(h.terminator.polite.borrow().is_empty());
+    assert!(h.terminator.forced.borrow().is_empty());
+}
+
+#[::gpui::test]
+fn the_pressure_graph_covers_only_the_time_the_screen_is_open(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    let history =
+        |cx: &mut VisualTestContext| model(cx).read_with(cx, |m, _| m.memory.history.clone());
+    assert_eq!(history(cx), [Pressure::Normal]);
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Warning))],
+    );
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Warning))],
+    );
+    assert_eq!(
+        history(cx),
+        [Pressure::Normal, Pressure::Warning, Pressure::Warning]
+    );
+    // A snapshot that arrives while another screen is showing (a check up) is not a sample.
+    keys(cx, "cmd-2");
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Critical))],
+    );
+    assert_eq!(history(cx).len(), 3);
+    // Coming back starts a new graph.
+    keys(cx, "cmd-4");
+    assert!(history(cx).is_empty());
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Normal))],
+    );
+    assert_eq!(history(cx), [Pressure::Normal]);
+}
+
+#[::gpui::test]
+fn a_memory_failure_shows_a_notice(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    push(
+        &h,
+        cx,
+        vec![Event::Failed {
+            what: "memory".into(),
+            message: "Tidy couldn't read memory.".into(),
+        }],
+    );
+    assert!(has(cx, "notice"));
+    click(cx, "notice-dismiss");
+    advance(cx, 300);
+    assert!(!has(cx, "notice"));
+}
+
+// ---------- Security ----------
+
+fn check(id: CheckId, status: Status, sentence: &str) -> CheckResult {
+    CheckResult::new(id, status, sentence)
+}
+
+fn agent(
+    label: &str,
+    scope: Scope,
+    kind: LaunchKind,
+    signer: Signer,
+    mark: Option<Mark>,
+) -> LoginItem {
+    let dir = match (scope, kind) {
+        (Scope::User, _) => "/fake/Library/LaunchAgents",
+        (Scope::System, LaunchKind::Agent) => "/Library/LaunchAgents",
+        (Scope::System, LaunchKind::Daemon) => "/Library/LaunchDaemons",
+    };
+    LoginItem {
+        label: label.to_string(),
+        plist: Some(PathBuf::from(format!("{dir}/{label}.plist"))),
+        program: Some(PathBuf::from(format!(
+            "/Applications/{label}.app/Contents/MacOS/run"
+        ))),
+        runs_at_load: true,
+        scope,
+        kind,
+        notarized: match &signer {
+            Signer::Apple => None,
+            Signer::Team(_) => Some(true),
+            _ => Some(false),
+        },
+        signer,
+        mark,
+    }
+}
+
+fn security_report(first_run: bool) -> SecurityReport {
+    let mut r = SecurityReport::empty(NOW - 120);
+    r.first_run = first_run;
+    r.compared_to = (!first_run).then(|| "2026-W42".to_string());
+    let mut firewall = check(
+        CheckId::Firewall,
+        Status::Amber,
+        "Firewall is off. Your Mac accepts incoming connections from apps that ask for them.",
+    );
+    firewall.mark = (!first_run).then_some(Mark::Changed);
+    let mut login = check(
+        CheckId::LoginItems,
+        Status::Amber,
+        "1 item is new since the last check.",
+    );
+    login.mark = (!first_run).then_some(Mark::New);
+    r.checks = vec![
+        check(CheckId::FileVault, Status::Green, "FileVault is on."),
+        firewall,
+        check(CheckId::Gatekeeper, Status::Green, "Gatekeeper is on."),
+        check(
+            CheckId::Sip,
+            Status::Green,
+            "System Integrity Protection is on.",
+        ),
+        check(
+            CheckId::XProtect,
+            Status::Green,
+            "XProtect updated 12 days ago.",
+        ),
+        check(
+            CheckId::MacosUpdates,
+            Status::Gray,
+            "Checked on demand. Press Check now to look for updates.",
+        ),
+        login,
+        check(
+            CheckId::ChromeExtensions,
+            Status::Green,
+            "No new extensions.",
+        ),
+    ];
+    r.login_items = vec![
+        agent(
+            "com.example.sync",
+            Scope::User,
+            LaunchKind::Agent,
+            Signer::Team("Example Inc".into()),
+            (!first_run).then_some(Mark::New),
+        ),
+        agent(
+            "com.example.unknown",
+            Scope::System,
+            LaunchKind::Daemon,
+            Signer::Unsigned,
+            None,
+        ),
+    ];
+    r.extensions = vec![ChromeExtension {
+        id: "a".repeat(32),
+        name: "Reader View".into(),
+        version: Some("2.1".into()),
+        profile: "Default".into(),
+        enabled: true,
+        mark: (!first_run).then_some(Mark::New),
+    }];
+    r
+}
+
+fn on_security(cx: &mut TestAppContext) -> (Harness, Entity<TidyView>, &mut VisualTestContext) {
+    let mut h = setup(cx);
+    let (view, cx) = open_main(cx);
+    keys(cx, "cmd-5");
+    h.drain();
+    (h, view, cx)
+}
+
+#[::gpui::test]
+fn security_starts_empty_and_a_click_runs_the_checks_without_updates(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_security(cx);
+    assert!(has(cx, "empty-state"));
+    // Entering the screen sent nothing that checks anything.
+    click(cx, "empty-action");
+    let cmds = h.drain();
+    assert!(
+        matches!(
+            &cmds[..],
+            [Command::RunSecurity {
+                include_updates: false
+            }]
+        ),
+        "{cmds:?}"
+    );
+    // Progress shows in the toolbar; the result replaces the empty state.
+    push(&h, cx, vec![Event::SecurityProgress { done: 3, total: 12 }]);
+    assert!(has(cx, "busy"));
+    push(&h, cx, vec![Event::SecurityResult(security_report(true))]);
+    assert!(!has(cx, "busy") && !has(cx, "empty-state"));
+    for id in CheckId::ALL {
+        assert!(has(cx, &format!("sec-check:{id:?}")), "{id:?}");
+    }
+}
+
+#[::gpui::test]
+fn the_saved_report_shows_before_a_new_run(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-5");
+    let mut answered = false;
+    for c in h.drain() {
+        if let Command::LastSecurity { reply } = c {
+            let _ = reply.send(Some(security_report(false)));
+            answered = true;
+        }
+    }
+    assert!(answered, "entering the screen asks for the saved report");
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert!(has(cx, "sec-check:Firewall"));
+    assert!(h.drain().is_empty(), "showing it ran nothing");
+}
+
+#[::gpui::test]
+fn rows_have_dots_marks_and_amber_buttons_but_gray_rows_have_none(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    // Amber rows with a link have a button; green and gray rows do not.
+    assert!(has(cx, "sec-action:Firewall"));
+    assert!(has(cx, "sec-action:LoginItems"));
+    for id in [
+        "FileVault",
+        "Gatekeeper",
+        "Sip",
+        "XProtect",
+        "MacosUpdates",
+        "ChromeExtensions",
+    ] {
+        assert!(!has(cx, &format!("sec-action:{id}")), "{id}");
+    }
+    // New and Changed marks.
+    assert!(has(cx, "sec-mark:Firewall") && has(cx, "sec-mark:LoginItems"));
+    assert!(has(cx, "sec-login-mark:user:com.example.sync"));
+    assert!(!has(cx, "sec-login-mark:system:com.example.unknown"));
+    assert!(!has(cx, "sec-mark:FileVault"));
+    // The summary says what to look at and what was compared.
+    let line = model(cx).read_with(cx, |m, _| {
+        crate::views::security::summary_line(m.security.report.as_ref().unwrap())
+    });
+    assert_eq!(
+        line,
+        "New and changed items are marked \u{b7} 1 could not be checked"
+    );
+    let status = model(cx).read_with(cx, |m, _| {
+        crate::views::security::status_line(m.security.report.as_ref().unwrap(), NOW)
+    });
+    assert_eq!(status, "8 checks, 2 to look at, checked 2 min ago");
+    assert_eq!(
+        model(cx).read_with(cx, |m, _| m.security.report.as_ref().unwrap().headline()),
+        "2 things to look at"
+    );
+    // The row sentences carry the plain wording.
+    let sentence = model(cx).read_with(cx, |m, _| {
+        m.security
+            .report
+            .as_ref()
+            .unwrap()
+            .check(CheckId::Firewall)
+            .unwrap()
+            .sentence
+            .clone()
+    });
+    assert!(sentence.starts_with("Firewall is off."));
+}
+
+#[::gpui::test]
+fn the_first_run_says_so(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(true))]);
+    let line = model(cx).read_with(cx, |m, _| {
+        crate::views::security::summary_line(m.security.report.as_ref().unwrap())
+    });
+    assert_eq!(
+        line,
+        "This is your first check. Next week Tidy will show what changed. \u{b7} 1 could not be checked"
+    );
+    assert!(!has(cx, "sec-mark:Firewall") && !has(cx, "sec-login-mark:user:com.example.sync"));
+}
+
+#[::gpui::test]
+fn amber_buttons_open_the_right_settings_page_only_from_a_click(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    assert!(
+        h.settings_opened.borrow().is_empty(),
+        "nothing opens by itself"
+    );
+    click(cx, "sec-action:Firewall");
+    click(cx, "sec-action:LoginItems");
+    assert_eq!(
+        *h.settings_opened.borrow(),
+        [SettingsLink::Network, SettingsLink::LoginItems]
+    );
+}
+
+#[::gpui::test]
+fn the_updates_row_is_gray_with_a_check_now_button_that_asks_for_updates(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    assert!(has(cx, "sec-updates"));
+    click(cx, "sec-updates");
+    let cmds = h.drain();
+    assert!(
+        matches!(
+            &cmds[..],
+            [Command::RunSecurity {
+                include_updates: true
+            }]
+        ),
+        "{cmds:?}"
+    );
+    // Once the updates were checked, the button is gone.
+    let mut done = security_report(false);
+    done.updates_checked = true;
+    done.checks[5] = check(CheckId::MacosUpdates, Status::Green, "macOS is up to date.");
+    push(&h, cx, vec![Event::SecurityResult(done)]);
+    assert!(!has(cx, "sec-updates"));
+}
+
+#[::gpui::test]
+fn login_items_show_the_signer_and_a_user_agent_can_go_to_the_trash_after_a_confirm(
+    cx: &mut TestAppContext,
+) {
+    let (mut h, view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    assert!(has(cx, "sec-login:user:com.example.sync"));
+    assert!(has(cx, "sec-login:system:com.example.unknown"));
+    let rows = model(cx).read_with(cx, |m, _| {
+        crate::views::security::security_rows(&m.security)
+    });
+    let signer_of = |label: &str| -> String {
+        rows.iter()
+            .find_map(|r| match r {
+                crate::views::security::SecRow::Login(l) if l.label == label => {
+                    Some(l.meta[0].0.clone())
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(signer_of("com.example.sync"), "Example Inc");
+    assert_eq!(signer_of("com.example.unknown"), "Not signed");
+
+    // A system daemon has no Move to Trash; a user agent has, on hover.
+    let can_trash = |label: &str| {
+        rows.iter()
+            .find_map(|r| match r {
+                crate::views::security::SecRow::Login(l) if l.label == label => Some(l.can_trash),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(can_trash("com.example.sync") && !can_trash("com.example.unknown"));
+    hover(cx, "sec-login:user:com.example.sync");
+    click(cx, "sec-trash:user:com.example.sync");
+    assert_eq!(
+        dialog_of(&view, cx).expect("a dialog is open").kind,
+        DialogKind::TrashLoginItem {
+            key: "user:com.example.sync".into()
+        }
+    );
+    assert!(h.drain().is_empty(), "nothing moves before the confirm");
+    click(cx, "dialog-confirm");
+    let plist = PathBuf::from("/fake/Library/LaunchAgents/com.example.sync.plist");
+    let cmds = h.drain();
+    match &cmds[..] {
+        [Command::TrashPaths { paths }] => assert_eq!(paths, std::slice::from_ref(&plist)),
+        other => panic!("{other:?}"),
+    }
+    // The core reports the move: the row goes, and the Large files screen is left alone.
+    let entry = HistoryEntry {
+        id: "x".into(),
+        at: NOW,
+        action: Action::Trash,
+        source: Source::Large,
+        trasher: TrasherKind::Dir,
+        items: vec![HistoryItem {
+            path: plist.clone(),
+            trash_path: None,
+            bytes: 400,
+            rule: "large".into(),
+            result: ItemResult::Trashed,
+            reason: None,
+            trash_id: None,
+        }],
+        trashed_bytes: 400,
+        message: None,
+    };
+    push(
+        &h,
+        cx,
+        vec![
+            Event::ItemTrashed {
+                id: plist.to_string_lossy().into_owned(),
+                trash_path: None,
+            },
+            Event::CleanDone(entry),
+        ],
+    );
+    advance(cx, 300);
+    assert!(!has(cx, "sec-login:user:com.example.sync"));
+    assert!(has(cx, "notice"));
+    let (large_notice, large_trashing) =
+        model(cx).read_with(cx, |m, _| (m.large.notice.clone(), m.large.trashing));
+    assert_eq!((large_notice, large_trashing), (None, None));
+}
+
+#[::gpui::test]
+fn a_refused_move_keeps_the_login_item_with_the_reason(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_security(cx);
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    hover(cx, "sec-login:user:com.example.sync");
+    click(cx, "sec-trash:user:com.example.sync");
+    click(cx, "dialog-confirm");
+    h.drain();
+    let plist = PathBuf::from("/fake/Library/LaunchAgents/com.example.sync.plist");
+    let entry = HistoryEntry {
+        id: "x".into(),
+        at: NOW,
+        action: Action::Trash,
+        source: Source::Large,
+        trasher: TrasherKind::Dir,
+        items: vec![HistoryItem {
+            path: plist.clone(),
+            trash_path: None,
+            bytes: 0,
+            rule: "large".into(),
+            result: ItemResult::Skipped,
+            reason: Some("Not allowed".into()),
+            trash_id: None,
+        }],
+        trashed_bytes: 0,
+        message: None,
+    };
+    push(
+        &h,
+        cx,
+        vec![
+            Event::ItemSkipped {
+                id: plist.to_string_lossy().into_owned(),
+                reason: "Not allowed".into(),
+            },
+            Event::CleanDone(entry),
+        ],
+    );
+    assert!(has(cx, "sec-login:user:com.example.sync"));
+    let rows = model(cx).read_with(cx, |m, _| {
+        crate::views::security::security_rows(&m.security)
+    });
+    let skipped = rows.iter().find_map(|r| match r {
+        crate::views::security::SecRow::Login(l) if l.label == "com.example.sync" => {
+            l.skipped.clone()
+        }
+        _ => None,
+    });
+    assert_eq!(skipped.as_deref(), Some("Not allowed"));
+}
+
+#[::gpui::test]
+fn signatures_read_checking_while_a_run_is_going(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_security(cx);
+    let mut report = security_report(false);
+    report.login_items[0].signer = Signer::Unknown;
+    report.login_items[0].notarized = None;
+    push(&h, cx, vec![Event::SecurityResult(report)]);
+    let meta = |cx: &mut VisualTestContext| {
+        model(cx).read_with(cx, |m, _| {
+            crate::views::security::security_rows(&m.security)
+                .into_iter()
+                .find_map(|r| match r {
+                    crate::views::security::SecRow::Login(l) if l.label == "com.example.sync" => {
+                        Some(l.meta[0].0.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        })
+    };
+    assert_eq!(meta(cx), "Unknown");
+    click(cx, "rescan-button");
+    push(&h, cx, vec![Event::SecurityProgress { done: 6, total: 12 }]);
+    assert_eq!(meta(cx), "Checking signature");
+    push(&h, cx, vec![Event::SecurityResult(security_report(false))]);
+    assert_eq!(meta(cx), "Example Inc");
+}
+
+#[::gpui::test]
+fn a_security_failure_ends_the_run_with_a_notice(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_security(cx);
+    click(cx, "empty-action");
+    assert!(model(cx).read_with(cx, |m, _| m.security.running.is_some()));
+    push(
+        &h,
+        cx,
+        vec![Event::Failed {
+            what: "security".into(),
+            message: "The checks could not run.".into(),
+        }],
+    );
+    assert!(model(cx).read_with(cx, |m, _| m.security.running.is_none()));
+    assert!(has(cx, "notice"));
+}
+
+// ---------- Check up ----------
+
+fn finished_checkup() -> Checkup {
+    Checkup {
+        at: NOW - 30,
+        include_updates: false,
+        cleanup: Some(CheckupCleanup {
+            safe_bytes: 3_500 * MB,
+            safe_items: 2,
+            review_bytes: 2 * GB,
+        }),
+        security: Some(CheckupSecurity {
+            week: "2026-W43".into(),
+            amber: 2,
+            gray: 1,
+            first_run: false,
+        }),
+        memory: Some(CheckupMemory {
+            pressure: Pressure::Normal,
+            swap_used: 0,
+            compressed_bytes: 3 * GB,
+        }),
+    }
+}
+
+fn on_checkup(
+    cx: &mut TestAppContext,
+    settings: Settings,
+) -> (Harness, Entity<TidyView>, &mut VisualTestContext) {
+    let mut h = setup_with(cx, settings);
+    let (view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    h.drain();
+    (h, view, cx)
+}
+
+#[::gpui::test]
+fn run_check_up_sends_one_command_with_the_updates_choice(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    assert!(has(cx, "run-checkup") && has(cx, "include-updates"));
+    click(cx, "run-checkup");
+    let cmds = h.drain();
+    // The first command is the check up; the click also remembers a Cleanup scan happened.
+    assert!(
+        matches!(
+            cmds[0],
+            Command::RunCheckup {
+                include_updates: false
+            }
+        ),
+        "{cmds:?}"
+    );
+    assert!(model(cx).read_with(cx, |m, _| m.checkup.running));
+    // The button is disabled while it runs: a second click sends nothing.
+    click(cx, "run-checkup");
+    assert_eq!(
+        count_cmds(&h.drain(), |c| matches!(c, Command::RunCheckup { .. })),
+        0
+    );
+}
+
+#[::gpui::test]
+fn include_macos_updates_is_saved_and_passed_on(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    click(cx, "include-updates");
+    let cmds = h.drain();
+    match &cmds[..] {
+        [Command::UpdateSettings(s)] => assert!(s.include_updates),
+        other => panic!("{other:?}"),
+    }
+    click(cx, "run-checkup");
+    let cmds = h.drain();
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::RunCheckup {
+                include_updates: true
+            }
+        )),
+        "{cmds:?}"
+    );
+}
+
+#[::gpui::test]
+fn the_three_cards_fill_in_and_link_to_their_screens(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    click(cx, "run-checkup");
+    h.drain();
+    // While it runs, the cards say they are checking.
+    let c = model(cx).read_with(cx, |m, _| crate::views::checkup::cards(m));
+    assert_eq!(c.cleanup.figure, "Checking");
+    assert_eq!(c.security.figure, "Checking");
+    assert_eq!(c.memory.figure, "Checking");
+
+    push(&h, cx, vec![Event::CleanupPlan(plan())]);
+    let c = model(cx).read_with(cx, |m, _| crate::views::checkup::cards(m));
+    assert_eq!(c.cleanup.figure, "3.5 GB");
+    assert_eq!(c.cleanup.suffix.as_deref(), Some("ready to clean"));
+    assert_eq!(c.cleanup.line, "2 GB more to review");
+    assert_eq!(c.security.figure, "Checking");
+
+    push(
+        &h,
+        cx,
+        vec![
+            Event::SecurityResult(security_report(false)),
+            Event::MemorySnapshot(mem_snapshot(Pressure::Warning)),
+        ],
+    );
+    push(
+        &h,
+        cx,
+        vec![Event::CheckupDone {
+            checkup: Checkup {
+                memory: Some(CheckupMemory {
+                    pressure: Pressure::Warning,
+                    swap_used: 0,
+                    compressed_bytes: 0,
+                }),
+                ..finished_checkup()
+            },
+            reminder: date(30),
+        }],
+    );
+    let c = model(cx).read_with(cx, |m, _| crate::views::checkup::cards(m));
+    assert_eq!(c.security.figure, "2 things to look at");
+    assert_eq!(c.security.line, "1 could not be checked");
+    assert_eq!(c.memory.figure, "Warning");
+    assert_eq!(c.memory.line, Pressure::Warning.verdict());
+    assert!(!model(cx).read_with(cx, |m, _| m.checkup.running));
+    assert!(has(cx, "card-cleanup") && has(cx, "card-security") && has(cx, "card-memory"));
+    assert!(has(cx, "last-checkup"));
+    assert_eq!(
+        crate::views::checkup::last_line(
+            model(cx)
+                .read_with(cx, |m, _| m.checkup.last.clone())
+                .as_ref(),
+            NOW
+        ),
+        "Last check up just now"
+    );
+
+    // Each card opens its screen.
+    click(cx, "card-security");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Security);
+    keys(cx, "cmd-1");
+    click(cx, "card-memory");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Memory);
+    keys(cx, "cmd-1");
+    click(cx, "card-cleanup");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Cleanup);
+    h.drain();
+}
+
+#[::gpui::test]
+fn the_clean_button_on_the_card_does_what_cleanup_does(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    // Nothing to clean before a plan exists.
+    assert!(!has(cx, "checkup-clean"));
+    push(&h, cx, vec![Event::CleanupPlan(plan())]);
+    assert!(has(cx, "checkup-clean"));
+    click(cx, "checkup-clean");
+    let cmds = h.drain();
+    // Safe items only: no dialog, one Clean for the ticked ids.
+    match &cmds[..] {
+        [Command::Clean { item_ids }] => assert_eq!(item_ids, &["r:a", "r:log"]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Checkup);
+}
+
+#[::gpui::test]
+fn the_clean_button_asks_first_when_a_review_item_is_ticked(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = on_checkup(cx, Settings::default());
+    push(&h, cx, vec![Event::CleanupPlan(plan())]);
+    model(cx).update(cx, |m, cx| m.toggle_item("r:b", cx));
+    click(cx, "checkup-clean");
+    assert!(h.drain().is_empty());
+    assert_eq!(
+        dialog_of(&view, cx).expect("a dialog is open").kind,
+        DialogKind::CleanReview
+    );
+}
+
+#[::gpui::test]
+fn the_last_check_up_loads_when_the_screen_opens(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    let mut answered = false;
+    for c in h.drain() {
+        if let Command::LastCheckup { reply } = c {
+            let _ = reply.send(Some(finished_checkup()));
+            answered = true;
+        }
+    }
+    assert!(answered);
+    cx.run_until_parked();
+    advance(cx, 100);
+    let last = model(cx).read_with(cx, |m, _| m.checkup.last.clone());
+    assert_eq!(last.map(|c| c.at), Some(NOW - 30));
+    let c = model(cx).read_with(cx, |m, _| crate::views::checkup::cards(m));
+    // No live plan yet: the card shows the saved figure and says to run again.
+    assert_eq!(c.cleanup.figure, "3.5 GB");
+    assert_eq!(c.memory.figure, "Normal");
+    assert!(!has(cx, "checkup-clean"));
+}
+
+#[::gpui::test]
+fn a_checkup_failure_ends_the_run_with_a_notice(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    click(cx, "run-checkup");
+    h.drain();
+    push(
+        &h,
+        cx,
+        vec![Event::Failed {
+            what: "checkup".into(),
+            message: "The check up could not finish.".into(),
+        }],
+    );
+    assert!(!model(cx).read_with(cx, |m, _| m.checkup.running));
+    assert!(has(cx, "notice"));
+}
+
+#[::gpui::test]
+fn security_waits_for_a_running_check_up_instead_of_dropping_the_request(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    click(cx, "run-checkup");
+    h.drain();
+    // The check up is still scanning; Security shows it as busy and sends nothing.
+    keys(cx, "cmd-5");
+    assert!(has(cx, "busy") && !has(cx, "empty-state"));
+    keys(cx, "cmd-r");
+    model(cx).update(cx, |m, cx| m.run_security(true, cx));
+    let cmds = h.drain();
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Command::RunSecurity { .. })),
+        "{cmds:?}"
+    );
+}
+
+// ---------- the weekly reminder ----------
+
+#[::gpui::test]
+fn permission_is_not_asked_at_launch_or_when_visiting_check_up(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    // The app starts, the reminder is off, the screen is open.
+    model(cx).update(cx, |m, cx| m.start_reminder(cx));
+    cx.run_until_parked();
+    assert_eq!(h.notifier.requests.get(), 0);
+    assert_eq!(
+        h.notifier.status_calls.get(),
+        0,
+        "the notification center is not even looked at"
+    );
+    assert!(h.notifier.scheduled.borrow().is_empty());
+    keys(cx, "cmd-2");
+    keys(cx, "cmd-1");
+    assert_eq!(h.notifier.requests.get(), 0);
+    h.drain();
+}
+
+#[::gpui::test]
+fn switching_the_reminder_on_asks_once_then_schedules_the_single_notification(
+    cx: &mut TestAppContext,
+) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    assert!(has(cx, "reminder-toggle"));
+    click(cx, "reminder-toggle");
+    assert_eq!(h.notifier.requests.get(), 1, "the toggle is what asks");
+    cx.run_until_parked();
+    advance(cx, 100);
+    let cmds = h.drain();
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::UpdateSettings(s) if s.reminder_enabled)),
+        "{cmds:?}"
+    );
+    // Granted: the app asks the core when it is due and schedules that date.
+    assert_eq!(
+        model(cx).read_with(cx, |m, _| m.checkup.permission),
+        Some(Permission::Granted)
+    );
+    assert!(answer_next_reminder(cmds, date(30)));
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert_eq!(*h.notifier.scheduled.borrow(), [date(30)]);
+    let note = model(cx).read_with(cx, |m, _| {
+        crate::views::checkup::reminder_note(
+            m.settings.reminder_enabled,
+            m.checkup.permission,
+            m.checkup.next_reminder.as_ref(),
+        )
+    });
+    assert!(note.contains("Oct 30 at 10:00 AM"), "{note}");
+
+    // A new check up moves the single trigger: the pending one is replaced, not added to.
+    push(
+        &h,
+        cx,
+        vec![Event::CheckupDone {
+            checkup: finished_checkup(),
+            reminder: date(31),
+        }],
+    );
+    assert_eq!(*h.notifier.scheduled.borrow(), [date(30), date(31)]);
+    assert_eq!(h.notifier.requests.get(), 1, "never asked again");
+
+    // Switching it off removes the pending notification.
+    click(cx, "reminder-toggle");
+    assert_eq!(h.notifier.cancels.get(), 1);
+    let cmds = h.drain();
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::UpdateSettings(s) if !s.reminder_enabled)),
+        "{cmds:?}"
+    );
+    assert_eq!(h.notifier.requests.get(), 1);
+}
+
+#[::gpui::test]
+fn at_launch_with_the_reminder_on_it_only_looks_up_and_reschedules(cx: &mut TestAppContext) {
+    let settings = Settings {
+        reminder_enabled: true,
+        ..Settings::default()
+    };
+    let mut h = setup_with(cx, settings);
+    h.notifier.permission.set(Permission::Granted);
+    let (_view, cx) = open_main(cx);
+    model(cx).update(cx, |m, cx| m.start_reminder(cx));
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert_eq!(h.notifier.status_calls.get(), 1);
+    assert_eq!(h.notifier.requests.get(), 0, "launch never prompts");
+    assert!(answer_next_reminder(h.drain(), date(30)));
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert_eq!(*h.notifier.scheduled.borrow(), [date(30)]);
+}
+
+#[::gpui::test]
+fn at_launch_with_permission_not_yet_given_nothing_is_asked_or_scheduled(cx: &mut TestAppContext) {
+    let settings = Settings {
+        reminder_enabled: true,
+        ..Settings::default()
+    };
+    let mut h = setup_with(cx, settings);
+    h.notifier.permission.set(Permission::NotDetermined);
+    let (_view, cx) = open_main(cx);
+    model(cx).update(cx, |m, cx| m.start_reminder(cx));
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert_eq!(h.notifier.requests.get(), 0);
+    assert!(h.notifier.scheduled.borrow().is_empty());
+    assert!(!answer_next_reminder(h.drain(), date(30)));
+}
+
+#[::gpui::test]
+fn a_denied_permission_shows_the_notifications_settings_button(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = on_checkup(cx, Settings::default());
+    h.notifier.on_request.set(Permission::Denied);
+    assert!(!has(cx, "notifications-settings"));
+    click(cx, "reminder-toggle");
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert!(has(cx, "notifications-settings"));
+    let note = model(cx).read_with(cx, |m, _| {
+        crate::views::checkup::reminder_note(
+            m.settings.reminder_enabled,
+            m.checkup.permission,
+            m.checkup.next_reminder.as_ref(),
+        )
+    });
+    assert_eq!(note, "Notifications are off for Tidy");
+    // Nothing was scheduled, and the button opens the page only when clicked.
+    assert!(h.notifier.scheduled.borrow().is_empty());
+    assert!(h.settings_opened.borrow().is_empty());
+    click(cx, "notifications-settings");
+    assert_eq!(*h.settings_opened.borrow(), [SettingsLink::Notifications]);
+    // Fixing it in System Settings: the next look-up schedules the reminder.
+    h.notifier.permission.set(Permission::Granted);
+    h.drain();
+    keys(cx, "cmd-2");
+    keys(cx, "cmd-1");
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert!(answer_next_reminder(h.drain(), date(30)));
+    cx.run_until_parked();
+    advance(cx, 100);
+    assert_eq!(*h.notifier.scheduled.borrow(), [date(30)]);
+    assert!(!has(cx, "notifications-settings"));
+    assert_eq!(h.notifier.requests.get(), 1);
+}
+
+#[::gpui::test]
+fn clicking_the_reminder_opens_check_up(cx: &mut TestAppContext) {
+    let _h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-3");
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let weak = model(cx).downgrade();
+    cx.update(|_, cx| crate::views::checkup::watch_reminder_clicks(rx, weak, cx));
+    tx.send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Checkup);
+}
+
+// ---------- Large files: long paths ----------
+
+#[::gpui::test]
+fn long_paths_in_large_files_are_fitted_to_the_row(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_scan(cx);
+    let long = "Library/Application Support/Some Long Vendor Name/Models/checkpoints/an-extremely-long-model-file-name-v2.safetensors";
+    let mut scan = large_scan();
+    scan.items
+        .insert(0, large_item(long, 1_500, 10, true, LargeKind::File));
+    let h2 = &_h;
+    push(h2, cx, vec![Event::LargeResult(scan)]);
+    assert!(has(cx, &format!("large-row:{long}")));
+    // The line the row draws for this path fits the column the window gives it.
+    let (viewport, char_w) = cx.update(|window, _| {
+        (
+            f32::from(window.viewport_size().width),
+            crate::views::large::mono_char_width(window),
+        )
+    });
+    let text = crate::views::large::path_text(
+        &PathBuf::from("/fake").join(long),
+        Path::new("/fake"),
+        viewport,
+        1,
+        char_w,
+    );
+    let room = crate::views::large::text_col_width(viewport, 1);
+    assert!(text.contains("..."), "{text}");
+    assert!(text.starts_with("~/"), "{text}");
+    assert!(
+        text.chars().count() as f32 * char_w <= room,
+        "{text} in {room}"
+    );
+}
+
+// ---------- the app never signals or schedules anything real ----------
+
+#[::gpui::test]
+fn the_test_harness_has_only_fakes_for_quitting_and_notifying(cx: &mut TestAppContext) {
+    let h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    keys(cx, "cmd-4");
+    keys(cx, "cmd-5");
+    advance(cx, 60_000);
+    assert!(h.terminator.polite.borrow().is_empty() && h.terminator.forced.borrow().is_empty());
+    assert_eq!(h.notifier.requests.get(), 0);
+    assert!(h.notifier.scheduled.borrow().is_empty());
+    assert!(h.settings_opened.borrow().is_empty());
 }

@@ -1,0 +1,52 @@
+{
+  "extensions": {
+    "settings": {
+      "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
+        "active_permissions": {"api": ["storage", "tabs"], "explicit_host": ["<all_urls>"]},
+        "creation_flags": 9,
+        "disable_reasons": [],
+        "from_webstore": true,
+        "install_time": "13372736000000000",
+        "location": 1,
+        "manifest": {"manifest_version": 3, "name": "uBlock Origin Lite", "version": "2026.10.1"},
+        "path": "cjpalhdlnbpafiamejdnhcphjbkeiagm/2026.10.1_0",
+        "was_installed_by_default": false,
+        "was_installed_by_oem": false
+      },
+      "abcdefghijklmnopabcdefghijklmnop": {
+        "disable_reasons": [],
+        "from_webstore": true,
+        "location": 1,
+        "manifest": {"default_locale": "en", "manifest_version": 3, "name": "__MSG_appName__", "version": "1.4.0"},
+        "path": "abcdefghijklmnopabcdefghijklmnop/1.4.0_0",
+        "was_installed_by_default": false
+      },
+      "ponmlkjihgfedcbaponmlkjihgfedcba": {
+        "disable_reasons": [1],
+        "from_webstore": true,
+        "location": 1,
+        "manifest": {"manifest_version": 2, "name": "Old Helper", "version": "0.9"},
+        "was_installed_by_default": false
+      },
+      "aapocclcgogkmnckokdopfmhonfmgoek": {
+        "location": 1,
+        "manifest": {"name": "Slides", "version": "0.10"},
+        "was_installed_by_default": true
+      },
+      "mhjfbmdgcfjbbpaeojofohoefgiehjai": {
+        "location": 5,
+        "manifest": {"name": "Chrome PDF Viewer", "version": "1"}
+      },
+      "nmmhkkegccagdldgiimedpiccmgmieda": {
+        "location": 10,
+        "manifest": {"name": "Chrome Web Store Payments", "version": "1.0.0.6"}
+      },
+      "ghbmnnjooekpmoecnnnilnnbdlolhkhi": {
+        "active_permissions": {"api": []},
+        "location": 1
+      }
+    }
+  },
+  "protection": {"macs": {"extensions": {"settings": {"cjpalhdlnbpafiamejdnhcphjbkeiagm": "0123456789ABCDEF"}}}},
+  "super_mac": "FEDCBA9876543210"
+}

@@ -1,5 +1,5 @@
-//! The sidebar (design section 11): 200 pt wide, the two M1 screens, and the free-space figure
-//! at the bottom.
+//! The sidebar (design section 11): 200 pt wide, the five screens (Check up, Cleanup, Large
+//! files, Memory, Security), and the free-space figure at the bottom.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -14,17 +14,43 @@ use crate::views::main_window::TidyView;
 /// The sidebar row for a screen: its icon.
 pub fn icon_for(screen: Screen) -> IconName {
     match screen {
+        Screen::Checkup => IconName::Stethoscope,
         Screen::Cleanup => IconName::Sparkles,
         Screen::Large => IconName::HardDrive,
+        Screen::Memory => IconName::MemoryStick,
+        Screen::Security => IconName::ShieldCheck,
+    }
+}
+
+/// The selector name of a screen's sidebar row (for tests).
+pub fn selector_for(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Checkup => "sidebar-checkup",
+        Screen::Cleanup => "sidebar-cleanup",
+        Screen::Large => "sidebar-large",
+        Screen::Memory => "sidebar-memory",
+        Screen::Security => "sidebar-security",
+    }
+}
+
+/// The selector name of a sidebar row's trailing figure.
+pub fn figure_selector_for(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Checkup => "sidebar-checkup-figure",
+        Screen::Cleanup => "sidebar-cleanup-figure",
+        Screen::Large => "sidebar-large-figure",
+        Screen::Memory => "sidebar-memory-figure",
+        Screen::Security => "sidebar-security-figure",
     }
 }
 
 /// The trailing figure of a sidebar row: the safe total after a Cleanup scan, the item count
-/// on Large files. None before the first result.
+/// on Large files. None before the first result, and on the other screens.
 pub fn figure_for(screen: Screen, m: &TidyModel) -> Option<String> {
     match screen {
         Screen::Cleanup => m.cleanup.safe_bytes().map(format::size),
         Screen::Large => m.large.item_count().map(|n| format::thousands(n as u64)),
+        Screen::Checkup | Screen::Memory | Screen::Security => None,
     }
 }
 
@@ -53,13 +79,7 @@ impl TidyView {
             let (hover, selected_bg) = (t.row_hover, t.sidebar_selected);
             div()
                 .id(("sidebar-row", screen as usize))
-                .debug_selector(move || {
-                    match screen {
-                        Screen::Cleanup => "sidebar-cleanup",
-                        Screen::Large => "sidebar-large",
-                    }
-                    .to_string()
-                })
+                .debug_selector(move || selector_for(screen).to_string())
                 .h(px(metrics::SIDEBAR_ROW_H))
                 .px(px(8.))
                 .gap(px(8.))
@@ -89,13 +109,7 @@ impl TidyView {
                 .when_some(figure, |d, figure| {
                     d.child(
                         div()
-                            .debug_selector(move || {
-                                match screen {
-                                    Screen::Cleanup => "sidebar-cleanup-figure",
-                                    Screen::Large => "sidebar-large-figure",
-                                }
-                                .to_string()
-                            })
+                            .debug_selector(move || figure_selector_for(screen).to_string())
                             .flex_none()
                             .text_size(px(12.))
                             .font_features(tnum())

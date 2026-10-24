@@ -30,13 +30,16 @@ use std::time::Duration;
 
 use gpui_kit::*;
 use tidy_core::model::{
-    Class, FolderNode, Group, Item, LargeItem, LargeKind, LargeScan, MB, Plan, TrashSummary,
-    UseSource,
+    AppMemory, CheckId, CheckResult, Checkup, CheckupCleanup, CheckupMemory, CheckupSecurity,
+    ChromeExtension, Class, FolderNode, Group, Item, LargeItem, LargeKind, LargeScan, LaunchKind,
+    LoginItem, MB, Mark, MemoryKind, MemorySnapshot, PageStats, Plan, Pressure, Scope,
+    SecurityReport, Signer, Status, SwapUsage, TrashSummary, UseSource,
 };
+use tidy_core::reminder::ReminderDate;
 use tidy_core::settings::Settings;
 
 use crate::app::{LargeFilter, LargeMode, Notice, Screen, install_demo, model};
-use crate::macos::DiskInfo;
+use crate::macos::{DiskInfo, Permission};
 
 /// The fixed "now" in Unix seconds that demo data is relative to.
 pub const NOW: u64 = 1_792_764_131;
@@ -73,10 +76,22 @@ pub enum Scenario {
     LargeFolders,
     /// Large files before the first scan.
     LargeEmpty,
+    /// Check up after a run: three cards filled in and the reminder on.
+    Checkup,
+    /// Memory with normal pressure: figures, a graph and the top apps.
+    Memory,
+    /// Memory with tight pressure and a row that is still open after Quit.
+    MemoryTight,
+    /// Security after a second check: marks, amber buttons and a gray row.
+    Security,
+    /// Security on the first run: the first-check line and no marks.
+    SecurityFirst,
+    /// Security scrolled to the login items.
+    SecurityItems,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 13] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -84,6 +99,12 @@ impl Scenario {
         Scenario::LargeNotOpened,
         Scenario::LargeFolders,
         Scenario::LargeEmpty,
+        Scenario::Checkup,
+        Scenario::Memory,
+        Scenario::MemoryTight,
+        Scenario::Security,
+        Scenario::SecurityFirst,
+        Scenario::SecurityItems,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -101,12 +122,23 @@ impl Scenario {
             Scenario::LargeNotOpened => "large-not-opened",
             Scenario::LargeFolders => "large-folders",
             Scenario::LargeEmpty => "large-empty",
+            Scenario::Checkup => "checkup",
+            Scenario::Memory => "memory",
+            Scenario::MemoryTight => "memory-tight",
+            Scenario::Security => "security",
+            Scenario::SecurityFirst => "security-first",
+            Scenario::SecurityItems => "security-items",
         }
     }
 
     fn screen(self) -> Screen {
         match self {
             Scenario::Cleanup | Scenario::CleanupDone | Scenario::CleanupEmpty => Screen::Cleanup,
+            Scenario::Checkup => Screen::Checkup,
+            Scenario::Memory | Scenario::MemoryTight => Screen::Memory,
+            Scenario::Security | Scenario::SecurityFirst | Scenario::SecurityItems => {
+                Screen::Security
+            }
             _ => Screen::Large,
         }
     }
@@ -203,6 +235,8 @@ pub struct DemoState {
     pub now_unix: u64,
     /// The row key drawn hovered (nothing can really hover a hidden window).
     pub hovered: Option<String>,
+    /// How far the Security list starts scrolled, in points (a hidden window can't scroll).
+    pub scroll_y: f32,
 }
 
 impl Global for DemoState {}
@@ -217,7 +251,12 @@ impl DemoState {
                 Scenario::Large | Scenario::LargeNotOpened => {
                     Some("Movies/2025/trip-raw.mov".to_string())
                 }
+                Scenario::SecurityItems => Some("user:com.dropbox.sync-agent".to_string()),
                 _ => None,
+            },
+            scroll_y: match scenario {
+                Scenario::SecurityItems => 372.,
+                _ => 0.,
             },
         }
     }
@@ -616,6 +655,284 @@ pub fn large_scan() -> LargeScan {
     scan
 }
 
+// ---------- Memory, Security and Check up data ----------
+
+fn mem_row(name: &str, mb: u64, helpers: u32, quittable: bool) -> AppMemory {
+    let pid = 1_000 + name.len() as i32 * 7;
+    AppMemory {
+        id: format!("app:/Applications/{name}.app"),
+        name: name.to_string(),
+        kind: MemoryKind::App,
+        pid,
+        pids: std::iter::once(pid)
+            .chain((0..helpers as i32).map(|i| pid + 100 + i))
+            .collect(),
+        bundle_id: None,
+        app_path: Some(PathBuf::from(format!("/Applications/{name}.app"))),
+        footprint: mb * MB,
+        helpers,
+        quittable,
+        members: Vec::new(),
+    }
+}
+
+/// The id of a demo Memory row, for the rows that show a Quit state.
+pub fn mem_id(name: &str) -> String {
+    format!("app:/Applications/{name}.app")
+}
+
+/// The Memory snapshot of the memory scenarios: 16 GB, a little swap, and the apps a developer
+/// would have open.
+pub fn memory_snapshot(pressure: Pressure) -> MemorySnapshot {
+    let tight = pressure != Pressure::Normal;
+    let (swap_total, swap_used, compressed) = if tight {
+        (8_192 * MB, 4_800 * MB, 5_900 * MB)
+    } else {
+        (2_048 * MB, 320 * MB, 3_400 * MB)
+    };
+    let mut apps = vec![
+        mem_row("Google Chrome", if tight { 5_600 } else { 4_200 }, 14, true),
+        mem_row("Xcode", if tight { 4_300 } else { 3_100 }, 6, true),
+        mem_row("Slack", 1_400, 5, true),
+        mem_row("Spotify", 920, 4, true),
+        mem_row("Safari", 780, 3, true),
+        AppMemory {
+            id: "system".to_string(),
+            name: "System processes".to_string(),
+            kind: MemoryKind::System,
+            pid: 0,
+            pids: vec![],
+            bundle_id: None,
+            app_path: None,
+            // As on a real Mac: the size `top` gave for the processes Tidy cannot read
+            // itself, and the row names the large ones inside.
+            footprint: if tight { 2_600 * MB } else { 2_100 * MB },
+            helpers: 0,
+            quittable: false,
+            members: vec![
+                "WindowServer".to_string(),
+                "kernel_task".to_string(),
+                "launchd".to_string(),
+                "mds_stores".to_string(),
+            ],
+        },
+        mem_row("Messages", 310, 1, true),
+        mem_row("Finder", 250, 0, false),
+        mem_row("Notes", 190, 1, true),
+    ];
+    apps.sort_by_key(|a| std::cmp::Reverse(a.footprint));
+    MemorySnapshot {
+        at: NOW,
+        pressure,
+        pressure_level: match pressure {
+            Pressure::Normal => 1,
+            Pressure::Warning => 2,
+            Pressure::Critical => 4,
+        },
+        total_bytes: 16_000 * MB,
+        swap: SwapUsage {
+            total: swap_total,
+            used: swap_used,
+            free: swap_total - swap_used,
+        },
+        compressed_bytes: compressed,
+        pages: PageStats::default(),
+        apps,
+    }
+}
+
+/// Sixty samples (two minutes): normal, a short stretch of warning, normal again. The tight
+/// scenario ends in warning.
+pub fn pressure_history(tight: bool) -> Vec<Pressure> {
+    (0..60)
+        .map(|i| match (tight, i) {
+            (false, 28..=37) => Pressure::Warning,
+            (true, 40..=44) => Pressure::Critical,
+            (true, 22..=59) => Pressure::Warning,
+            _ => Pressure::Normal,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn login_item(
+    label: &str,
+    program: &str,
+    scope: Scope,
+    kind: LaunchKind,
+    signer: Signer,
+    notarized: Option<bool>,
+    runs_at_load: bool,
+    mark: Option<Mark>,
+) -> LoginItem {
+    let dir = match (scope, kind) {
+        (Scope::User, _) => "/Users/demo/Library/LaunchAgents",
+        (Scope::System, LaunchKind::Agent) => "/Library/LaunchAgents",
+        (Scope::System, LaunchKind::Daemon) => "/Library/LaunchDaemons",
+    };
+    LoginItem {
+        label: label.to_string(),
+        plist: Some(PathBuf::from(format!("{dir}/{label}.plist"))),
+        program: Some(PathBuf::from(program)),
+        runs_at_load,
+        scope,
+        kind,
+        signer,
+        notarized,
+        mark,
+    }
+}
+
+/// A Security report. `first_run` has no marks and says it is the first check.
+pub fn security_report(first_run: bool) -> SecurityReport {
+    let marked = |m: Mark| (!first_run).then_some(m);
+    let mut r = SecurityReport::empty(NOW - 2 * 60);
+    r.first_run = first_run;
+    r.compared_to = (!first_run).then(|| "2026-W42".to_string());
+    r.updates_checked = false;
+
+    let green = |id, sentence: &str| CheckResult::new(id, Status::Green, sentence);
+    let mut firewall = CheckResult::new(
+        CheckId::Firewall,
+        Status::Amber,
+        "Firewall is off. Your Mac accepts incoming connections from apps that ask for them. Most home networks are fine either way.",
+    );
+    firewall.mark = marked(Mark::Changed);
+    let mut login = CheckResult::new(
+        CheckId::LoginItems,
+        Status::Amber,
+        "2 of 4 items need a look: one is new since last week and one is not signed.",
+    );
+    login.mark = marked(Mark::New);
+    let mut chrome = CheckResult::new(
+        CheckId::ChromeExtensions,
+        Status::Amber,
+        "1 extension was added since last week. Open chrome://extensions in Chrome to review it.",
+    );
+    chrome.mark = marked(Mark::New);
+    let mut xprotect = green(
+        CheckId::XProtect,
+        "XProtect was updated 12 days ago (version 5321).",
+    );
+    xprotect.detail = Some("5321".to_string());
+    r.checks = vec![
+        green(
+            CheckId::FileVault,
+            "FileVault is on. Your disk is encrypted.",
+        ),
+        firewall,
+        green(
+            CheckId::Gatekeeper,
+            "Gatekeeper is on. Apps from outside the App Store need an identified developer.",
+        ),
+        green(
+            CheckId::Sip,
+            "System Integrity Protection is on. macOS system files are protected.",
+        ),
+        xprotect,
+        CheckResult::new(
+            CheckId::MacosUpdates,
+            Status::Gray,
+            "Checked on demand. Press Check now to look for updates.",
+        ),
+        login,
+        chrome,
+    ];
+    r.login_items = vec![
+        login_item(
+            "com.dropbox.sync-agent",
+            "/Applications/Dropbox.app/Contents/MacOS/Dropbox",
+            Scope::User,
+            LaunchKind::Agent,
+            Signer::Team("Dropbox, Inc.".to_string()),
+            Some(true),
+            true,
+            marked(Mark::New),
+        ),
+        login_item(
+            "com.example.backup-helper",
+            "/Users/demo/bin/backup-helper",
+            Scope::User,
+            LaunchKind::Agent,
+            Signer::Unsigned,
+            Some(false),
+            true,
+            None,
+        ),
+        login_item(
+            "com.google.keystone.agent",
+            "/Users/demo/Library/Google/GoogleSoftwareUpdate/GoogleSoftwareUpdate.bundle/Contents/Resources/GoogleSoftwareUpdateAgent.app/Contents/MacOS/GoogleSoftwareUpdateAgent",
+            Scope::User,
+            LaunchKind::Agent,
+            Signer::Team("Google LLC".to_string()),
+            Some(true),
+            true,
+            None,
+        ),
+        login_item(
+            "at.obdev.littlesnitch.daemon",
+            "/Library/Application Support/Objective Development/Little Snitch/Components/at.obdev.littlesnitchd",
+            Scope::System,
+            LaunchKind::Daemon,
+            Signer::Team("Objective Development Software GmbH".to_string()),
+            Some(true),
+            true,
+            None,
+        ),
+    ];
+    r.extensions = vec![
+        ChromeExtension {
+            id: "a".repeat(32),
+            name: "Reader View".to_string(),
+            version: Some("2.1.4".to_string()),
+            profile: "Default".to_string(),
+            enabled: true,
+            mark: marked(Mark::New),
+        },
+        ChromeExtension {
+            id: "b".repeat(32),
+            name: "Password manager".to_string(),
+            version: Some("8.12.0".to_string()),
+            profile: "Default".to_string(),
+            enabled: true,
+            mark: None,
+        },
+    ];
+    r
+}
+
+/// The last check up of the Check up scenario: two days ago.
+pub fn last_checkup() -> Checkup {
+    let report = security_report(false);
+    Checkup {
+        at: NOW - 2 * DAY - 600,
+        include_updates: false,
+        cleanup: Some(CheckupCleanup {
+            safe_bytes: 6_344 * MB,
+            safe_items: 7,
+            review_bytes: 18_706 * MB,
+        }),
+        security: Some(CheckupSecurity::from_report(&report)),
+        memory: Some(CheckupMemory {
+            pressure: Pressure::Normal,
+            swap_used: 320 * MB,
+            compressed_bytes: 3_400 * MB,
+        }),
+    }
+}
+
+/// When the reminder fires in the Check up scenario: 10:00 seven days after the last check up.
+pub fn reminder_date() -> ReminderDate {
+    ReminderDate {
+        at: NOW + 5 * DAY,
+        year: 2026,
+        month: 10,
+        day: 28,
+        hour: 10,
+        minute: 0,
+    }
+}
+
 // ---------- startup ----------
 
 /// How long the offscreen export waits before reading the window's frame. The only frame is
@@ -698,12 +1015,13 @@ fn set_accessory_policy() {
 /// Fills the model for a scenario.
 fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
     let (plan, large) = match scenario {
-        Scenario::Cleanup | Scenario::CleanupDone => (Some(cleanup_plan()), None),
-        Scenario::CleanupEmpty => (None, None),
+        Scenario::Cleanup | Scenario::CleanupDone | Scenario::Checkup => {
+            (Some(cleanup_plan()), None)
+        }
         Scenario::Large | Scenario::LargeNotOpened | Scenario::LargeFolders => {
             (None, Some(large_scan()))
         }
-        Scenario::LargeEmpty => (None, None),
+        _ => (None, None),
     };
     m.load_demo(scenario.screen(), plan, large, Some(disk()));
     match scenario {
@@ -718,6 +1036,47 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
                 bytes: 8_444 * MB,
             };
             m.cleanup.notice = Some(Notice::Moved { bytes: 6_344 * MB });
+        }
+        Scenario::Checkup => {
+            m.settings.reminder_enabled = true;
+            m.checkup.last = Some(last_checkup());
+            m.checkup.loaded = true;
+            m.checkup.permission = Some(Permission::Granted);
+            m.checkup.next_reminder = Some(reminder_date());
+            m.security.report = Some(security_report(false));
+            m.memory.snapshot = Some(memory_snapshot(Pressure::Normal));
+        }
+        Scenario::Memory | Scenario::MemoryTight => {
+            let tight = scenario == Scenario::MemoryTight;
+            m.memory.snapshot = Some(memory_snapshot(if tight {
+                Pressure::Warning
+            } else {
+                Pressure::Normal
+            }));
+            m.memory.history = pressure_history(tight);
+            // One row shows each state of a Quit.
+            let (name, state) = if tight {
+                ("Spotify", crate::views::memory::QuitState::StillOpen)
+            } else {
+                ("Slack", crate::views::memory::QuitState::Requested)
+            };
+            let pid = m
+                .memory
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.app(&mem_id(name)))
+                .map_or(0, |a| a.pid);
+            m.memory
+                .quits
+                .insert(mem_id(name), crate::views::memory::Quit { state, pid });
+        }
+        Scenario::Security | Scenario::SecurityItems => {
+            m.security.report = Some(security_report(false));
+            m.security.loaded = true;
+        }
+        Scenario::SecurityFirst => {
+            m.security.report = Some(security_report(true));
+            m.security.loaded = true;
         }
         Scenario::LargeNotOpened => m.large.filter = LargeFilter::NotOpened,
         Scenario::LargeFolders => {
@@ -779,7 +1138,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 7);
+        assert_eq!(Scenario::ALL.len(), 13);
     }
 
     #[test]
@@ -849,6 +1208,102 @@ mod tests {
         assert!(!shot_export_from(true, true, Some(OsStr::new(""))));
         // The test binary has no TIDY_DEMO_SHOT export.
         assert!(!exports_shot());
+    }
+
+    #[test]
+    fn the_security_demo_has_marks_a_gray_row_and_a_first_run_variant() {
+        let r = security_report(false);
+        assert_eq!(r.amber(), 3);
+        assert_eq!(r.gray(), 1);
+        assert_eq!(r.headline(), "3 things to look at");
+        assert_eq!(r.checks.len(), CheckId::ALL.len());
+        assert!(r.checks.iter().any(|c| c.mark == Some(Mark::Changed)));
+        assert!(r.login_items.iter().any(|i| i.mark == Some(Mark::New)));
+        assert!(r.login_items.iter().any(|i| i.signer == Signer::Unsigned));
+        // The gray row has no button that asks for access.
+        assert!(
+            r.checks
+                .iter()
+                .filter(|c| c.status == Status::Gray)
+                .all(|c| c.action.is_none())
+        );
+        let first = security_report(true);
+        assert!(first.first_run && first.compared_to.is_none());
+        assert!(first.checks.iter().all(|c| c.mark.is_none()));
+        assert!(first.login_items.iter().all(|i| i.mark.is_none()));
+        assert!(first.extensions.iter().all(|e| e.mark.is_none()));
+        // The hover target of the items scenario exists.
+        let hovered = DemoState::new(Scenario::SecurityItems).hovered.unwrap();
+        assert!(r.login_items.iter().any(|i| i.key() == hovered));
+    }
+
+    #[test]
+    fn the_memory_demo_adds_up_and_protects_finder_and_the_system_row() {
+        for p in [Pressure::Normal, Pressure::Warning] {
+            let s = memory_snapshot(p);
+            assert!(s.apps.windows(2).all(|w| w[0].footprint >= w[1].footprint));
+            let finder = s.apps.iter().find(|a| a.name == "Finder").unwrap();
+            assert!(!finder.quittable);
+            let system = s
+                .apps
+                .iter()
+                .find(|a| a.kind == MemoryKind::System)
+                .unwrap();
+            assert!(!system.quittable);
+            assert!(s.swap.used <= s.swap.total);
+        }
+        assert_eq!(pressure_history(false).len(), 60);
+        assert!(pressure_history(false).contains(&Pressure::Warning));
+        assert_eq!(pressure_history(true).last(), Some(&Pressure::Warning));
+        // The rows that show a Quit state exist in the snapshot.
+        assert!(
+            memory_snapshot(Pressure::Normal)
+                .app(&mem_id("Slack"))
+                .is_some()
+        );
+        assert!(
+            memory_snapshot(Pressure::Warning)
+                .app(&mem_id("Spotify"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_checkup_demo_is_consistent() {
+        let c = last_checkup();
+        assert_eq!(c.cleanup.unwrap().safe_bytes, cleanup_plan().safe_bytes());
+        assert_eq!(
+            c.security.as_ref().unwrap().amber,
+            security_report(false).amber()
+        );
+        assert_eq!(reminder_date().hour, 10);
+    }
+
+    #[test]
+    fn demo_text_has_no_em_dashes_or_scare_words() {
+        let mut texts: Vec<String> = Vec::new();
+        let r = security_report(false);
+        for c in &r.checks {
+            texts.push(c.sentence.clone());
+        }
+        for i in &r.login_items {
+            texts.push(i.label.clone());
+        }
+        for a in memory_snapshot(Pressure::Normal).apps {
+            texts.push(a.name);
+        }
+        for t in texts {
+            let lower = t.to_lowercase();
+            for bad in [
+                "\u{2014}",
+                &["thre", "at"].concat(),
+                &["infe", "cted"].concat(),
+                &["dan", "ger"].concat(),
+                &["risk", " score"].concat(),
+            ] {
+                assert!(!lower.contains(bad), "{t}");
+            }
+        }
     }
 
     #[test]

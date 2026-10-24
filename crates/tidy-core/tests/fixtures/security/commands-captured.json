@@ -1,0 +1,6 @@
+{
+  "/usr/bin/fdesetup status": {"status": 0, "stdout": "FileVault is On.\n", "stderr": ""},
+  "/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate": {"status": 0, "stdout": "Firewall is disabled. (State = 0)\n", "stderr": ""},
+  "/usr/sbin/spctl --status": {"status": 0, "stdout": "assessments enabled\n", "stderr": ""},
+  "/usr/bin/csrutil status": {"status": 0, "stdout": "System Integrity Protection status: enabled.\n", "stderr": ""}
+}

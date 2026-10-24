@@ -1,6 +1,7 @@
 //! The value types shared by the core, tidyctl and the UI: cleanup plans, large-file scans,
-//! the folder tree and history entries. Everything here is plain data with serde, so the CLI
-//! can print it as JSON and the fixtures can write the expected results with the same types.
+//! the folder tree and history entries, and for M2 the memory snapshot, the security report
+//! and the check up summary. Everything here is plain data with serde, so the CLI can print it
+//! as JSON and the fixtures can write the expected results with the same types.
 //!
 //! Sizes are bytes. `bytes_alloc` is the space on disk (what moving the item to the Trash and
 //! emptying the Trash would free), `bytes_logical` is the sum of file lengths. Times are Unix
@@ -655,6 +656,769 @@ impl HistoryEntry {
     }
 }
 
+// ---------- Dates for M2 ----------
+
+/// (year, month, day) to days since 1970-01-01 in the proleptic Gregorian calendar (Howard
+/// Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = i64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The ISO 8601 week of Unix seconds `secs`, in UTC, as `YYYY-Www` (for example
+/// `2026-W43`). Weeks start on Monday and week 1 holds the year's first Thursday, so the
+/// days around New Year can belong to the neighbouring year. Security results are saved
+/// one file per week under this name (see [`crate::paths::AppPaths::security_file`]).
+pub fn iso_week_id(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    // 1970-01-01 was a Thursday; Monday is 1 and Sunday is 7.
+    let weekday = (days + 3).rem_euclid(7) + 1;
+    let thursday = days - weekday + 4;
+    let (year, _, _) = civil_from_days(thursday);
+    let week = (thursday - days_from_civil(year, 1, 1)) / 7 + 1;
+    format!("{year:04}-W{week:02}")
+}
+
+// ---------- Memory (M2) ----------
+
+/// Apps and processes the Memory screen never offers to quit (design section 5.3), by
+/// process name or bundle id, compared ignoring ASCII case. Tidy itself is left out by pid
+/// ([`crate::env::MemoryProbe::own_pid`]) and by [`TIDY_BUNDLE_ID`].
+pub const NEVER_QUIT: &[&str] = &[
+    "Finder",
+    "com.apple.finder",
+    "WindowServer",
+    "loginwindow",
+    "com.apple.loginwindow",
+];
+
+/// Tidy's bundle id.
+pub const TIDY_BUNDLE_ID: &str = "dev.sdusteric.tidy";
+
+/// The name of the row that sums the processes Tidy cannot read (owned by root).
+pub const SYSTEM_PROCESSES: &str = "System processes";
+
+/// Memory pressure as macOS reports it in `kern.memorystatus_vm_pressure_level`.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Pressure {
+    #[default]
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl Pressure {
+    /// From the sysctl value: 1 is normal, 2 warning, 4 critical. 0 or an unknown value
+    /// below 2 reads as Normal, so an odd value never raises an alarm.
+    pub fn from_level(level: u32) -> Pressure {
+        match level {
+            4.. => Pressure::Critical,
+            2 | 3 => Pressure::Warning,
+            _ => Pressure::Normal,
+        }
+    }
+
+    /// The figure: "Normal", "Warning" or "Critical".
+    pub fn label(self) -> &'static str {
+        match self {
+            Pressure::Normal => "Normal",
+            Pressure::Warning => "Warning",
+            Pressure::Critical => "Critical",
+        }
+    }
+
+    /// The verdict line at the top of the Memory screen and on the Check up card.
+    pub fn verdict(self) -> &'static str {
+        match self {
+            Pressure::Normal => {
+                "Memory is fine. macOS is using spare memory for caching, which is normal."
+            }
+            Pressure::Warning => "Memory is tight. Quitting a large app below will help.",
+            Pressure::Critical => {
+                "Memory is very tight. Your Mac is moving memory to disk, which slows it down."
+            }
+        }
+    }
+}
+
+/// Swap use from `vm.swapusage`, in bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SwapUsage {
+    pub total: u64,
+    pub used: u64,
+    pub free: u64,
+}
+
+/// Page counts from `host_statistics64(HOST_VM_INFO64)`, the numbers `vm_stat` prints. Every
+/// count is in pages of `page_size` bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PageStats {
+    /// `vm_page_size` (16384 on Apple silicon).
+    pub page_size: u64,
+    pub free: u64,
+    pub active: u64,
+    pub inactive: u64,
+    pub speculative: u64,
+    pub wired: u64,
+    pub purgeable: u64,
+    /// File-backed pages ("File-backed pages" in `vm_stat`): the file cache.
+    pub external: u64,
+    /// Anonymous pages ("Anonymous pages").
+    pub internal: u64,
+    /// Pages the compressor occupies ("Pages occupied by compressor"). Times `page_size` this
+    /// is the Compressed figure.
+    pub compressor: u64,
+    /// Pages held in the compressor before compression ("Pages stored in compressor").
+    pub compressed: u64,
+    pub swapins: u64,
+    pub swapouts: u64,
+}
+
+impl PageStats {
+    /// `pages` in bytes.
+    pub fn bytes(&self, pages: u64) -> u64 {
+        pages.saturating_mul(self.page_size)
+    }
+
+    /// The memory the compressor uses: [`PageStats::compressor`] times the page size.
+    pub fn compressed_bytes(&self) -> u64 {
+        self.bytes(self.compressor)
+    }
+}
+
+/// The system-wide numbers a [`crate::env::MemoryProbe`] reads in one go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VmStats {
+    /// The raw `kern.memorystatus_vm_pressure_level` (1, 2 or 4).
+    pub pressure_level: u32,
+    /// `hw.memsize`.
+    pub total_bytes: u64,
+    pub swap: SwapUsage,
+    pub pages: PageStats,
+}
+
+/// One row of a process table, as a [`crate::env::MemoryProbe`] reports it. The memory engine
+/// groups these into [`AppMemory`] rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcInfo {
+    pub pid: i32,
+    /// The parent pid (1 for processes started by launchd).
+    pub ppid: i32,
+    /// From `responsibility_get_pid_responsible_for_pid` (looked up with `dlsym`). None when
+    /// the function is missing or fails; grouping then falls back to the parent chain and
+    /// the `.app` prefix of `path`.
+    #[serde(default)]
+    pub responsible: Option<i32>,
+    pub uid: u32,
+    /// `proc_name`, or the executable's file name.
+    pub name: String,
+    /// `proc_pidpath`. None when it cannot be read.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// `ri_phys_footprint` from `proc_pid_rusage`, in bytes. None when it cannot be read,
+    /// which is the case for root-owned processes and other users' processes; those go to
+    /// the [`SYSTEM_PROCESSES`] row.
+    #[serde(default)]
+    pub footprint: Option<u64>,
+    /// For a process whose `footprint` is None: the footprint `/usr/bin/top` reported for it
+    /// (its MEM column), in bytes. `top` is setuid root, so it can read what an app cannot.
+    /// None when `top` did not list the process or could not run. The System processes row
+    /// sums these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_footprint: Option<u64>,
+}
+
+/// What a Memory row stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    /// An app bundle with its helper processes.
+    App,
+    /// A process Tidy could not attribute to an app; the row shows the process name.
+    Process,
+    /// The one "System processes" row: everything Tidy cannot read. No Quit button.
+    System,
+}
+
+/// One row of "Top apps by memory".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppMemory {
+    /// Stable across refreshes, so the screen can keep "Quit requested" on the right row:
+    /// `app:<path of the .app>`, `pid:<pid>` or `system`.
+    pub id: String,
+    /// The app's name (the `.app` folder without the extension), the process name, or
+    /// [`SYSTEM_PROCESSES`].
+    pub name: String,
+    pub kind: MemoryKind,
+    /// The main process: the one Quit is sent to. 0 for the System row.
+    pub pid: i32,
+    /// Every process in the row, the main one first.
+    pub pids: Vec<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    /// The `.app` bundle, for the icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_path: Option<PathBuf>,
+    /// The summed physical footprint of `pids`, in bytes. For the System row it is the sum of
+    /// the sizes `top` reported for its processes ([`ProcInfo::top_footprint`]), and 0 when
+    /// `top` gave none.
+    pub footprint: u64,
+    /// Processes besides the main one (the "3 helpers" on the row).
+    pub helpers: u32,
+    /// Whether the row has a Quit button: false for Tidy, [`NEVER_QUIT`] and the System row.
+    pub quittable: bool,
+    /// For the System row: the names of the processes in it, once each, the large macOS ones
+    /// people know (WindowServer, kernel_task) first, then the rest largest first by the size
+    /// `top` gave and by name. The row is one sum, so the names say what is inside it. Empty
+    /// for the other rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+}
+
+impl AppMemory {
+    /// Whether `name_or_id` (a process name or bundle id) is on [`NEVER_QUIT`] or is Tidy.
+    pub fn never_quit(name_or_id: &str) -> bool {
+        name_or_id.eq_ignore_ascii_case(TIDY_BUNDLE_ID)
+            || NEVER_QUIT
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name_or_id))
+    }
+}
+
+/// A Memory screen refresh, or the Memory part of a check up.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySnapshot {
+    /// Unix seconds.
+    pub at: u64,
+    pub pressure: Pressure,
+    /// The raw `kern.memorystatus_vm_pressure_level`.
+    pub pressure_level: u32,
+    /// `hw.memsize`.
+    pub total_bytes: u64,
+    pub swap: SwapUsage,
+    /// Compressor pages times page size: the Compressed figure.
+    pub compressed_bytes: u64,
+    pub pages: PageStats,
+    /// Rows by footprint, largest first. The System row is included where its size puts it.
+    pub apps: Vec<AppMemory>,
+}
+
+impl MemorySnapshot {
+    /// A snapshot with no numbers and no rows, taken at `at`.
+    pub fn empty(at: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            at,
+            ..MemorySnapshot::default()
+        }
+    }
+
+    /// The figures of `vm` with no rows yet.
+    pub fn from_vm(at: u64, vm: &VmStats) -> MemorySnapshot {
+        MemorySnapshot {
+            at,
+            pressure: Pressure::from_level(vm.pressure_level),
+            pressure_level: vm.pressure_level,
+            total_bytes: vm.total_bytes,
+            swap: vm.swap,
+            compressed_bytes: vm.pages.compressed_bytes(),
+            pages: vm.pages,
+            apps: Vec::new(),
+        }
+    }
+
+    /// The verdict line for this snapshot's pressure.
+    pub fn verdict(&self) -> &'static str {
+        self.pressure.verdict()
+    }
+
+    pub fn app(&self, id: &str) -> Option<&AppMemory> {
+        self.apps.iter().find(|a| a.id == id)
+    }
+}
+
+// ---------- Security (M2) ----------
+
+/// What the first run says, since it has nothing to compare against (design section 5.4).
+pub const FIRST_CHECK_SENTENCE: &str =
+    "This is your first check. Next week Tidy will show what changed.";
+
+/// The checks of design section 5.4, in the order the Security screen lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CheckId {
+    /// `fdesetup status`.
+    #[serde(rename = "filevault")]
+    FileVault,
+    /// `socketfilterfw --getglobalstate`.
+    #[serde(rename = "firewall")]
+    Firewall,
+    /// `spctl --status`.
+    #[serde(rename = "gatekeeper")]
+    Gatekeeper,
+    /// `csrutil status`.
+    #[serde(rename = "sip")]
+    Sip,
+    /// The date and version of `XProtect.bundle/Contents/Info.plist`.
+    #[serde(rename = "xprotect")]
+    XProtect,
+    /// `softwareupdate --list`, only when asked for (it is slow and goes online).
+    #[serde(rename = "macos_updates")]
+    MacosUpdates,
+    /// Launch agent and daemon plists and `launchctl print gui/<uid>`.
+    #[serde(rename = "login_items")]
+    LoginItems,
+    /// The `Secure Preferences` of every Chrome profile.
+    #[serde(rename = "chrome_extensions")]
+    ChromeExtensions,
+}
+
+impl CheckId {
+    /// Every check, in screen order.
+    pub const ALL: [CheckId; 8] = [
+        CheckId::FileVault,
+        CheckId::Firewall,
+        CheckId::Gatekeeper,
+        CheckId::Sip,
+        CheckId::XProtect,
+        CheckId::MacosUpdates,
+        CheckId::LoginItems,
+        CheckId::ChromeExtensions,
+    ];
+
+    /// The row title.
+    pub fn title(self) -> &'static str {
+        match self {
+            CheckId::FileVault => "FileVault",
+            CheckId::Firewall => "Firewall",
+            CheckId::Gatekeeper => "Gatekeeper",
+            CheckId::Sip => "System Integrity Protection",
+            CheckId::XProtect => "XProtect",
+            CheckId::MacosUpdates => "macOS updates",
+            CheckId::LoginItems => "Login items and background helpers",
+            CheckId::ChromeExtensions => "Chrome extensions",
+        }
+    }
+
+    /// The System Settings page an amber row's button opens, per the table in 5.4. None for
+    /// SIP (turned back on in Recovery) and Chrome extensions (only Chrome can open its page).
+    pub fn link(self) -> Option<SettingsLink> {
+        match self {
+            CheckId::FileVault | CheckId::Gatekeeper => Some(SettingsLink::PrivacySecurity),
+            CheckId::Firewall => Some(SettingsLink::Network),
+            CheckId::XProtect | CheckId::MacosUpdates => Some(SettingsLink::SoftwareUpdate),
+            CheckId::LoginItems => Some(SettingsLink::LoginItems),
+            CheckId::Sip | CheckId::ChromeExtensions => None,
+        }
+    }
+}
+
+/// The status dot of a check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    /// As it should be.
+    Green,
+    /// Something to look at. The sentence says what is off and what it means.
+    Amber,
+    /// Could not check. The sentence says why. Never a button that asks for access.
+    Gray,
+}
+
+/// A System Settings page a button opens. The app opens the URL only from a click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsLink {
+    PrivacySecurity,
+    /// The Network page. The firewall has its own page under it, but its URL anchor is not
+    /// verified, so the button opens Network.
+    Network,
+    SoftwareUpdate,
+    LoginItems,
+    /// Notifications, for the weekly reminder when permission is denied.
+    Notifications,
+}
+
+impl SettingsLink {
+    /// The `x-apple.systempreferences:` URL (macOS 13 and later).
+    pub fn url(self) -> &'static str {
+        match self {
+            SettingsLink::PrivacySecurity => {
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+            }
+            SettingsLink::Network => {
+                "x-apple.systempreferences:com.apple.Network-Settings.extension"
+            }
+            SettingsLink::SoftwareUpdate => {
+                "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"
+            }
+            SettingsLink::LoginItems => {
+                "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+            }
+            SettingsLink::Notifications => {
+                "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=dev.sdusteric.tidy"
+            }
+        }
+    }
+
+    /// The button label.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsLink::PrivacySecurity => "Open Privacy & Security",
+            SettingsLink::Network => "Open Network settings",
+            SettingsLink::SoftwareUpdate => "Open Software Update",
+            SettingsLink::LoginItems => "Open Login Items",
+            SettingsLink::Notifications => "Open Notifications settings",
+        }
+    }
+}
+
+/// How a row compares with last week's results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mark {
+    /// Not in last week's results.
+    New,
+    /// In last week's results with a different status (a check) or program or signer (a
+    /// login item).
+    Changed,
+}
+
+impl Mark {
+    /// The tag text: "New" or "Changed".
+    pub fn label(self) -> &'static str {
+        match self {
+            Mark::New => "New",
+            Mark::Changed => "Changed",
+        }
+    }
+}
+
+/// One row of the Security screen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub id: CheckId,
+    pub status: Status,
+    /// Usually [`CheckId::title`].
+    pub title: String,
+    /// One plain sentence, at most two: for green what is on, for amber what is off and what
+    /// it means, for gray why Tidy could not check. No scare words (the copy rules of design
+    /// section 5.4).
+    pub sentence: String,
+    /// The button of an amber row. None for green and gray rows and for checks without a
+    /// page ([`CheckId::link`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SettingsLink>,
+    /// A short fact compared week over week, such as the XProtect version or the update
+    /// names. Not shown as a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+}
+
+impl CheckResult {
+    /// A row with the check's title, no detail and no mark. The action is the check's link
+    /// when `status` is amber, otherwise None.
+    pub fn new(id: CheckId, status: Status, sentence: impl Into<String>) -> CheckResult {
+        CheckResult {
+            id,
+            status,
+            title: id.title().to_string(),
+            sentence: sentence.into(),
+            action: if status == Status::Amber {
+                id.link()
+            } else {
+                None
+            },
+            detail: None,
+            mark: None,
+        }
+    }
+}
+
+/// Whose a launch agent or daemon is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// `~/Library/LaunchAgents` or the user's launchd domain. Only these can go to the Trash.
+    User,
+    /// `/Library/LaunchAgents` or `/Library/LaunchDaemons`.
+    System,
+}
+
+/// Whether a launchd job runs per user (agent) or for the whole Mac (daemon).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchKind {
+    Agent,
+    Daemon,
+}
+
+/// Who signed a program.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Signer {
+    /// Signed by Apple (platform binary or Apple certificate).
+    Apple,
+    /// A Developer ID or App Store signature: the team name (or team id when the name is
+    /// not available).
+    Team(String),
+    /// No signature, or an ad-hoc one.
+    Unsigned,
+    /// The program is missing or could not be checked.
+    Unknown,
+}
+
+impl Signer {
+    /// What the row shows: "Apple", the team name, "Not signed" or "Unknown".
+    pub fn label(&self) -> &str {
+        match self {
+            Signer::Apple => "Apple",
+            Signer::Team(name) => name,
+            Signer::Unsigned => "Not signed",
+            Signer::Unknown => "Unknown",
+        }
+    }
+}
+
+/// A launch agent or daemon: a login item or background helper.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginItem {
+    /// The plist's `Label`.
+    pub label: String,
+    /// The plist it came from. None for a job only `launchctl print` lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plist: Option<PathBuf>,
+    /// `Program`, or the first item of `ProgramArguments`. None when the plist names
+    /// neither (for example a bundled helper registered by an app).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<PathBuf>,
+    /// `RunAtLoad`.
+    pub runs_at_load: bool,
+    pub scope: Scope,
+    pub kind: LaunchKind,
+    pub signer: Signer,
+    /// From `SecAssessment` (or the stapled ticket). None when it could not be checked or
+    /// does not apply (Apple programs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notarized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+}
+
+impl LoginItem {
+    /// The key that matches an item with last week's: scope and label.
+    pub fn key(&self) -> String {
+        let scope = match self.scope {
+            Scope::User => "user",
+            Scope::System => "system",
+        };
+        format!("{scope}:{}", self.label)
+    }
+
+    /// Whether the item makes the Login items check amber: new since the last check, not
+    /// signed, or not notarized.
+    pub fn needs_a_look(&self) -> bool {
+        self.mark == Some(Mark::New)
+            || self.signer == Signer::Unsigned
+            || self.notarized == Some(false)
+    }
+
+    /// Whether "Move to Trash" is offered: user agents with a plist only.
+    pub fn can_trash(&self) -> bool {
+        self.scope == Scope::User && self.kind == LaunchKind::Agent && self.plist.is_some()
+    }
+}
+
+/// A Chrome extension from a profile's `Secure Preferences`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChromeExtension {
+    /// The 32-letter extension id.
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The profile folder name (`Default`, `Profile 1`).
+    pub profile: String,
+    /// False when the extension is installed but turned off.
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+}
+
+impl ChromeExtension {
+    /// The key that matches an extension with last week's: profile and id.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.profile, self.id)
+    }
+}
+
+/// One Security run, saved as `security/<week>.json`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityReport {
+    /// The ISO week of `at` ([`iso_week_id`]), the file name the report is saved under.
+    pub week: String,
+    /// Unix seconds.
+    pub at: u64,
+    /// No earlier week to compare against: the screen shows [`FIRST_CHECK_SENTENCE`] and
+    /// nothing is marked.
+    pub first_run: bool,
+    /// The week the marks compare against, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compared_to: Option<String>,
+    /// Whether `softwareupdate --list` ran. When false the macOS updates row is gray and
+    /// says it is checked on demand.
+    pub updates_checked: bool,
+    /// One row per check, in [`CheckId::ALL`] order.
+    pub checks: Vec<CheckResult>,
+    /// New items first, then by label.
+    pub login_items: Vec<LoginItem>,
+    pub extensions: Vec<ChromeExtension>,
+}
+
+impl SecurityReport {
+    /// A report with no rows, taken at `at`.
+    pub fn empty(at: u64) -> SecurityReport {
+        SecurityReport {
+            week: iso_week_id(at),
+            at,
+            ..SecurityReport::default()
+        }
+    }
+
+    pub fn check(&self, id: CheckId) -> Option<&CheckResult> {
+        self.checks.iter().find(|c| c.id == id)
+    }
+
+    /// How many checks are amber: "2 things to look at".
+    pub fn amber(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|c| c.status == Status::Amber)
+            .count()
+    }
+
+    /// How many checks could not run.
+    pub fn gray(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|c| c.status == Status::Gray)
+            .count()
+    }
+
+    /// "All good", "1 thing to look at" or "N things to look at".
+    pub fn headline(&self) -> String {
+        security_headline(self.amber())
+    }
+}
+
+/// The Security summary for `amber` amber checks.
+pub fn security_headline(amber: usize) -> String {
+    match amber {
+        0 => "All good".to_string(),
+        1 => "1 thing to look at".to_string(),
+        n => format!("{n} things to look at"),
+    }
+}
+
+// ---------- Check up (M2) ----------
+
+/// The Cleanup card of a check up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckupCleanup {
+    /// The ticked total: "6.3 GB ready to clean".
+    pub safe_bytes: u64,
+    pub safe_items: usize,
+    /// The Review total.
+    pub review_bytes: u64,
+}
+
+impl CheckupCleanup {
+    pub fn from_plan(plan: &Plan) -> CheckupCleanup {
+        CheckupCleanup {
+            safe_bytes: plan.safe_bytes(),
+            safe_items: plan.ticked().count(),
+            review_bytes: plan.review_bytes(),
+        }
+    }
+}
+
+/// The Security card of a check up.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckupSecurity {
+    /// The report's week, so the card can open that report.
+    pub week: String,
+    pub amber: usize,
+    pub gray: usize,
+    pub first_run: bool,
+}
+
+impl CheckupSecurity {
+    pub fn from_report(report: &SecurityReport) -> CheckupSecurity {
+        CheckupSecurity {
+            week: report.week.clone(),
+            amber: report.amber(),
+            gray: report.gray(),
+            first_run: report.first_run,
+        }
+    }
+
+    /// "All good" or "2 things to look at".
+    pub fn headline(&self) -> String {
+        security_headline(self.amber)
+    }
+}
+
+/// The Memory card of a check up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckupMemory {
+    pub pressure: Pressure,
+    pub swap_used: u64,
+    pub compressed_bytes: u64,
+}
+
+impl CheckupMemory {
+    pub fn from_snapshot(s: &MemorySnapshot) -> CheckupMemory {
+        CheckupMemory {
+            pressure: s.pressure,
+            swap_used: s.swap.used,
+            compressed_bytes: s.compressed_bytes,
+        }
+    }
+
+    /// The verdict line.
+    pub fn verdict(&self) -> &'static str {
+        self.pressure.verdict()
+    }
+}
+
+/// One check up: one line of `checkups.jsonl`. A part that failed or was stopped is None
+/// and its card says so.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkup {
+    /// Unix seconds when it finished. The weekly reminder counts from here.
+    pub at: u64,
+    /// Whether "Include macOS updates" was ticked, so `softwareupdate --list` ran.
+    #[serde(default)]
+    pub include_updates: bool,
+    #[serde(default)]
+    pub cleanup: Option<CheckupCleanup>,
+    #[serde(default)]
+    pub security: Option<CheckupSecurity>,
+    #[serde(default)]
+    pub memory: Option<CheckupMemory>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +1708,214 @@ mod tests {
         assert!(again["items"][1]["trash_path"].is_null());
         assert!(again.get("message").is_none());
         assert_eq!(serde_json::from_value::<HistoryEntry>(again).unwrap(), e);
+    }
+
+    // ----- M2 -----
+
+    #[test]
+    fn iso_weeks() {
+        // 2026-10-23 (TEST_NOW) is a Friday in week 43.
+        assert_eq!(iso_week_id(1_792_764_131), "2026-W43");
+        assert_eq!(iso_week_id(0), "1970-W01", "a Thursday");
+        // Monday 2026-10-19 00:00 UTC starts week 43; the Sunday before ends week 42.
+        assert_eq!(iso_week_id(1_792_368_000), "2026-W43");
+        assert_eq!(iso_week_id(1_792_367_999), "2026-W42");
+        // Around New Year: 2021-01-03 (Sunday) is in 2020-W53, 2024-12-30 in 2025-W01.
+        assert_eq!(iso_week_id(1_609_632_000), "2020-W53");
+        assert_eq!(iso_week_id(1_735_516_800), "2025-W01");
+        for (y, m, d) in [(1970, 1, 1), (2000, 2, 29), (2024, 12, 31), (2026, 10, 23)] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
+        }
+    }
+
+    #[test]
+    fn pressure_levels_and_verdicts() {
+        assert_eq!(Pressure::from_level(1), Pressure::Normal);
+        assert_eq!(Pressure::from_level(0), Pressure::Normal);
+        assert_eq!(Pressure::from_level(2), Pressure::Warning);
+        assert_eq!(Pressure::from_level(4), Pressure::Critical);
+        assert!(Pressure::Normal.verdict().starts_with("Memory is fine."));
+        assert!(Pressure::Warning.verdict().starts_with("Memory is tight."));
+        assert!(
+            Pressure::Critical
+                .verdict()
+                .starts_with("Memory is very tight.")
+        );
+        assert_eq!(
+            serde_json::to_string(&Pressure::Warning).unwrap(),
+            "\"warning\""
+        );
+        let vm = VmStats {
+            pressure_level: 2,
+            total_bytes: 16 << 30,
+            swap: SwapUsage {
+                total: 2 << 30,
+                used: 1 << 30,
+                free: 1 << 30,
+            },
+            pages: PageStats {
+                page_size: 16_384,
+                compressor: 1000,
+                ..PageStats::default()
+            },
+        };
+        let s = MemorySnapshot::from_vm(5, &vm);
+        assert_eq!(s.pressure, Pressure::Warning);
+        assert_eq!(s.compressed_bytes, 16_384_000);
+        assert_eq!(s.swap.used, 1 << 30);
+        assert_eq!(CheckupMemory::from_snapshot(&s).verdict(), s.verdict());
+    }
+
+    #[test]
+    fn never_quit_list() {
+        for n in [
+            "Finder",
+            "com.apple.finder",
+            "WindowServer",
+            "loginwindow",
+            TIDY_BUNDLE_ID,
+        ] {
+            assert!(AppMemory::never_quit(n), "{n}");
+        }
+        assert!(AppMemory::never_quit("FINDER"));
+        assert!(!AppMemory::never_quit("Safari"));
+    }
+
+    #[test]
+    fn check_ids_and_links() {
+        let names: Vec<String> = CheckId::ALL
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "\"filevault\"",
+                "\"firewall\"",
+                "\"gatekeeper\"",
+                "\"sip\"",
+                "\"xprotect\"",
+                "\"macos_updates\"",
+                "\"login_items\"",
+                "\"chrome_extensions\"",
+            ]
+        );
+        assert_eq!(CheckId::Sip.link(), None);
+        assert_eq!(CheckId::Firewall.link(), Some(SettingsLink::Network));
+        for l in [
+            SettingsLink::PrivacySecurity,
+            SettingsLink::Network,
+            SettingsLink::SoftwareUpdate,
+            SettingsLink::LoginItems,
+            SettingsLink::Notifications,
+        ] {
+            assert!(l.url().starts_with("x-apple.systempreferences:com.apple."));
+            assert!(l.label().starts_with("Open "));
+        }
+        // Only amber rows get a button.
+        let amber = CheckResult::new(CheckId::FileVault, Status::Amber, "FileVault is off.");
+        assert_eq!(amber.action, Some(SettingsLink::PrivacySecurity));
+        assert_eq!(amber.title, "FileVault");
+        let green = CheckResult::new(CheckId::FileVault, Status::Green, "FileVault is on.");
+        assert_eq!(green.action, None);
+        let gray = CheckResult::new(CheckId::Firewall, Status::Gray, "Tidy could not read this.");
+        assert_eq!(gray.action, None);
+    }
+
+    fn login(scope: Scope, signer: Signer) -> LoginItem {
+        LoginItem {
+            label: "com.example.agent".into(),
+            plist: Some("/h/Library/LaunchAgents/com.example.agent.plist".into()),
+            program: Some("/usr/local/bin/agent".into()),
+            runs_at_load: true,
+            scope,
+            kind: LaunchKind::Agent,
+            signer,
+            notarized: None,
+            mark: None,
+        }
+    }
+
+    #[test]
+    fn login_items() {
+        let mut i = login(Scope::User, Signer::Team("Example Inc".into()));
+        assert_eq!(i.key(), "user:com.example.agent");
+        assert!(!i.needs_a_look());
+        assert!(i.can_trash());
+        i.mark = Some(Mark::New);
+        assert!(i.needs_a_look());
+        i.mark = None;
+        i.notarized = Some(false);
+        assert!(i.needs_a_look());
+        assert!(login(Scope::User, Signer::Unsigned).needs_a_look());
+        assert!(!login(Scope::User, Signer::Apple).needs_a_look());
+        let sys = login(Scope::System, Signer::Apple);
+        assert_eq!(sys.key(), "system:com.example.agent");
+        assert!(!sys.can_trash(), "only user agents go to the Trash");
+        assert_eq!(Signer::Unsigned.label(), "Not signed");
+        assert_eq!(Signer::Team("Example Inc".into()).label(), "Example Inc");
+        assert_eq!(
+            serde_json::to_value(Signer::Team("T".into())).unwrap(),
+            serde_json::json!({"team": "T"})
+        );
+        assert_eq!(serde_json::to_value(Signer::Apple).unwrap(), "apple");
+        let back: LoginItem = serde_json::from_str(&serde_json::to_string(&i).unwrap()).unwrap();
+        assert_eq!(back, i);
+    }
+
+    #[test]
+    fn security_report_counts_and_headlines() {
+        let mut r = SecurityReport::empty(1_792_764_131);
+        assert_eq!(r.week, "2026-W43");
+        assert_eq!(r.headline(), "All good");
+        r.checks = vec![
+            CheckResult::new(CheckId::FileVault, Status::Green, "On."),
+            CheckResult::new(CheckId::Firewall, Status::Amber, "Off."),
+            CheckResult::new(CheckId::MacosUpdates, Status::Gray, "Checked on demand."),
+        ];
+        assert_eq!((r.amber(), r.gray()), (1, 1));
+        assert_eq!(r.headline(), "1 thing to look at");
+        r.checks
+            .push(CheckResult::new(CheckId::Sip, Status::Amber, "Off."));
+        assert_eq!(r.headline(), "2 things to look at");
+        assert_eq!(r.check(CheckId::Sip).unwrap().status, Status::Amber);
+        let c = CheckupSecurity::from_report(&r);
+        assert_eq!((c.amber, c.gray, c.week.as_str()), (2, 1, "2026-W43"));
+        assert_eq!(c.headline(), "2 things to look at");
+        let back: SecurityReport =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        let e = ChromeExtension {
+            id: "a".repeat(32),
+            name: "Example".into(),
+            version: None,
+            profile: "Profile 1".into(),
+            enabled: true,
+            mark: Some(Mark::New),
+        };
+        assert_eq!(e.key(), format!("Profile 1/{}", "a".repeat(32)));
+        assert_eq!(Mark::Changed.label(), "Changed");
+    }
+
+    #[test]
+    fn checkup_parts() {
+        let plan = Plan {
+            items: vec![
+                item("cache.a:Library/Caches/a", Group::Caches, Class::Safe, 100),
+                item("cache.b:Library/Caches/b", Group::Caches, Class::Review, 40),
+            ],
+            ..Plan::default()
+        };
+        let c = CheckupCleanup::from_plan(&plan);
+        assert_eq!((c.safe_bytes, c.safe_items, c.review_bytes), (100, 1, 40));
+        // An old line with missing parts still reads.
+        let old: Checkup = serde_json::from_str(r#"{"at": 5}"#).unwrap();
+        assert_eq!(
+            old,
+            Checkup {
+                at: 5,
+                ..Checkup::default()
+            }
+        );
     }
 }

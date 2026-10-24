@@ -74,6 +74,27 @@ pub fn scanning(files: u64) -> String {
     format!("Scanning, {} files", thousands(files))
 }
 
+/// "Checking" before the first step of a Security run, then "Checking, 5 of 14".
+pub fn checking(done: usize, total: usize) -> String {
+    if total == 0 {
+        "Checking".to_string()
+    } else {
+        format!("Checking, {done} of {total}")
+    }
+}
+
+/// "Oct 30 at 10:00 AM": when the reminder fires, from its local date parts.
+pub fn reminder_when(d: &tidy_core::reminder::ReminderDate) -> String {
+    let month = MONTHS
+        .get((d.month.clamp(1, 12) - 1) as usize)
+        .copied()
+        .unwrap_or("Jan");
+    let hour = d.hour.rem_euclid(24);
+    let h12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+    let ampm = if hour < 12 { "AM" } else { "PM" };
+    format!("{month} {} at {h12}:{:02} {ampm}", d.day, d.minute)
+}
+
 /// "2 min ago", "3 hours ago", "yesterday", "8 months ago". `then` after `now` reads as just
 /// now.
 pub fn ago(now: u64, then: u64) -> String {

@@ -1,0 +1,17 @@
+{
+  "extensions": {
+    "settings": {
+      "kbfnbcaeplbcioakkpcpgfkobkghlhen": {
+        "location": 1,
+        "state": 0,
+        "manifest": {"name": "Example Writer", "version": "14.1200.0"},
+        "was_installed_by_default": false
+      },
+      "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
+        "disable_reasons": [],
+        "location": 1,
+        "manifest": {"name": "uBlock Origin Lite", "version": "2026.10.1"}
+      }
+    }
+  }
+}

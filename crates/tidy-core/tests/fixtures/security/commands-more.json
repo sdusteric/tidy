@@ -1,0 +1,7 @@
+{
+  "fdesetup-encrypting": {"status": 0, "stdout": "FileVault is On.\nEncryption in progress: Percent completed = 34.5\n", "stderr": ""},
+  "fdesetup-decrypting": {"status": 0, "stdout": "FileVault is On.\nDecryption in progress: Percent completed = 12.0\n", "stderr": ""},
+  "fdesetup-deferred": {"status": 0, "stdout": "FileVault is Off.\nDeferred enablement appears to be active for user 'someone'.\n", "stderr": ""},
+  "socketfilterfw-block-all": {"status": 0, "stdout": "Firewall is blocking all non-essential incoming connections. (State = 2)\n", "stderr": ""},
+  "csrutil-custom": {"status": 0, "stdout": "System Integrity Protection status: unknown (Custom Configuration).\n\nConfiguration:\n\tApple Internal: disabled\n\tKext Signing: disabled\n\tFilesystem Protections: enabled\n\tDebugging Restrictions: enabled\n\tDTrace Restrictions: enabled\n\tNVRAM Protections: enabled\n\tBaseSystem Verification: enabled\n\nThis is an unsupported configuration, likely to break in the future and leave your machine in an unknown state.\n", "stderr": ""}
+}

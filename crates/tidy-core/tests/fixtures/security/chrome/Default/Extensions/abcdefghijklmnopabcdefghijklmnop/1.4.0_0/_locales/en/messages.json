@@ -1,0 +1,4 @@
+{
+  "appName": {"message": "Example Notes", "description": "The extension name."},
+  "appDesc": {"message": "Keep notes beside any page."}
+}

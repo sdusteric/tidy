@@ -1,7 +1,7 @@
 //! The main window (design section 11): a sidebar on the left, the selected screen on the right.
-//! This file holds the view, the chrome both screens share (toolbar, notice band, status bar,
-//! empty state) and the overlays (menus and dialogs). The screens live in `cleanup.rs` and
-//! `large.rs`.
+//! This file holds the view, the chrome the screens share (toolbar, notice band, status bar,
+//! empty state) and the overlays (menus and dialogs). The screens live in `checkup.rs`,
+//! `cleanup.rs`, `large.rs`, `memory.rs` and `security.rs`.
 
 use std::collections::HashSet;
 
@@ -12,14 +12,15 @@ use gpui_kit::*;
 use tidy_core::api::Command;
 
 use crate::app::{
-    DialogCancel, DialogConfirm, GoCleanup, GoLarge, MainWindow, Notice, ParentFolder,
-    ROOT_CONTEXT, RUNNING_PERIOD, Rescan, Screen, TidyModel, TrashSelection, background_mode,
-    model, send,
+    DialogCancel, DialogConfirm, GoCheckup, GoCleanup, GoLarge, GoMemory, GoSecurity,
+    MEMORY_PERIOD, MainWindow, Notice, ParentFolder, ROOT_CONTEXT, RUNNING_PERIOD, Rescan, Screen,
+    TidyModel, TrashSelection, background_mode, model, send,
 };
 use crate::format;
 use crate::theme::{Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
 use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
+use crate::views::memory::MemoryMenu;
 use crate::views::{hairline, icon_button, text_button};
 
 pub struct TidyView {
@@ -27,12 +28,17 @@ pub struct TidyView {
     pub(crate) focus: FocusHandle,
     pub(crate) cleanup_scroll: UniformListScrollHandle,
     pub(crate) large_scroll: UniformListScrollHandle,
+    pub(crate) memory_scroll: UniformListScrollHandle,
+    pub(crate) security_scroll: ScrollHandle,
+    pub(crate) checkup_scroll: ScrollHandle,
     /// The row under the pointer (its key), which shows its hover actions.
     pub hovered: Option<String>,
     /// The "..." menu of a Cleanup row, when open.
     pub menu: Option<RowMenu>,
     /// The threshold menu, when open: where it was clicked.
     pub threshold_menu: Option<Point<Pixels>>,
+    /// The "..." menu of a Memory row (Force Quit), when open.
+    pub memory_menu: Option<MemoryMenu>,
     /// The confirm dialog, when open.
     pub dialog: Option<DialogSpec>,
     pub history_open: bool,
@@ -40,6 +46,9 @@ pub struct TidyView {
     pub history_expanded: HashSet<String>,
     /// Set on a mouse-down on empty toolbar space; the first move then drags the window.
     should_move: bool,
+    /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
+    /// fully covered or on another Space, and then the Memory screen does not poll.
+    window_visible: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -63,6 +72,13 @@ impl TidyView {
         window.focus(&focus, cx);
 
         let demo = crate::demo::state(cx).is_some();
+        let visibility = cx.observe_window_visibility(window, move |v, visibility, _, cx| {
+            v.window_visible = visibility.is_visible();
+            // Back in view on Memory: read now rather than at the next tick.
+            if !demo && v.window_visible && v.model.read(cx).screen == Screen::Memory {
+                v.model.update(cx, |m, cx| m.snapshot_memory(cx));
+            }
+        });
         if !demo {
             // While the Cleanup screen is visible, re-check which apps are running (C6). It
             // costs nothing when no item is blocked.
@@ -81,21 +97,49 @@ impl TidyView {
                 }
             })
             .detach();
-            model.update(cx, |m, cx| m.maybe_auto_scan(cx));
+            // The Memory screen is the only one that polls: a snapshot every 2 seconds while it
+            // is the visible screen in a window macOS is showing, nothing otherwise. The loop
+            // ends with the window.
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(MEMORY_PERIOD).await;
+                    let alive = this.update(cx, |v, cx| {
+                        if v.window_visible && v.model.read(cx).screen == Screen::Memory {
+                            v.model.update(cx, |m, cx| m.snapshot_memory(cx));
+                        }
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            // The window may open on a screen that reads something when it is shown.
+            model.update(cx, |m, cx| m.on_view_opened(cx));
+        }
+        // A demo can't scroll its hidden window, so it starts the Security list scrolled.
+        let security_scroll = ScrollHandle::new();
+        if let Some(d) = crate::demo::state(cx).filter(|d| d.scroll_y > 0.) {
+            security_scroll.set_offset(point(px(0.), px(-d.scroll_y)));
         }
         TidyView {
             model,
             focus,
             cleanup_scroll: UniformListScrollHandle::new(),
             large_scroll: UniformListScrollHandle::new(),
+            memory_scroll: UniformListScrollHandle::new(),
+            security_scroll,
+            checkup_scroll: ScrollHandle::new(),
             hovered: crate::demo::state(cx).and_then(|d| d.hovered.clone()),
             menu: None,
             threshold_menu: None,
+            memory_menu: None,
             dialog: None,
             history_open: false,
             history_expanded: HashSet::new(),
             should_move: false,
-            _subs: vec![observed, appearance, activation],
+            window_visible: window.is_visible(),
+            _subs: vec![observed, appearance, activation, visibility],
         }
     }
 
@@ -119,6 +163,7 @@ impl TidyView {
         if self.dialog.is_none() {
             self.menu = None;
             self.threshold_menu = None;
+            self.memory_menu = None;
             self.dialog = Some(spec);
             cx.notify();
         }
@@ -128,6 +173,7 @@ impl TidyView {
     pub fn cancel_overlay(&mut self, cx: &mut Context<Self>) {
         if self.menu.take().is_some()
             || self.threshold_menu.take().is_some()
+            || self.memory_menu.take().is_some()
             || self.dialog.take().is_some()
         {
             cx.notify();
@@ -151,6 +197,12 @@ impl TidyView {
             }
             DialogKind::EmptyTrash => {
                 self.model.update(cx, |m, cx| m.empty_trash(cx));
+            }
+            DialogKind::ForceQuit { id } => {
+                self.model.update(cx, |m, cx| m.force_quit(&id, cx));
+            }
+            DialogKind::TrashLoginItem { key } => {
+                self.model.update(cx, |m, cx| m.trash_login_item(&key, cx));
             }
         }
         cx.notify();
@@ -302,6 +354,36 @@ impl TidyView {
             ))
     }
 
+    /// A spinner and a label (no Stop button) for work the user cannot cancel: a Security run
+    /// or a check up.
+    pub(crate) fn busy_controls(&self, t: &Theme, label: String, cx: &App) -> Div {
+        let spinner = Icon::new(IconName::LoaderCircle)
+            .size(px(14.))
+            .text_color(t.text_2);
+        let spinner = if cx.reduce_motion() {
+            spinner.into_any_element()
+        } else {
+            spinner
+                .with_animation(
+                    "busy-spinner",
+                    Animation::new(m::SPIN).repeat(),
+                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+                )
+                .into_any_element()
+        };
+        div()
+            .debug_selector(|| "busy".to_string())
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .font_features(tnum())
+            .text_color(t.text_2)
+            .whitespace_nowrap()
+            .child(spinner)
+            .child(label)
+    }
+
     /// The band under the toolbar after a clean or a failure.
     pub(crate) fn notice_band(
         &self,
@@ -324,6 +406,7 @@ impl TidyView {
                 *bytes,
             ),
             Notice::Error(message) => (IconName::TriangleAlert, t.warning, message.clone(), 0),
+            Notice::Info(message) => (IconName::CircleCheck, t.success, message.clone(), 1),
         };
         let moved = matches!(notice, Notice::Moved { .. });
         let view = cx.entity().downgrade();
@@ -504,6 +587,9 @@ impl TidyView {
         if let Some(at) = self.threshold_menu {
             layers.push(self.render_threshold_menu(t, at, cx));
         }
+        if let Some(menu) = self.memory_menu.clone() {
+            layers.push(self.render_memory_menu(t, &menu, cx));
+        }
         if let Some(spec) = self.dialog.clone() {
             let view = cx.entity().downgrade();
             let cancel_view = view.clone();
@@ -537,8 +623,11 @@ impl Render for TidyView {
         let screen = self.model.read(cx).screen;
         let sidebar = self.render_sidebar(&t, cx);
         let content = match screen {
+            Screen::Checkup => self.render_checkup(&t, cx),
             Screen::Cleanup => self.render_cleanup(&t, cx),
             Screen::Large => self.render_large(&t, cx),
+            Screen::Memory => self.render_memory(&t, cx),
+            Screen::Security => self.render_security(&t, cx),
         };
         let overlays = self.render_overlays(&t, cx);
         let model = self.model.clone();
@@ -549,6 +638,12 @@ impl Render for TidyView {
             .track_focus(&self.focus)
             .on_action({
                 let model = model.clone();
+                move |_: &GoCheckup, _, cx| {
+                    model.update(cx, |m, cx| m.select_screen(Screen::Checkup, cx));
+                }
+            })
+            .on_action({
+                let model = model.clone();
                 move |_: &GoCleanup, _, cx| {
                     model.update(cx, |m, cx| m.select_screen(Screen::Cleanup, cx));
                 }
@@ -557,6 +652,18 @@ impl Render for TidyView {
                 let model = model.clone();
                 move |_: &GoLarge, _, cx| {
                     model.update(cx, |m, cx| m.select_screen(Screen::Large, cx));
+                }
+            })
+            .on_action({
+                let model = model.clone();
+                move |_: &GoMemory, _, cx| {
+                    model.update(cx, |m, cx| m.select_screen(Screen::Memory, cx));
+                }
+            })
+            .on_action({
+                let model = model.clone();
+                move |_: &GoSecurity, _, cx| {
+                    model.update(cx, |m, cx| m.select_screen(Screen::Security, cx));
                 }
             })
             .on_action({

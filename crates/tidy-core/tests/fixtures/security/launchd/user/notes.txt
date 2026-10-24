@@ -1,0 +1,1 @@
+This folder is a launchd fixture. Files that do not end in .plist are skipped.

@@ -30,6 +30,10 @@ pub enum DialogKind {
     TrashLarge { rels: Vec<String> },
     /// Delete the items Tidy moved to the Trash.
     EmptyTrash,
+    /// Force Quit the Memory row with this id (design section 5.3).
+    ForceQuit { id: String },
+    /// Move the launch agent with this key to the Trash (design section 5.4).
+    TrashLoginItem { key: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +103,37 @@ impl DialogSpec {
                 .map(|e| (e.name.clone(), format::size(e.bytes)))
                 .collect(),
             notes,
+            confirm: "Move to Trash".to_string(),
+            destructive: false,
+        }
+    }
+
+    /// The dialog for Force Quit: unsaved changes are lost, so it uses the destructive style.
+    pub fn force_quit(id: &str, name: &str) -> DialogSpec {
+        DialogSpec {
+            kind: DialogKind::ForceQuit { id: id.to_string() },
+            title: format!("Force Quit {name}?"),
+            body: Some(format!("Unsaved changes in {name} will be lost.")),
+            rows: Vec::new(),
+            notes: Vec::new(),
+            confirm: "Force Quit".to_string(),
+            destructive: true,
+        }
+    }
+
+    /// The dialog for Move to Trash on a user launch agent. Only the plist moves; the program
+    /// it starts stays where it is.
+    pub fn trash_login_item(key: &str, label: &str) -> DialogSpec {
+        DialogSpec {
+            kind: DialogKind::TrashLoginItem {
+                key: key.to_string(),
+            },
+            title: "Move this login item to the Trash?".to_string(),
+            body: Some(format!(
+                "Tidy moves the launch agent file for {label} to the Trash. The program it starts stays where it is. You can put the file back from the Trash until you empty it."
+            )),
+            rows: Vec::new(),
+            notes: Vec::new(),
             confirm: "Move to Trash".to_string(),
             destructive: false,
         }

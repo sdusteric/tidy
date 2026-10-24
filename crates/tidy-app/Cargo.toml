@@ -17,7 +17,10 @@ tokio.workspace = true
 objc2.workspace = true
 block2.workspace = true
 objc2-app-kit.workspace = true
-objc2-foundation = { workspace = true, features = ["std"] }
+objc2-foundation = { workspace = true, features = ["std", "NSCalendar", "NSData", "NSDate", "NSGeometry", "NSObject"] }
+# The weekly reminder (UNUserNotificationCenter). Already in the lockfile through gpui; default
+# features stay off so objc2-core-location is not pulled in.
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSString_UserNotifications", "UNError", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 objc2-uniform-type-identifiers.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

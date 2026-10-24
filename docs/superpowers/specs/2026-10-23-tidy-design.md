@@ -122,7 +122,7 @@ Purpose: answer "why is my Mac slow right now" and let the user quit what is hea
 
 - **Verdict line** at the top, chosen from memory pressure: Normal: "Memory is fine. macOS is using spare memory for caching, which is normal." Warning: "Memory is tight. Quitting a large app below will help." Critical: "Memory is very tight. Your Mac is moving memory to disk, which slows it down."
 - **Three figures**: Pressure (Normal, Warning, Critical from `kern.memorystatus_vm_pressure_level`), Swap used (from `vm.swapusage`), Compressed (compressor pages times page size). Each has a one-line explanation under it. A small pressure history graph covers the time the screen has been open (no background sampling).
-- **Top apps by memory**: processes grouped under their responsible app (`responsibility_get_pid_responsible_for_pid` via `dlsym`, falling back to the parent chain and then to the `.app` prefix of `proc_pidpath`). Each row: app icon, name, footprint ("4.2 GB"), number of helper processes, and a Quit button. Rows for processes Tidy cannot attribute show the process name. Root-owned processes cannot be read and are summed into one row "System processes", without a Quit button.
+- **Top apps by memory**: processes grouped under their responsible app (`responsibility_get_pid_responsible_for_pid` via `dlsym`, falling back to the parent chain and then to the `.app` prefix of `proc_pidpath`). Each row: app icon, name, footprint ("4.2 GB"), number of helper processes, and a Quit button. Rows for processes Tidy cannot attribute show the process name. Root-owned and other users' processes cannot be read by an app; they are summed into one row "System processes" (sized with `top`, see the M2 notes), without a Quit button.
 - **Quit** sends `terminate`. The row shows "Quit requested" and then disappears when the app exits. After 10 seconds without exit, the row shows "Still open. The app may be asking to save." and the "..." menu offers Force Quit with a confirm ("Unsaved changes in X will be lost."). Tidy itself, Finder, WindowServer and loginwindow have no Quit button.
 - Refresh every 2 seconds while the screen is visible; nothing runs when it is not.
 - No "Free up RAM" button, because there is no honest user-level way to do it (`purge` needs root and only drops file cache).
@@ -514,3 +514,38 @@ Made in this document:
 - C24. Four new tokens (`sidebar_bg`, `sidebar_selected`, `tag_border`, `danger_button`) and one new type role (Figure).
 - C25. Free space uses "available for important usage", matching Finder.
 - C26. M1 acceptance has only the offline group; no GUI launch group.
+
+## 16. As-built: M2 (Memory, Security, Check up and reminder)
+
+This section records what was built for M2 and where it differs from sections 5.3 to 5.5. Sections 5.3 to 5.5 and 11 stay the contract.
+
+**Acceptance.** `scripts/accept.sh offline` prints PASS or FAIL for AC1 to AC9. AC1 to AC5 are the M1 criteria, unchanged. The M2 criteria are:
+
+| Id | Checks |
+|---|---|
+| AC6 Memory | Core tests on a fake process table (grouping under the responsible app, the parent-chain and `.app` fallbacks, one System processes row, no Quit for Tidy, Finder, WindowServer, loginwindow and kernel_task); app tests with a fake terminator (polite terminate, "Quit requested", "Still open" after 10 s, Force Quit behind a confirm, polling every 2 s only while visible); no test names a real terminator, notifier or signal. On this Mac, `tidyctl memory` exits 0 in under 3 s and its pressure level (exact), swap used and compressed bytes (within 10%) agree with `sysctl` and `vm_stat` taken right after, and the pids that `top -l 1 -o mem -n 5` lists are all in some row. |
+| AC7 Security | Core tests that parse captured outputs of `fdesetup`, `socketfilterfw`, `spctl` and `csrutil` (on and off), XProtect amber after 60 days with a `FixedClock`, launch agent and daemon fixture folders, Apple-signed `/bin/ls` against an unsigned binary the test compiles, Chrome Secure Preferences, the New and Changed diff and the first-run sentence, and `softwareupdate` not running without `--include-updates`; no scare word in any string literal of `crates/*/src`. On this Mac, `TIDY_HOME=<temp> tidyctl security` exits 0 in under 20 s, lists the eight checks of 5.4 with macOS updates gray and not checked, never starts `softwareupdate` (polled with `pgrep`) and leaves the frontmost app unchanged. |
+| AC8 Check up | `tidyctl checkup` on the fixture home exits 0, prints the plan, security and memory lines and a final `checkup` line with the cleanup total, the security summary and the memory verdict, and appends one entry to `data/checkups.jsonl` (a second run appends a second). The reminder is 10:00 on the day 7 days later. Reminder math tests (`FixedClock`, both DST changes, rescheduling after a check up and on launch) and app tests with a fake notifier (permission only when the toggle goes on, never at launch, the Notifications settings button when denied). |
+| AC9 App | The sidebar lists Check up, Cleanup, Large files, Memory, Security with Cmd-1 to Cmd-5; long paths in Large files are fitted to the row with an ellipsis; `scripts/shots-bundle.sh && SHOTS_RENDER=1 scripts/shots.sh checkup memory security cleanup large` writes ten distinct PNGs at 1800 x 1240 without changing the frontmost app. |
+
+A full run has FAIL 0 and SKIP 0. `ACCEPT_SKIP_GATES=1` and `ACCEPT_SKIP_BUNDLE=1` still skip AC1, and AC5 with the shots of AC9; those runs are for development only.
+
+**tidy-core.**
+- `memory`: `MemoryProbe` seam (`LibcMemory` in production, `FixedMemory` for tests and `TIDY_TEST_MEMORY`). `group` is pure. Pressure is `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), swap is `vm.swapusage`, and Compressed is "Pages occupied by compressor" times the page size, the same figure `vm_stat` prints.
+- `security`: `system` (the status commands and `softwareupdate --list`), `launchd` (plist parsing, XML and binary), `codesign` (signer, notarized), `chrome` (Secure Preferences), `diff` (the week over week marks), `cf` (Core Foundation helpers). Seam: `CommandRunner` (`SystemRunner`, `ReplayRunner` for `TIDY_TEST_COMMANDS`). `SystemRunner` refuses `softwareupdate` under `TIDY_HOME` and in tests.
+- `checkup` and `reminder`: the check up log and the reminder date math (`TIDY_TEST_TZ` fixes the zone).
+- Commands: `SnapshotMemory`, `RunSecurity { include_updates }`, `LastSecurity`, `RunCheckup { include_updates }`, `LastCheckup`, `NextReminder`. Events: `MemorySnapshot`, `SecurityProgress`, `SecurityResult`, `CheckupDone`.
+- Settings version 2 adds `reminder_enabled` and `include_updates`, both off.
+- Files in the data folder: `security/<ISO week>.json` (for example `2026-W43.json`; a second run in the same week replaces that file, so it compares with nothing and still reports the first check) and `checkups.jsonl`.
+
+**tidy-app.** `views/{checkup, memory, security}`; `macos.rs` holds the `Terminator` (`NSRunningApplication` terminate and forceTerminate) and `Notifier` (`UNUserNotificationCenter`) traits with `SystemTerminator`, `SystemNotifier` and the fakes the tests use. The app tests never construct the system ones.
+
+**tidyctl.** `memory`, `security [--include-updates]` and `checkup [--include-updates]`, with the events above (`memory`, `security_progress`, `security`, `plan`, then `checkup` as the last line). Exit 3 on `checkup` means a part could not be done.
+
+**Demo scenarios.** `checkup`, `memory`, `memory-tight`, `security`, `security-first`, `security-items` next to the M1 ones. `scripts/shots.sh` takes any of them and by default shoots the five screens in sidebar order.
+
+**Differences from the text above.**
+- The System processes row gets its size from `top`. macOS does not let an app read the footprint of another user's process: `proc_pid_rusage`, `PROC_PIDTASKINFO`, `PROC_PIDTASKALLINFO` and `memorystatus_control` all fail with EPERM. An estimate from the `vm_stat` page counts does not work either, because the readable footprints alone already add up to more than the anonymous and compressed pages. `/usr/bin/top` ships with macOS setuid root, so the memory probe runs `top -l 1 -s 0 -F -stats pid,mem` (read-only) and takes its MEM column, the footprint `top` and Activity Monitor show, for each process it cannot read itself. A sample costs about a second of CPU, so it is taken at most every 20 seconds: the first snapshot waits for it (`tidyctl memory` stays well under 3 s), later ones use the last sample and start a new one in the background. The System row sums those sizes and takes its place among the top rows by size, above "Other". It names its processes (`members`: WindowServer and kernel_task first, then the largest), and the note reads "WindowServer, kernel_task and more." When `top` cannot run or times out (5 s), the row has no size, sorts last, and the note adds "Tidy can't read their memory." The owner and parent of those processes come from `PROC_PIDT_SHORTBSDINFO`, which macOS answers for every user.
+- `spctl --status` prints "assessments disabled" and exits 1. The Gatekeeper check takes exit 1 as an answer; every other status command answers only with exit 0.
+- A check up sends its events through the core actor, so the actor holds the Cleanup plan before the app shows it, and a Cleanup scan asked for while the check up is scanning waits for the check up's plan instead of starting a second scan.
+- The Check up screen has its own primary button in the content area ("Run Check up"), not in the toolbar.

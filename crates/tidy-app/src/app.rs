@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,24 +15,30 @@ use tidy_core::api::{Command, CoreHandle, Event, ScanKind};
 use tidy_core::env::Clock;
 use tidy_core::model::{
     Class, FolderNode, Group as CleanGroup, HistoryEntry, Item as CleanItem, ItemResult, LargeItem,
-    LargeKind, LargeScan, Plan, RunningSet, Source, TrashSummary, UseSource,
+    LargeKind, LargeScan, Plan, RunningSet, SettingsLink, Source, TrashSummary, UseSource,
 };
 use tidy_core::settings::Settings;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::format;
-use crate::macos::{self, DiskInfo};
+use crate::macos::{self, DiskInfo, Notifier, Terminator};
 use crate::motion;
 use crate::theme::motion::NOTE_OUT;
+use crate::views::checkup::CheckupState;
 use crate::views::main_window::open_main_window;
+use crate::views::memory::MemoryState;
+use crate::views::security::SecurityState;
 
 actions!(
     tidy,
     [
         Quit,
         CloseWindow,
+        GoCheckup,
         GoCleanup,
         GoLarge,
+        GoMemory,
+        GoSecurity,
         Rescan,
         ParentFolder,
         TrashSelection,
@@ -46,6 +53,11 @@ pub const ROOT_CONTEXT: &str = "Tidy";
 pub const PUMP_PERIOD: Duration = Duration::from_millis(100);
 /// How often the Cleanup screen re-checks which apps are running (C6).
 pub const RUNNING_PERIOD: Duration = Duration::from_secs(3);
+/// How often the Memory screen asks for a new snapshot, while it is the visible screen and
+/// never otherwise (design section 5.3). It is the only screen that polls.
+pub const MEMORY_PERIOD: Duration = Duration::from_secs(2);
+/// How long a polite Quit may take before the row says "Still open" (design section 5.3).
+pub const QUIT_WAIT: Duration = Duration::from_secs(10);
 /// A Cleanup scan older than this is repeated when the screen opens (after the first one).
 pub const STALE_SCAN_SECS: u64 = 600;
 /// Bound on the synchronous shutdown when quitting.
@@ -101,6 +113,44 @@ impl Opener {
             OpenKind::Reveal => cx.reveal_path(path),
         }))
     }
+}
+
+/// Opens a System Settings page. Only ever called from a click; tests replace it to record.
+pub type SettingsFn = Box<dyn Fn(SettingsLink, &App)>;
+pub struct SettingsOpener(pub SettingsFn);
+impl Global for SettingsOpener {}
+
+impl SettingsOpener {
+    pub fn system() -> SettingsOpener {
+        SettingsOpener(Box::new(|link, cx| cx.open_url(link.url())))
+    }
+}
+
+/// Opens a System Settings page through the `SettingsOpener` global (the system one by default).
+pub fn open_settings(link: SettingsLink, cx: &App) {
+    match cx.try_global::<SettingsOpener>() {
+        Some(opener) => (opener.0)(link, cx),
+        None => SettingsOpener::system().0(link, cx),
+    }
+}
+
+/// Asks apps to quit and gives their icons (the Memory screen). Tests replace it with a fake,
+/// so no test ever signals a process.
+pub struct Terminate(pub Rc<dyn Terminator>);
+impl Global for Terminate {}
+
+/// The weekly reminder's notification. Tests replace it with a fake.
+pub struct Notify(pub Rc<dyn Notifier>);
+impl Global for Notify {}
+
+/// The installed [`Terminator`], if any. Without one (a demo) a Quit does nothing.
+pub fn terminator(cx: &App) -> Option<Rc<dyn Terminator>> {
+    cx.try_global::<Terminate>().map(|t| t.0.clone())
+}
+
+/// The installed [`Notifier`], if any. Without one (a demo) nothing is scheduled.
+pub fn notifier(cx: &App) -> Option<Rc<dyn Notifier>> {
+    cx.try_global::<Notify>().map(|n| n.0.clone())
 }
 
 #[derive(Default)]
@@ -165,28 +215,43 @@ pub fn model(cx: &mut App) -> Entity<TidyModel> {
 
 // ---------- The model ----------
 
-/// The two screens of M1.
+/// The five screens, in sidebar order (design section 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Screen {
+    Checkup,
     Cleanup,
     Large,
+    Memory,
+    Security,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 2] = [Screen::Cleanup, Screen::Large];
+    pub const ALL: [Screen; 5] = [
+        Screen::Checkup,
+        Screen::Cleanup,
+        Screen::Large,
+        Screen::Memory,
+        Screen::Security,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
+            Screen::Checkup => "Check up",
             Screen::Cleanup => "Cleanup",
             Screen::Large => "Large files",
+            Screen::Memory => "Memory",
+            Screen::Security => "Security",
         }
     }
 
-    /// The shortcut shown in the Go menu.
+    /// The shortcut shown in the Go menu: Cmd-1 to Cmd-5 in sidebar order.
     pub fn shortcut(self) -> &'static str {
         match self {
+            Screen::Checkup => "\u{2318}1",
             Screen::Cleanup => "\u{2318}2",
             Screen::Large => "\u{2318}3",
+            Screen::Memory => "\u{2318}4",
+            Screen::Security => "\u{2318}5",
         }
     }
 }
@@ -198,6 +263,8 @@ pub enum Notice {
     Moved { bytes: u64 },
     /// A sentence about something that failed.
     Error(String),
+    /// A plain sentence about something that happened.
+    Info(String),
 }
 
 /// The tri-state of a group checkbox.
@@ -578,6 +645,9 @@ pub struct TidyModel {
     pub cleanup: CleanupState,
     pub large: LargeState,
     pub history: HistoryState,
+    pub memory: MemoryState,
+    pub security: SecurityState,
+    pub checkup: CheckupState,
     pub disk: Option<DiskInfo>,
     /// Number of applied batches (tests check the pump's throttle with it).
     pub applies: usize,
@@ -593,6 +663,9 @@ impl TidyModel {
             cleanup: CleanupState::default(),
             large: LargeState::new(min),
             history: HistoryState::default(),
+            memory: MemoryState::default(),
+            security: SecurityState::default(),
+            checkup: CheckupState::default(),
             disk: None,
             applies: 0,
             activity: None,
@@ -625,8 +698,28 @@ impl TidyModel {
     pub fn select_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
         if self.screen != screen {
             self.screen = screen;
+            self.enter_screen(cx);
             cx.notify();
         }
+        self.maybe_auto_scan(cx);
+    }
+
+    /// What a screen does when it becomes the visible one. Everything here only reads: the
+    /// Memory snapshot, the last saved Security report, the last check up, the notification
+    /// permission (never a prompt). Nothing scans or runs a check on its own.
+    fn enter_screen(&mut self, cx: &mut Context<Self>) {
+        match self.screen {
+            Screen::Memory => self.enter_memory(cx),
+            Screen::Security => self.load_last_security(cx),
+            Screen::Checkup => self.enter_checkup(cx),
+            Screen::Cleanup | Screen::Large => {}
+        }
+    }
+
+    /// The window opened (or opened again) on whatever screen was selected: do what entering
+    /// it does. Not called in demo mode.
+    pub fn on_view_opened(&mut self, cx: &mut Context<Self>) {
+        self.enter_screen(cx);
         self.maybe_auto_scan(cx);
     }
 
@@ -652,12 +745,15 @@ impl TidyModel {
     /// Cmd-R: rescan the current screen.
     pub fn rescan(&mut self, cx: &mut Context<Self>) {
         match self.screen {
+            Screen::Checkup => self.run_checkup(cx),
             Screen::Cleanup => self.scan_cleanup(cx),
             Screen::Large => self.scan_large(cx),
+            Screen::Memory => self.snapshot_memory(cx),
+            Screen::Security => self.run_security(false, cx),
         }
     }
 
-    fn remember(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+    pub(crate) fn remember(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         let mut next = self.settings.clone();
         edit(&mut next);
         if next != self.settings {
@@ -1027,17 +1123,19 @@ impl TidyModel {
 
     // ----- events -----
 
-    fn begin_activity(&mut self) {
+    pub(crate) fn begin_activity(&mut self) {
         if self.activity.is_none() && crate::demo::active().is_none() {
             self.activity = Some(macos::ActivityToken::begin("Scanning"));
         }
     }
 
-    fn end_activity_if_idle(&mut self) {
+    pub(crate) fn end_activity_if_idle(&mut self) {
         let busy = self.cleanup.scanning.is_some()
             || self.cleanup.cleaning.is_some()
             || self.large.scanning.is_some()
-            || self.large.trashing.is_some();
+            || self.large.trashing.is_some()
+            || self.security.running.is_some()
+            || self.checkup.running;
         if !busy {
             self.activity = None;
         }
@@ -1064,6 +1162,7 @@ impl TidyModel {
                 },
                 Event::CleanupPlan(plan) => {
                     self.set_plan(plan);
+                    self.checkup.parts.cleanup = true;
                     refresh_disk = true;
                 }
                 Event::LargeResult(scan) => {
@@ -1097,7 +1196,9 @@ impl TidyModel {
                     }
                 }
                 Event::ItemTrashed { id, .. } => {
-                    if self
+                    if self.security.is_trashing(Path::new(&id)) {
+                        self.security.on_trashed();
+                    } else if self
                         .cleanup
                         .plan
                         .as_ref()
@@ -1115,7 +1216,9 @@ impl TidyModel {
                     }
                 }
                 Event::ItemSkipped { id, reason } => {
-                    if self
+                    if self.security.is_trashing(Path::new(&id)) {
+                        self.security.on_skipped(reason);
+                    } else if self
                         .cleanup
                         .plan
                         .as_ref()
@@ -1129,6 +1232,9 @@ impl TidyModel {
                         self.large.selected.remove(&rel);
                         self.large.skipped.insert(rel, reason);
                     }
+                }
+                Event::CleanDone(entry) if self.security_trash_done(&entry) => {
+                    // A login item went to the Trash from the Security screen.
                 }
                 Event::CleanDone(entry) => {
                     self.cleanup.trash.items += entry.trashed().count() as u64;
@@ -1180,6 +1286,14 @@ impl TidyModel {
                 Event::SettingsChanged(settings) => {
                     self.settings = settings;
                 }
+                Event::MemorySnapshot(snapshot) => self.on_memory_snapshot(snapshot, cx),
+                Event::SecurityProgress { done, total } => {
+                    self.security.running = Some((done, total));
+                }
+                Event::SecurityResult(report) => self.on_security_result(report),
+                Event::CheckupDone { checkup, reminder } => {
+                    self.on_checkup_done(checkup, reminder, cx)
+                }
                 Event::Failed { what, message } => match what.as_str() {
                     "scan" => {
                         self.cleanup.scanning = None;
@@ -1194,8 +1308,12 @@ impl TidyModel {
                         self.cleanup.notice = Some(Notice::Error(message));
                     }
                     "trash" => {
-                        self.large.trashing = None;
-                        self.large.notice = Some(Notice::Error(message));
+                        if self.security.trashing.take().is_some() {
+                            self.security.notice = Some(Notice::Error(message));
+                        } else {
+                            self.large.trashing = None;
+                            self.large.notice = Some(Notice::Error(message));
+                        }
                     }
                     "empty_trash" => {
                         self.cleanup.notice = Some(Notice::Error(if message.is_empty() {
@@ -1203,6 +1321,16 @@ impl TidyModel {
                         } else {
                             message
                         }));
+                    }
+                    "memory" => self.memory.notice = Some(Notice::Error(message)),
+                    "security" => {
+                        self.security.running = None;
+                        self.security.notice = Some(Notice::Error(message));
+                    }
+                    "checkup" => {
+                        self.checkup.running = false;
+                        self.security.running = None;
+                        self.checkup.notice = Some(Notice::Error(message));
                     }
                     other => tracing::warn!("core failure ({other}): {message}"),
                 },
@@ -1374,8 +1502,11 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-1", GoCheckup, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-2", GoCleanup, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-3", GoLarge, Some(ROOT_CONTEXT)),
+        KeyBinding::new("cmd-4", GoMemory, Some(ROOT_CONTEXT)),
+        KeyBinding::new("cmd-5", GoSecurity, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-r", Rescan, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-up", ParentFolder, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-backspace", TrashSelection, Some(ROOT_CONTEXT)),
@@ -1399,8 +1530,11 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "Go".into(),
             items: vec![
+                MenuItem::action("Check Up", GoCheckup),
                 MenuItem::action("Cleanup", GoCleanup),
                 MenuItem::action("Large Files", GoLarge),
+                MenuItem::action("Memory", GoMemory),
+                MenuItem::action("Security", GoSecurity),
                 MenuItem::separator(),
                 MenuItem::action("Rescan", Rescan),
             ],
@@ -1437,6 +1571,9 @@ pub fn install(
     cx.set_global(Core(core));
     cx.set_global(Now(clock));
     cx.set_global(Opener::system());
+    cx.set_global(SettingsOpener::system());
+    cx.set_global(Terminate(Rc::new(macos::SystemTerminator)));
+    cx.set_global(Notify(Rc::new(macos::SystemNotifier)));
     let m = cx.new(|_| {
         let mut m = TidyModel::new(settings);
         if let Some(scan) = cached_large {
@@ -1448,6 +1585,10 @@ pub fn install(
     cx.set_global(Model(m.clone()));
     spawn_pump(m.downgrade(), events, PUMP_PERIOD, cx);
     start_heartbeat(cx);
+    // The weekly reminder: look up the permission (never prompting) and reschedule the single
+    // notification, and open Check up when the user clicks the reminder.
+    crate::views::checkup::watch_reminder_clicks(macos::take_reminder_clicks(), m.downgrade(), cx);
+    m.update(cx, |m, cx| m.start_reminder(cx));
 }
 
 /// Demo mode's counterpart of `install`: sets the globals the views read, with no core, no event

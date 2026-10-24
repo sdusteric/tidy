@@ -8,8 +8,11 @@
 //!     TIDY_TEST_RUNNING=com.google.Chrome tidyctl scan
 //! ```
 //!
-//! It also writes `<dir>/expected-plan.json` and `<dir>/expected-large.json`, and creates the
-//! empty `<dir>/tidy`. It refuses a folder that is not empty or that is under
+//! It also writes `<dir>/expected-plan.json` and `<dir>/expected-large.json`, creates the
+//! empty `<dir>/tidy`, and writes `<dir>/commands.json` and `<dir>/memory.json`: fake
+//! Security command outputs and a fake process table for `TIDY_TEST_COMMANDS` and
+//! `TIDY_TEST_MEMORY` (listed under `fake_env` in the printed line, not in `env`, so the
+//! usual runs read the real Mac). It refuses a folder that is not empty or that is under
 //! `~/Documents`, `~/Desktop` or `~/Downloads`. Exit codes: 0 done, 1 failed or refused,
 //! 2 bad usage.
 
@@ -19,7 +22,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tidy_fixtures::{FIXTURE_NOW, FakeHome, check_target_dir, write_expected};
+use tidy_fixtures::{FIXTURE_NOW, FakeHome, check_target_dir, write_expected, write_fakes};
 
 const USAGE: &str = "usage: tidy-fixture-home <dir> [--now SECS]";
 
@@ -68,6 +71,7 @@ fn run(dir: PathBuf, now: u64) -> Result<()> {
     write_expected(&dir, &expected)?;
     let tidy = dir.join("tidy");
     fs::create_dir_all(&tidy).with_context(|| format!("creating {}", tidy.display()))?;
+    let fakes = write_fakes(&dir)?;
 
     let home = dir.join("home");
     let running = expected.plan.running.join(",");
@@ -85,6 +89,10 @@ fn run(dir: PathBuf, now: u64) -> Result<()> {
             "TIDY_SCAN_ROOT": home,
             "TIDY_TEST_NOW": now.to_string(),
             "TIDY_TEST_RUNNING": running,
+        },
+        "fake_env": {
+            "TIDY_TEST_COMMANDS": fakes.commands,
+            "TIDY_TEST_MEMORY": fakes.memory,
         },
     });
     println!("{line}");

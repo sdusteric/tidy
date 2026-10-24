@@ -1,10 +1,13 @@
 //! Windows and the pieces they share: buttons, the checkbox, the segmented control and tags.
 
+pub mod checkup;
 pub mod cleanup;
 pub mod dialogs;
 pub mod history;
 pub mod large;
 pub mod main_window;
+pub mod memory;
+pub mod security;
 pub mod sidebar;
 
 use gpui_kit::assets::IconName;

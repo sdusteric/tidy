@@ -1,0 +1,6 @@
+{
+  "none": {"status": 0, "stdout": "Software Update Tool\n\nFinding available software\n", "stderr": "No new software available.\n"},
+  "one": {"status": 0, "stdout": "Software Update Tool\n\nFinding available software\nSoftware Update found the following new or updated software:\n* Label: macOS 27.0.2-26A520\n\tTitle: macOS 27.0.2, Version: 27.0.2, Size: 1843200KiB, Recommended: YES, Action: restart, \n", "stderr": ""},
+  "two": {"status": 0, "stdout": "Software Update Tool\n\nFinding available software\nSoftware Update found the following new or updated software:\n* Label: macOS 27.0.2-26A520\n\tTitle: macOS 27.0.2, Version: 27.0.2, Size: 1843200KiB, Recommended: YES, Action: restart, \n* Label: Command Line Tools for Xcode-27.0\n\tTitle: Command Line Tools for Xcode, Version: 27.0, Size: 912345KiB, Recommended: YES, \n", "stderr": ""},
+  "offline": {"status": 0, "stdout": "Software Update Tool\n\nFinding available software\n", "stderr": "Can't connect to the Apple Software Update server.\n"}
+}

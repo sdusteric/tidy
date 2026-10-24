@@ -8,8 +8,9 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tidy_core::env::SystemSeams;
+use tidy_core::env::{SystemRunner, SystemSeams};
 use tidy_core::lastused::Spotlight;
+use tidy_core::memory::LibcMemory;
 use tidy_core::procs::LibcProbe;
 use tidy_core::walk::{WalkOpts, measure, measure_reference};
 use tidy_core::{AppPaths, Env, InstanceLock, LargeScan, LockError, Settings};
@@ -222,6 +223,10 @@ fn run_app() {
     let env = Env::from_env_with(SystemSeams {
         procs: Arc::new(LibcProbe::new()),
         last_used: Arc::new(Spotlight),
+        // M2: memory figures and the process table from libc, and the read-only system
+        // commands of the Security checks (never softwareupdate unless asked for).
+        memory: Arc::new(LibcMemory),
+        runner: Arc::new(SystemRunner),
     });
     // The app holds the instance lock for its whole life. macOS normally routes a second
     // launch to the running instance, so this is a second guard.

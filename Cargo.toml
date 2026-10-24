@@ -25,6 +25,9 @@ block2 = "0.6"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder", "NSWorkspace", "NSRunningApplication", "block2", "objc2-uniform-type-identifiers"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSString", "NSThread", "NSURL", "NSError", "NSBundle", "NSArray", "NSProcessInfo", "NSFileManager", "NSDictionary", "NSValue"] }
 objc2-uniform-type-identifiers = { version = "0.3", features = ["UTType"] }
+# Reminder dates (10:00 local, across DST) in tidy-core::reminder. Pinned to the version in
+# Haul's lockfile; no bundled tz database, macOS has /usr/share/zoneinfo.
+jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 tempfile = "3"
 
 [profile.dev]

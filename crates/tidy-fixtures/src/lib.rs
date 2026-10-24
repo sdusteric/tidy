@@ -5,12 +5,15 @@
 //!   symlinks, markers and fake `.app` bundles, with times set from a fixed clock.
 //! - [`standard`] builds the standard fixture ([`FakeHome::standard`]) and returns the
 //!   [`Expected`] results, written by hand from the design's rules.
+//! - [`fakes`] writes the fake command outputs and process table a check up runs with
+//!   (`TIDY_TEST_COMMANDS`, `TIDY_TEST_MEMORY`).
 //! - The `tidy-fixture-home` binary builds the standard fixture into a new folder for
 //!   `tidyctl` and the acceptance script.
 //!
 //! Nothing here reads or writes the real home folder. [`check_target_dir`] refuses a target
 //! that is not empty or that is under `~/Documents`, `~/Desktop` or `~/Downloads`.
 
+pub mod fakes;
 pub mod standard;
 pub mod tree;
 
@@ -20,6 +23,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+pub use fakes::{FakeFiles, write_fakes};
 pub use standard::{
     Expected, ExpectedFolder, ExpectedItem, ExpectedLarge, ExpectedLargeItem, ExpectedPlan,
     FIXTURE_NOW, FakeHome,

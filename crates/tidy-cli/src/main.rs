@@ -10,11 +10,18 @@
 //! | `trash PATH...` | Move paths to the Trash through the Large files guard |
 //! | `empty-trash` | Delete for good the items Tidy moved to the Trash |
 //! | `history [--last N]` | Print history entries |
+//! | `memory` | One memory snapshot: `{"event":"memory",...}` |
+//! | `security [--include-updates]` | The Security checks: progress lines, then `{"event":"security",...}` |
+//! | `checkup [--include-updates]` | Cleanup scan, Security checks and a memory snapshot, then `{"event":"checkup",...}` |
 //!
-//! Exit codes: 0 done, 1 error, 2 bad usage, 3 some items were skipped or failed, 4 another
-//! Tidy holds the lock, 5 refused. The destructive commands (`clean`, `trash`, `empty-trash`)
-//! refuse with 5 unless `TIDY_HOME` is set or `--real` is given (C23), and they take the
-//! instance lock; the read-only ones never do, so they work while the app runs.
+//! Exit codes: 0 done, 1 error, 2 bad usage, 3 some items were skipped or failed (for
+//! `checkup`: a part could not be done), 4 another Tidy holds the lock, 5 refused. The
+//! destructive commands (`clean`, `trash`, `empty-trash`) refuse with 5 unless `TIDY_HOME` is
+//! set or `--real` is given (C23), and they take the instance lock; the read-only ones never
+//! do, so they work while the app runs. `memory`, `security` and `checkup` move nothing:
+//! `security` and `checkup` save their results (`security/<week>.json`, `checkups.jsonl`)
+//! in Tidy's data folder, which is under `TIDY_HOME` when it is set. Without
+//! `--include-updates`, `softwareupdate` never runs.
 //!
 //! Progress lines carry counts only, not the path being measured: a scan looks at folders it
 //! then declines to offer, and the output never names those.
@@ -26,14 +33,17 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tidy_core::api::{Command, Event};
-use tidy_core::env::SystemSeams;
+use tidy_core::env::{SystemRunner, SystemSeams};
 use tidy_core::large::{self, FilesFilter};
 use tidy_core::lastused::Spotlight;
+use tidy_core::memory::LibcMemory;
 use tidy_core::model::{
-    FolderNode, HistoryEntry, ItemResult, LARGE_RECORD_MIN, LargeKind, LargeScan, MB, TrasherKind,
+    Checkup, FIRST_CHECK_SENTENCE, FolderNode, HistoryEntry, ItemResult, LARGE_RECORD_MIN,
+    LargeKind, LargeScan, MB, TrasherKind,
 };
 use tidy_core::paths::{AppPaths, HOME_ENV};
 use tidy_core::procs::LibcProbe;
+use tidy_core::reminder::ReminderDate;
 use tidy_core::{Env, InstanceLock, LockError, history};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -47,6 +57,9 @@ commands:
   trash PATH... [--real]                 Move paths to the Trash
   empty-trash [--real]                   Delete the items Tidy moved to the Trash
   history [--last N]                     Print history entries
+  memory                                 Memory figures and top apps by memory
+  security [--include-updates]           Security checks (softwareupdate only when asked)
+  checkup [--include-updates]            Cleanup scan, Security checks and memory
 
 Destructive commands need TIDY_HOME, or --real to use the real home folder.";
 
@@ -91,6 +104,13 @@ enum Cmd {
     },
     History {
         last: Option<usize>,
+    },
+    Memory,
+    Security {
+        include_updates: bool,
+    },
+    Checkup {
+        include_updates: bool,
     },
 }
 
@@ -206,6 +226,24 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
             }
             Ok(Cmd::History { last })
         }
+        "memory" => match it.next() {
+            None => Ok(Cmd::Memory),
+            Some(a) => Err(format!("memory takes no arguments, got {a}")),
+        },
+        "security" | "checkup" => {
+            let mut include_updates = false;
+            for a in it {
+                match a.as_str() {
+                    "--include-updates" => include_updates = true,
+                    other => return Err(format!("{name}: unknown argument {other}")),
+                }
+            }
+            Ok(if name == "security" {
+                Cmd::Security { include_updates }
+            } else {
+                Cmd::Checkup { include_updates }
+            })
+        }
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -305,6 +343,12 @@ fn event_line(ev: &Event) -> Value {
             json!({"event": "running", "ids": set.ids().collect::<Vec<_>>()})
         }
         Event::SettingsChanged(s) => tagged("settings", s),
+        Event::MemorySnapshot(snap) => tagged("memory", snap),
+        Event::SecurityProgress { done, total } => {
+            json!({"event": "security_progress", "done": done, "total": total})
+        }
+        Event::SecurityResult(report) => tagged("security", report),
+        Event::CheckupDone { checkup, reminder } => checkup_line(checkup, reminder),
         Event::Failed { what, message } => {
             json!({"event": "error", "what": what, "message": message})
         }
@@ -317,6 +361,9 @@ fn with_core(cmd: Cmd) -> u8 {
     let env = Env::from_env_with(SystemSeams {
         procs: Arc::new(LibcProbe::new()),
         last_used: Spotlight::shared(),
+        // Under TIDY_HOME, TIDY_TEST_MEMORY and TIDY_TEST_COMMANDS replace these two.
+        memory: Arc::new(LibcMemory::new()),
+        runner: Arc::new(SystemRunner),
     });
     let _lock = if cmd.real().is_some() {
         match InstanceLock::acquire(&env.paths.lock_file()) {
@@ -404,6 +451,18 @@ fn with_core(cmd: Cmd) -> u8 {
             core.send(Command::EmptyTidyTrash);
             session.done()
         }
+        Cmd::Memory => {
+            core.send(Command::SnapshotMemory);
+            session.memory()
+        }
+        Cmd::Security { include_updates } => {
+            core.send(Command::RunSecurity { include_updates });
+            session.security()
+        }
+        Cmd::Checkup { include_updates } => {
+            core.send(Command::RunCheckup { include_updates });
+            session.checkup()
+        }
         Cmd::Help | Cmd::History { .. } => unreachable!("handled in run"),
     };
     rt.block_on(core.shutdown());
@@ -475,6 +534,89 @@ impl Session<'_> {
         }
         code::ERROR
     }
+
+    /// Prints the memory snapshot, or the error.
+    fn memory(&mut self) -> u8 {
+        while let Some(ev) = self.next() {
+            print_line(&event_line(&ev));
+            match ev {
+                Event::MemorySnapshot(_) => return code::OK,
+                Event::Failed { .. } => return code::ERROR,
+                _ => {}
+            }
+        }
+        code::ERROR
+    }
+
+    /// Prints progress until the Security report (0) or a failure (1).
+    fn security(&mut self) -> u8 {
+        while let Some(ev) = self.next() {
+            print_line(&event_line(&ev));
+            match ev {
+                Event::SecurityResult(_) => return code::OK,
+                Event::Failed { .. } => return code::ERROR,
+                _ => {}
+            }
+        }
+        code::ERROR
+    }
+
+    /// Prints every part's events until the check up ends. 0 when all three parts are in
+    /// it, 3 when one could not be done, 1 when the check up failed or was not saved.
+    fn checkup(&mut self) -> u8 {
+        let mut not_saved = false;
+        loop {
+            // After a check up failure the result may still follow (a save that failed) or
+            // not (the run itself failed): wait a little, not forever.
+            let ev = if not_saved {
+                let events = &mut self.events;
+                match self.rt.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await
+                }) {
+                    Ok(Some(ev)) => ev,
+                    _ => return code::ERROR,
+                }
+            } else {
+                match self.next() {
+                    Some(ev) => ev,
+                    None => return code::ERROR,
+                }
+            };
+            print_line(&event_line(&ev));
+            match ev {
+                Event::Failed { what, .. } if what == "checkup" => not_saved = true,
+                Event::CheckupDone { checkup, .. } => {
+                    return if not_saved {
+                        code::ERROR
+                    } else if checkup.cleanup.is_none()
+                        || checkup.security.is_none()
+                        || checkup.memory.is_none()
+                    {
+                        code::PARTIAL
+                    } else {
+                        code::OK
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The result line of `checkup`: the check up as saved, the next reminder date, and the
+/// three cards in words (null for a part that could not be done).
+fn checkup_line(checkup: &Checkup, reminder: &ReminderDate) -> Value {
+    let security = checkup.security.as_ref();
+    json!({
+        "event": "checkup",
+        "checkup": checkup,
+        "reminder": reminder,
+        "cleanup_total": checkup.cleanup.map(|c| c.safe_bytes),
+        "cleanup_items": checkup.cleanup.map(|c| c.safe_items),
+        "security_summary": security.map(|s| s.headline()),
+        "security_first_check": security.filter(|s| s.first_run).map(|_| FIRST_CHECK_SENTENCE),
+        "memory_verdict": checkup.memory.map(|m| m.verdict()),
+    })
 }
 
 /// Whether every item of the entry did what the action is for.
@@ -652,6 +794,31 @@ mod tests {
             Ok(Cmd::History { last: Some(3) })
         );
         assert_eq!(parse(&args("clean --help")), Ok(Cmd::Help));
+        assert_eq!(parse(&args("memory")), Ok(Cmd::Memory));
+        assert_eq!(
+            parse(&args("security")),
+            Ok(Cmd::Security {
+                include_updates: false
+            })
+        );
+        assert_eq!(
+            parse(&args("security --include-updates")),
+            Ok(Cmd::Security {
+                include_updates: true
+            })
+        );
+        assert_eq!(
+            parse(&args("checkup")),
+            Ok(Cmd::Checkup {
+                include_updates: false
+            })
+        );
+        assert_eq!(
+            parse(&args("checkup --include-updates")),
+            Ok(Cmd::Checkup {
+                include_updates: true
+            })
+        );
     }
 
     #[test]
@@ -669,6 +836,9 @@ mod tests {
             "trash --force /a",
             "empty-trash now",
             "history --last",
+            "memory --all",
+            "security --updates",
+            "checkup now",
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
@@ -679,6 +849,14 @@ mod tests {
         assert_eq!(Cmd::Scan.real(), None);
         assert_eq!(Cmd::History { last: None }.real(), None);
         assert_eq!(Cmd::EmptyTrash { real: false }.real(), Some(false));
+        assert_eq!(Cmd::Memory.real(), None);
+        assert_eq!(
+            Cmd::Checkup {
+                include_updates: false
+            }
+            .real(),
+            None
+        );
         assert!(!REFUSAL.contains('\u{2014}'));
     }
 
@@ -705,5 +883,53 @@ mod tests {
         });
         assert_eq!(line["event"], "progress");
         assert!(!line.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn the_checkup_line_names_the_three_parts() {
+        use tidy_core::model::{CheckupCleanup, CheckupMemory, CheckupSecurity, Pressure};
+        let reminder = ReminderDate {
+            at: 1,
+            year: 2026,
+            month: 10,
+            day: 30,
+            hour: 10,
+            minute: 0,
+        };
+        let full = Checkup {
+            at: 5,
+            include_updates: false,
+            cleanup: Some(CheckupCleanup {
+                safe_bytes: 6_300_000_000,
+                safe_items: 4,
+                review_bytes: 0,
+            }),
+            security: Some(CheckupSecurity {
+                week: "2026-W43".into(),
+                amber: 2,
+                gray: 1,
+                first_run: true,
+            }),
+            memory: Some(CheckupMemory {
+                pressure: Pressure::Warning,
+                swap_used: 0,
+                compressed_bytes: 0,
+            }),
+        };
+        let line = event_line(&Event::CheckupDone {
+            checkup: full.clone(),
+            reminder,
+        });
+        assert_eq!(line["event"], "checkup");
+        assert_eq!(line["cleanup_total"], 6_300_000_000u64);
+        assert_eq!(line["security_summary"], "2 things to look at");
+        assert_eq!(line["security_first_check"], FIRST_CHECK_SENTENCE);
+        assert_eq!(line["memory_verdict"], Pressure::Warning.verdict());
+        assert_eq!(line["reminder"]["day"], 30);
+        assert_eq!(line["checkup"]["at"], 5);
+        let empty = checkup_line(&Checkup::default(), &reminder);
+        assert!(empty["cleanup_total"].is_null());
+        assert!(empty["security_summary"].is_null());
+        assert!(empty["memory_verdict"].is_null());
     }
 }

@@ -16,7 +16,9 @@ use crate::store::write_atomic;
 /// The settings.json schema this build writes.
 ///
 /// * 1: the first release (M1).
-pub const SCHEMA_VERSION: u32 = 1;
+/// * 2: M2 adds `reminder_enabled` and `include_updates`, both off. A version 1 file has
+///   neither, so the migration only fills in the defaults and writes the file back.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The range "Not opened lately" may be set to, in days.
 pub const NOT_OPENED_DAYS_MIN: u32 = 1;
@@ -46,6 +48,12 @@ pub struct Settings {
     pub cleanup_scanned_once: bool,
     /// The user has run a Large files scan once.
     pub large_scanned_once: bool,
+    /// The weekly check up reminder (C16). Off by default; notification permission is asked
+    /// for only when the user switches it on.
+    pub reminder_enabled: bool,
+    /// "Include macOS updates" on the Check up screen: the check up then also runs the slow
+    /// `softwareupdate --list`. Off by default.
+    pub include_updates: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +66,8 @@ impl Default for Settings {
             ignored_paths: Vec::new(),
             cleanup_scanned_once: false,
             large_scanned_once: false,
+            reminder_enabled: false,
+            include_updates: false,
         }
     }
 }
@@ -216,6 +226,8 @@ mod tests {
         assert!(s.ignored_paths.is_empty());
         assert!(!s.cleanup_scanned_once);
         assert!(!s.large_scanned_once);
+        assert!(!s.reminder_enabled, "the reminder is opt-in");
+        assert!(!s.include_updates, "softwareupdate only when ticked");
     }
 
     #[test]
@@ -235,6 +247,8 @@ mod tests {
             ignored_paths: vec!["/h/Library/Caches/x".into()],
             cleanup_scanned_once: true,
             large_scanned_once: true,
+            reminder_enabled: true,
+            include_updates: true,
             ..Settings::default()
         };
         s.save(&p).unwrap();
@@ -302,10 +316,53 @@ mod tests {
     #[test]
     fn a_current_file_is_not_rewritten() {
         let (_t, p) = paths();
-        let raw = br#"{"version":1,"large_min_bytes":100000000}"#;
+        let raw = br#"{"version":2,"large_min_bytes":100000000}"#;
         std::fs::write(p.settings_file(), raw).unwrap();
         assert_eq!(Settings::load(&p).large_min_bytes, 100 * MB);
         assert_eq!(std::fs::read(p.settings_file()).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_version_1_file_is_migrated_to_version_2() {
+        let (_t, p) = paths();
+        std::fs::write(
+            p.settings_file(),
+            br#"{"version":1,"large_min_bytes":1000000000,"not_opened_days":30,"project_roots":["code"],"ignored_paths":["/h/x"],"cleanup_scanned_once":true,"large_scanned_once":true}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.version, 2);
+        // Every M1 value survives.
+        assert_eq!(s.large_min_bytes, 1000 * MB);
+        assert_eq!(s.not_opened_days, 30);
+        assert_eq!(s.project_roots, [PathBuf::from("code")]);
+        assert_eq!(s.ignored_paths, [PathBuf::from("/h/x")]);
+        assert!(s.cleanup_scanned_once && s.large_scanned_once);
+        // The M2 fields start off.
+        assert!(!s.reminder_enabled);
+        assert!(!s.include_updates);
+        let d = disk(&p);
+        assert_eq!(d["version"], 2);
+        assert_eq!(d["reminder_enabled"], false);
+        assert_eq!(d["include_updates"], false);
+        assert_eq!(d["not_opened_days"], 30);
+        // Loading again leaves the migrated file alone.
+        let raw = std::fs::read(p.settings_file()).unwrap();
+        assert_eq!(Settings::load(&p), s);
+        assert_eq!(std::fs::read(p.settings_file()).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_bad_reminder_value_falls_back_to_off() {
+        let (_t, p) = paths();
+        std::fs::write(
+            p.settings_file(),
+            br#"{"version":2,"reminder_enabled":"yes","include_updates":true}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert!(!s.reminder_enabled);
+        assert!(s.include_updates);
     }
 
     #[test]

@@ -17,6 +17,8 @@ objc2.workspace = true
 objc2-foundation = { workspace = true, features = ["std"] }
 # Package detection asks UTType about unknown folder extensions (see packages.rs).
 objc2-uniform-type-identifiers.workspace = true
+# The weekly reminder date in the local time zone (see reminder.rs).
+jiff.workspace = true
 
 [dev-dependencies]
 tidy-fixtures = { path = "../tidy-fixtures" }

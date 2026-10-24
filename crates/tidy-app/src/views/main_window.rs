@@ -21,7 +21,7 @@ use crate::theme::{Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
 use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
 use crate::views::memory::MemoryMenu;
-use crate::views::{hairline, icon_button, text_button};
+use crate::views::{hairline, icon_button, large_button, text_button};
 
 pub struct TidyView {
     pub model: Entity<TidyModel>,
@@ -44,6 +44,15 @@ pub struct TidyView {
     pub history_open: bool,
     /// History entries (by id) whose item list is open.
     pub history_expanded: HashSet<String>,
+    /// The figure each Check up card showed last (Cleanup, Security, Memory), to notice when
+    /// one goes from "Checking" to a result.
+    pub(crate) card_figures: [String; 3],
+    /// When each card's result arrived, with the generation that keys its fade-in.
+    pub(crate) card_changed: [Option<(std::time::Instant, usize)>; 3],
+    /// Counts the animations started from this view, so each gets a fresh element id.
+    pub(crate) card_generation: usize,
+    /// When the reminder switch was last clicked, with the generation keying the knob slide.
+    pub(crate) switch_flipped: Option<(std::time::Instant, usize)>,
     /// Set on a mouse-down on empty toolbar space; the first move then drags the window.
     should_move: bool,
     /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
@@ -137,6 +146,10 @@ impl TidyView {
             dialog: None,
             history_open: false,
             history_expanded: HashSet::new(),
+            card_figures: Default::default(),
+            card_changed: [None; 3],
+            card_generation: 0,
+            switch_flipped: None,
             should_move: false,
             window_visible: window.is_visible(),
             _subs: vec![observed, appearance, activation, visibility],
@@ -400,7 +413,7 @@ impl TidyView {
                 IconName::CircleCheck,
                 t.success,
                 format!(
-                    "Moved {} to the Trash. The space is freed when you empty the Trash.",
+                    "Moved {} to the Trash. Empty the Trash to free the space.",
                     format::size(*bytes)
                 ),
                 *bytes,
@@ -434,7 +447,7 @@ impl TidyView {
                 d.child(text_button(
                     "notice-empty-trash",
                     "notice-empty-trash".to_string(),
-                    "Empty Trash",
+                    "Empty Trash\u{2026}",
                     false,
                     true,
                     &on_band,
@@ -486,8 +499,12 @@ impl TidyView {
         }
     }
 
-    /// The 30 pt status bar: text at the left, `right` at the right.
+    /// The 30 pt status bar: text at the left, `right` at the right. With nothing to say (an
+    /// empty state before the first scan) it is left out rather than drawn as a blank strip.
     pub(crate) fn status_bar(&self, t: &Theme, left: String, right: Option<AnyElement>) -> Div {
+        if left.is_empty() && right.is_none() {
+            return div();
+        }
         div()
             .debug_selector(|| "status-bar".to_string())
             .relative()
@@ -566,11 +583,10 @@ impl TidyView {
                             .text_center()
                             .child(body),
                     )
-                    .child(div().mt(px(8.)).child(text_button(
+                    .child(div().mt(px(8.)).child(large_button(
                         "empty-action",
                         "empty-action".to_string(),
                         button,
-                        true,
                         true,
                         t,
                         on_click,

@@ -45,10 +45,11 @@ pub fn figure_selector_for(screen: Screen) -> &'static str {
 }
 
 /// The trailing figure of a sidebar row: the safe total after a Cleanup scan, the item count
-/// on Large files. None before the first result, and on the other screens.
+/// on Large files. None before the first result, when the safe total is zero (a "0 KB" next
+/// to the row says nothing), and on the other screens.
 pub fn figure_for(screen: Screen, m: &TidyModel) -> Option<String> {
     match screen {
-        Screen::Cleanup => m.cleanup.safe_bytes().map(format::size),
+        Screen::Cleanup => m.cleanup.safe_bytes().filter(|b| *b > 0).map(format::size),
         Screen::Large => m.large.item_count().map(|n| format::thousands(n as u64)),
         Screen::Checkup | Screen::Memory | Screen::Security => None,
     }

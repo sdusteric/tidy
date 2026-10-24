@@ -20,7 +20,9 @@ use crate::format::{self, Glyph};
 use crate::theme::{MONO_FONT, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
-use crate::views::{Segment, checkbox, glyph_tile, icon_button, plain_button, segmented, tag};
+use crate::views::{
+    Segment, checkbox, glyph_tile, icon_button, plain_button, scroll_edge, segmented, tag,
+};
 
 pub const EMPTY_TITLE: &str = "See what takes up space";
 
@@ -91,25 +93,17 @@ impl LargeView {
 
 /// The width of everything in a Large files row except the text column, in points: the row
 /// padding (20), checkbox (16), tile (32), date column (150), size column (80), trailing
-/// actions (60) and the gaps between those and the text column (50).
+/// actions (60) and the gaps between those and the text column (50). Tags sit on the name
+/// line, so the path line under it has the whole text column.
 pub const ROW_FIXED_W: f32 = 408.;
-/// What one tag ("App data", "Package") takes with its gap, in points.
-pub const TAG_W: f32 = 74.;
 /// The fewest characters a path line is cut to.
 pub const MIN_PATH_COLS: usize = 12;
 /// The advance of a character in the 12 pt mono font when the text system can't tell.
 pub const FALLBACK_CHAR_W: f32 = 7.2;
 
-/// The width of the name and path column of a row, for a window `viewport_w` points wide
-/// and a row with `tags` tags.
-pub fn text_col_width(viewport_w: f32, tags: usize) -> f32 {
-    (viewport_w
-        - metrics::SIDEBAR_W
-        - 1.
-        - 2. * metrics::LIST_INSET
-        - ROW_FIXED_W
-        - TAG_W * tags as f32)
-        .max(0.)
+/// The width of the name and path column of a row, for a window `viewport_w` points wide.
+pub fn text_col_width(viewport_w: f32) -> f32 {
+    (viewport_w - metrics::SIDEBAR_W - 1. - 2. * metrics::LIST_INSET - ROW_FIXED_W).max(0.)
 }
 
 /// How many mono characters fit in `width` points when one takes `char_w`. One column is kept
@@ -123,18 +117,17 @@ pub fn path_columns(width: f32, char_w: f32) -> usize {
     cols.saturating_sub(1).max(MIN_PATH_COLS)
 }
 
-/// The path line of a row: `~/Movies/2025/.../trip.mov`, shortened in the middle so it fits
+/// The path line of a row: `~/Movies/2025/…/trip.mov`, shortened in the middle so it fits
 /// the text column of a window `viewport_w` points wide. A name too long for even that keeps
-/// both ends with "..." between. The element also ends in an ellipsis when the font is wider
+/// both ends with an ellipsis between. The element also ends in an ellipsis when the font is wider
 /// than measured, so a path is never cut mid-character.
 pub fn path_text(
     path: &std::path::Path,
     root: &std::path::Path,
     viewport_w: f32,
-    tags: usize,
     char_w: f32,
 ) -> String {
-    let cols = path_columns(text_col_width(viewport_w, tags), char_w);
+    let cols = path_columns(text_col_width(viewport_w), char_w);
     format::middle_truncate(&format::display_path(path, root), cols)
 }
 
@@ -221,8 +214,7 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
     let reveal_path = e.path.clone();
     let selector_rel = rel.clone();
 
-    let tags = usize::from(e.app_data) + usize::from(e.kind == LargeKind::Package);
-    let path_line = path_text(&e.path, &env.root, env.viewport_w, tags, env.char_w);
+    let path_line = path_text(&e.path, &env.root, env.viewport_w, env.char_w);
     let second: AnyElement = if let Some(reason) = skipped {
         div()
             .text_size(px(12.))
@@ -359,20 +351,28 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                 .flex()
                 .flex_col()
                 .child(
+                    // Tags sit right after the name, as Haul's quality tag does.
                     div()
-                        .text_size(px(13.))
-                        .line_height(px(17.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.text)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(e.name.clone()),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .line_height(px(17.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.text)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(e.name.clone()),
+                        )
+                        .when(e.app_data, |d| d.child(tag("App data", t)))
+                        .when(e.kind == LargeKind::Package, |d| d.child(tag("Package", t))),
                 )
                 .child(second),
         )
-        .when(e.app_data, |d| d.child(tag("App data", t)))
-        .when(e.kind == LargeKind::Package, |d| d.child(tag("Package", t)))
         .child(
             div()
                 .flex_none()
@@ -591,28 +591,6 @@ impl TidyView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(segmented(
-                        "large-mode",
-                        vec![
-                            Segment {
-                                label: "Files",
-                                selected: snap.mode == LargeMode::Files,
-                                selector: "mode-files".to_string(),
-                                on_click: Box::new(move |_, cx| {
-                                    mode_a.update(cx, |m, cx| m.set_mode(LargeMode::Files, cx));
-                                }),
-                            },
-                            Segment {
-                                label: "Folders",
-                                selected: snap.mode == LargeMode::Folders,
-                                selector: "mode-folders".to_string(),
-                                on_click: Box::new(move |_, cx| {
-                                    mode_b.update(cx, |m, cx| m.set_mode(LargeMode::Folders, cx));
-                                }),
-                            },
-                        ],
-                        t,
-                    ))
                     .when(snap.mode == LargeMode::Files, |d| {
                         d.child(segmented(
                             "large-filter",
@@ -641,6 +619,30 @@ impl TidyView {
                             t,
                         ))
                     })
+                    // Files | Folders sits right of the filter, so hiding the filter in Folders
+                    // mode does not move the control that was just clicked.
+                    .child(segmented(
+                        "large-mode",
+                        vec![
+                            Segment {
+                                label: "Files",
+                                selected: snap.mode == LargeMode::Files,
+                                selector: "mode-files".to_string(),
+                                on_click: Box::new(move |_, cx| {
+                                    mode_a.update(cx, |m, cx| m.set_mode(LargeMode::Files, cx));
+                                }),
+                            },
+                            Segment {
+                                label: "Folders",
+                                selected: snap.mode == LargeMode::Folders,
+                                selector: "mode-folders".to_string(),
+                                on_click: Box::new(move |_, cx| {
+                                    mode_b.update(cx, |m, cx| m.set_mode(LargeMode::Folders, cx));
+                                }),
+                            },
+                        ],
+                        t,
+                    ))
                     .child(
                         div()
                             .id("threshold")
@@ -690,7 +692,10 @@ impl TidyView {
                 div().into_any_element()
             }
         };
-        let toolbar = self.toolbar(t, "Large files", scrolled, controls, cx);
+        // In Folders mode the breadcrumb stays put under the toolbar, so the scrolled edge is
+        // under the breadcrumb.
+        let crumbs_shown = snap.has_scan && snap.mode == LargeMode::Folders;
+        let toolbar = self.toolbar(t, "Large files", scrolled && !crumbs_shown, controls, cx);
 
         let shown = snap
             .notice
@@ -711,8 +716,14 @@ impl TidyView {
             )
         });
 
-        let breadcrumb = (snap.has_scan && snap.mode == LargeMode::Folders)
-            .then(|| self.breadcrumb(t, &snap.crumbs, cx));
+        let breadcrumb = crumbs_shown.then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(self.breadcrumb(t, &snap.crumbs, cx))
+                .child(scroll_edge(t, scrolled))
+        });
 
         let items_empty = snap.item_count == 0 && snap.rows.is_empty();
         let body: AnyElement = if !snap.has_scan {
@@ -820,7 +831,7 @@ impl TidyView {
                     "move-to-trash".to_string(),
                     match self.model.read(cx).large.trashing {
                         Some((done, total)) => format!("Moving {done} of {total}"),
-                        None => "Move to Trash...".to_string(),
+                        None => "Move to Trash\u{2026}".to_string(),
                     },
                     can_trash,
                     t,
@@ -857,7 +868,9 @@ impl TidyView {
             .debug_selector(|| "breadcrumb".to_string())
             .flex_none()
             .h(px(metrics::BREADCRUMB_H))
-            .px(px(20.))
+            // Segments have 4 pt of padding, so their text lines up with the title at 20.
+            .pl(px(16.))
+            .pr(px(20.))
             .gap(px(4.))
             .flex()
             .items_center()
@@ -913,32 +926,24 @@ mod tests {
     fn long_paths_are_shortened_to_fit_the_text_column() {
         let root = std::path::Path::new("/Users/demo");
         for viewport in [760., 900., 1400.] {
-            for tags in [0, 1, 2] {
-                let text = path_text(
-                    std::path::Path::new(LONG),
-                    root,
-                    viewport,
-                    tags,
-                    FALLBACK_CHAR_W,
-                );
-                let width = text.chars().count() as f32 * FALLBACK_CHAR_W;
-                let room = text_col_width(viewport, tags);
-                // Never wider than the column, unless the column is smaller than the minimum.
-                assert!(
-                    width <= room || text.chars().count() <= MIN_PATH_COLS,
-                    "{viewport} {tags}: {text} is {width} wide in {room}"
-                );
-                let full = format::display_path(std::path::Path::new(LONG), root);
-                if text.chars().count() < full.chars().count() {
-                    assert!(text.contains("..."), "{text}");
-                }
+            let text = path_text(std::path::Path::new(LONG), root, viewport, FALLBACK_CHAR_W);
+            let width = text.chars().count() as f32 * FALLBACK_CHAR_W;
+            let room = text_col_width(viewport);
+            // Never wider than the column, unless the column is smaller than the minimum.
+            assert!(
+                width <= room || text.chars().count() <= MIN_PATH_COLS,
+                "{viewport}: {text} is {width} wide in {room}"
+            );
+            let full = format::display_path(std::path::Path::new(LONG), root);
+            if text.chars().count() < full.chars().count() {
+                assert!(text.contains('\u{2026}'), "{text}");
             }
         }
         // At the default window the file name survives and the middle is replaced.
-        let at_900 = path_text(std::path::Path::new(LONG), root, 900., 0, FALLBACK_CHAR_W);
+        let at_900 = path_text(std::path::Path::new(LONG), root, 900., FALLBACK_CHAR_W);
         assert!(at_900.starts_with("~/"), "{at_900}");
         assert!(at_900.ends_with("ltx-video-13b.safetensors"), "{at_900}");
-        assert!(at_900.contains("/.../"), "{at_900}");
+        assert!(at_900.contains("/\u{2026}/"), "{at_900}");
     }
 
     #[test]
@@ -946,21 +951,21 @@ mod tests {
         let root = std::path::Path::new("/Users/demo");
         let short = std::path::Path::new("/Users/demo/Movies/trip.mov");
         assert_eq!(
-            path_text(short, root, 900., 0, FALLBACK_CHAR_W),
+            path_text(short, root, 900., FALLBACK_CHAR_W),
             "~/Movies/trip.mov"
         );
-        let narrow = path_text(std::path::Path::new(LONG), root, 760., 0, FALLBACK_CHAR_W);
-        let wide = path_text(std::path::Path::new(LONG), root, 1400., 0, FALLBACK_CHAR_W);
+        let narrow = path_text(std::path::Path::new(LONG), root, 760., FALLBACK_CHAR_W);
+        let wide = path_text(std::path::Path::new(LONG), root, 1400., FALLBACK_CHAR_W);
         assert!(narrow.chars().count() <= wide.chars().count());
         assert!(
-            !wide.contains("..."),
+            !wide.contains('\u{2026}'),
             "a 1400 pt window fits the whole path: {wide}"
         );
     }
 
     #[test]
     fn column_math_has_a_floor() {
-        assert_eq!(text_col_width(100., 2), 0.);
+        assert_eq!(text_col_width(100.), 0.);
         assert_eq!(path_columns(0., 7.2), MIN_PATH_COLS);
         assert_eq!(path_columns(100., 0.), MIN_PATH_COLS);
         assert_eq!(path_columns(7.2 * 40., 7.2), 39);

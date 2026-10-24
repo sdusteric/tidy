@@ -22,7 +22,7 @@ use crate::format;
 use crate::theme::{Theme, figure, metrics, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
-use crate::views::{glyph_tile, icon_button, text_button};
+use crate::views::{glyph_tile, icon_button, scroll_edge, text_button};
 
 /// Samples the pressure graph keeps: five minutes at one every 2 seconds.
 pub const HISTORY_MAX: usize = 150;
@@ -359,8 +359,31 @@ pub fn verdict_parts(p: Pressure) -> (&'static str, &'static str) {
 
 /// The one-line explanations under the three figures.
 pub const PRESSURE_NOTE: &str = "How hard macOS works to find free memory.";
-pub const SWAP_NOTE: &str = "Memory macOS parked on disk. A little is normal.";
-pub const COMPRESSED_NOTE: &str = "Memory squeezed to save space. Normal and fast.";
+// They say what each figure is, not whether it is fine, so they never contradict a Warning or
+// Critical figure above them. The verdict line says whether it is fine.
+pub const SWAP_NOTE: &str = "Memory macOS moved to disk to make room.";
+pub const COMPRESSED_NOTE: &str = "Memory macOS compressed to fit more in.";
+
+/// The graph's caption: "Pressure since you opened this screen" and how long that is ("2 min"),
+/// or, once the graph is full and drops its oldest bars, "Pressure in the last 5 min".
+pub fn graph_caption(samples: usize) -> (String, String) {
+    let span = graph_span(samples);
+    if samples >= HISTORY_MAX {
+        (format!("Pressure in the last {span}"), String::new())
+    } else {
+        ("Pressure since you opened this screen".to_string(), span)
+    }
+}
+
+/// How long `samples` readings cover: "40 s", "2 min".
+fn graph_span(samples: usize) -> String {
+    let secs = samples as u64 * crate::app::MEMORY_PERIOD.as_secs();
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min", (secs + 30) / 60)
+    }
+}
 
 /// The height of a pressure bar as a share of the graph.
 pub fn bar_share(p: Pressure) -> f32 {
@@ -405,7 +428,7 @@ impl TidyView {
         cx.notify();
     }
 
-    /// "Force Quit..." in the menu: asks first, because unsaved changes are lost.
+    /// "Force Quit…" in the menu: asks first, because unsaved changes are lost.
     fn request_force_quit(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.memory_menu.take() else {
             return;
@@ -445,7 +468,7 @@ impl TidyView {
                     .whitespace_nowrap()
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
-                    .child("Force Quit...")
+                    .child("Force Quit\u{2026}")
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, _, cx| {
                         let _ = view.update(cx, |v, cx| v.request_force_quit(cx));
@@ -505,7 +528,8 @@ impl TidyView {
                 },
             )
         };
-        let toolbar = self.toolbar(t, "Memory", scrolled, controls, cx);
+        // The figures stay put above the list; the scrolled edge is under the list header.
+        let toolbar = self.toolbar(t, "Memory", false, controls, cx);
 
         let shown = snap
             .notice
@@ -566,6 +590,7 @@ impl TidyView {
                     .child(figures(t, s))
                     .child(graph(t, &snap.history))
                     .child(list_header(t))
+                    .child(scroll_edge(t, scrolled))
                     .child(list)
                     .into_any_element()
             }
@@ -612,11 +637,9 @@ fn verdict_strip(t: &Theme, s: &MemorySnapshot) -> Div {
                 .text_size(px(figure::SIZE))
                 .line_height(px(figure::LINE))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(match s.pressure {
-                    Pressure::Normal => t.text,
-                    Pressure::Warning => t.warning,
-                    Pressure::Critical => t.error,
-                })
+                // In `text`, as on the other screens: the Pressure figure and the graph carry
+                // the color.
+                .text_color(t.text)
                 .whitespace_nowrap()
                 .child(first),
         )
@@ -641,6 +664,7 @@ fn figures(t: &Theme, s: &MemorySnapshot) -> Div {
     div()
         .flex_none()
         .px(px(20.))
+        .pt(px(4.))
         .pb(px(12.))
         .flex()
         .gap(px(12.))
@@ -685,7 +709,7 @@ fn figure_card(
         .px(px(12.))
         .py(px(10.))
         .rounded(px(10.))
-        .bg(t.fill)
+        .bg(t.card_bg())
         .flex()
         .flex_col()
         .child(
@@ -720,6 +744,7 @@ fn figure_card(
 /// The pressure history: one bar per sample, taller and warmer as pressure rises.
 fn graph(t: &Theme, history: &[Pressure]) -> Div {
     const H: f32 = 36.;
+    let (caption, span) = graph_caption(history.len());
     div()
         .debug_selector(|| "memory-graph".to_string())
         .flex_none()
@@ -728,7 +753,7 @@ fn graph(t: &Theme, history: &[Pressure]) -> Div {
         .px(px(12.))
         .py(px(10.))
         .rounded(px(10.))
-        .bg(t.fill)
+        .bg(t.card_bg())
         .flex()
         .flex_col()
         .gap(px(8.))
@@ -739,20 +764,8 @@ fn graph(t: &Theme, history: &[Pressure]) -> Div {
                 .text_size(px(12.))
                 .line_height(px(16.))
                 .text_color(t.text_2)
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Pressure since you opened this screen"),
-                )
-                .child(div().child(format!(
-                    "{} {}",
-                    history.len(),
-                    if history.len() == 1 {
-                        "sample"
-                    } else {
-                        "samples"
-                    }
-                ))),
+                .child(div().font_weight(FontWeight::MEDIUM).child(caption))
+                .child(div().font_features(tnum()).child(span)),
         )
         .child(
             div()
@@ -1064,6 +1077,22 @@ mod tests {
         ] {
             assert!(!s.contains('\u{2014}'), "{s}");
         }
+    }
+
+    #[test]
+    fn the_graph_caption_says_how_long_it_covers() {
+        assert_eq!(
+            graph_caption(20),
+            (
+                "Pressure since you opened this screen".to_string(),
+                "40 s".to_string()
+            )
+        );
+        assert_eq!(graph_caption(60).1, "2 min");
+        assert_eq!(
+            graph_caption(HISTORY_MAX),
+            ("Pressure in the last 5 min".to_string(), String::new())
+        );
     }
 
     /// The System row's line names the large processes inside, WindowServer first as the core

@@ -259,7 +259,7 @@ impl Screen {
 /// The band under the toolbar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
-    /// "Moved 6.3 GB to the Trash. The space is freed when you empty the Trash."
+    /// "Moved 6.3 GB to the Trash. Empty the Trash to free the space."
     Moved { bytes: u64 },
     /// A sentence about something that failed.
     Error(String),

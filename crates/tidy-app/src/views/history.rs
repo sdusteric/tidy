@@ -78,7 +78,7 @@ impl TidyView {
         let hover = t.row_hover;
 
         let body: AnyElement = match entries {
-            None => message(t, "Loading...").into_any_element(),
+            None => message(t, "Loading\u{2026}").into_any_element(),
             Some(list) if list.is_empty() => {
                 message(t, "Nothing has been cleaned yet.").into_any_element()
             }

@@ -32,7 +32,11 @@ pub const EMPTY_BODY: &str = "Tidy reads FileVault, the firewall, Gatekeeper, Sy
 pub const RUNNING_BODY: &str = "Checking your settings. This takes a few seconds.";
 pub const CHECKING_SIGNATURE: &str = "Checking signature";
 /// The note under a macOS updates row that has not been checked.
-pub const UPDATES_BUTTON: &str = "Check now";
+pub const UPDATES_BUTTON: &str = "Check Now";
+/// The sentence of a macOS updates row that shows the Check Now button. The core's sentence
+/// (also printed by tidyctl) explains why it waits; on screen the button is the way to start.
+pub const UPDATES_ROW_SENTENCE: &str =
+    "Not checked. Tidy asks Apple for updates only when you click Check Now.";
 
 /// A login item moved to the Trash from this screen, until the core reports the outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,14 +272,15 @@ fn login_row(item: &LoginItem, running: bool, state: &SecurityState) -> LoginRow
             item.signer == Signer::Unsigned,
         ));
         match item.notarized {
-            Some(true) => meta.push(("Notarized".to_string(), false)),
-            Some(false) => meta.push(("Not notarized".to_string(), true)),
+            // Notarized: Apple scanned the program before it was shipped.
+            Some(true) => meta.push(("Checked by Apple".to_string(), false)),
+            Some(false) => meta.push(("Not checked by Apple".to_string(), true)),
             None => {}
         }
     }
     meta.push((
         if item.runs_at_load {
-            "Runs at load"
+            "Starts automatically"
         } else {
             "Runs when needed"
         }
@@ -283,7 +288,7 @@ fn login_row(item: &LoginItem, running: bool, state: &SecurityState) -> LoginRow
         false,
     ));
     if item.kind == LaunchKind::Daemon {
-        meta.push(("Background daemon".to_string(), false));
+        meta.push(("System service".to_string(), false));
     } else if item.scope == Scope::System {
         meta.push(("All users".to_string(), false));
     }
@@ -368,7 +373,17 @@ pub fn summary_line(report: &SecurityReport, now: u64) -> String {
     }
     let gray = report.gray();
     if gray > 0 {
-        parts.push(format!("{gray} could not be checked",));
+        // "Not checked" covers both a check that could not run and macOS updates, which wait
+        // for a click.
+        parts.push(format!("{gray} not checked"));
+    }
+    if parts.len() > 1 {
+        // Joined with " · ", a sentence's own full stop goes.
+        for p in &mut parts {
+            if let Some(s) = p.strip_suffix('.') {
+                *p = s.to_string();
+            }
+        }
     }
     parts.join(" \u{b7} ")
 }
@@ -518,7 +533,11 @@ fn check_row(
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .text_color(t.text_2)
-                        .child(check.sentence.clone()),
+                        .child(if updates_button {
+                            UPDATES_ROW_SENTENCE.to_string()
+                        } else {
+                            check.sentence.clone()
+                        }),
                 ),
         )
         .children(action)
@@ -773,6 +792,7 @@ impl TidyView {
             }
             None => div().into_any_element(),
         };
+        // The summary scrolls with the checks, so the toolbar's edge is the one that shows.
         let toolbar = self.toolbar(t, "Security", scrolled, controls, cx);
 
         let shown = snap
@@ -835,6 +855,7 @@ impl TidyView {
                     .pt(px(2.))
                     .pb(px(8.))
                     .when(dim, |l| l.opacity(0.5))
+                    .child(summary_strip(t, report, now))
                     .children(rows.iter().enumerate().map(|(ix, row)| match row {
                         SecRow::Check {
                             check,
@@ -847,14 +868,7 @@ impl TidyView {
                         }
                         SecRow::Extension(e) => extension_row_view(e, ix, t),
                     }));
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(summary_strip(t, report, now))
-                    .child(list)
-                    .into_any_element()
+                list.into_any_element()
             }
         };
 
@@ -880,13 +894,14 @@ impl TidyView {
     }
 }
 
-/// 64 pt: the headline as the Figure and one line under it.
+/// 64 pt: the headline as the Figure and one line under it. It is the first child of the
+/// list (inset 8), so 12 more puts its text at 20 like the other screens.
 fn summary_strip(t: &Theme, report: &SecurityReport, now: u64) -> Div {
     div()
         .debug_selector(|| "summary".to_string())
         .flex_none()
         .h(px(metrics::SUMMARY_H))
-        .px(px(20.))
+        .px(px(12.))
         .flex()
         .flex_col()
         .justify_center()
@@ -1015,8 +1030,8 @@ mod tests {
             helper.meta,
             [
                 ("Example Inc".to_string(), false),
-                ("Notarized".to_string(), false),
-                ("Runs at load".to_string(), false)
+                ("Checked by Apple".to_string(), false),
+                ("Starts automatically".to_string(), false)
             ]
         );
         assert_eq!(helper.mark, Some(Mark::New));
@@ -1027,8 +1042,8 @@ mod tests {
         );
         let root = login("com.example.root");
         assert_eq!(root.meta[0], ("Not signed".to_string(), true));
-        assert_eq!(root.meta[1], ("Not notarized".to_string(), true));
-        assert!(root.meta.iter().any(|(t, _)| t == "Background daemon"));
+        assert_eq!(root.meta[1], ("Not checked by Apple".to_string(), true));
+        assert!(root.meta.iter().any(|(t, _)| t == "System service"));
         // No program listed: the plist is shown, and a daemon can't be trashed here.
         assert_eq!(root.path, "/Library/LaunchDaemons/com.example.root.plist");
         assert!(!root.can_trash);
@@ -1111,7 +1126,7 @@ mod tests {
         r.checks[5] = CheckResult::new(CheckId::MacosUpdates, Status::Gray, "Checked on demand.");
         assert_eq!(
             summary_line(&r, now),
-            "New and changed since your check 2 days ago \u{b7} 1 could not be checked"
+            "New and changed since your check 2 days ago \u{b7} 1 not checked"
         );
     }
 

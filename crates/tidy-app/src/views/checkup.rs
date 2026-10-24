@@ -20,9 +20,9 @@ use crate::app::Tri;
 use crate::app::{Notice, Screen, TidyModel, notifier, now_unix, open_settings, send};
 use crate::format;
 use crate::macos::Permission;
-use crate::theme::{Theme, figure, tnum};
+use crate::theme::{Theme, figure, metrics, motion as m, tnum};
 use crate::views::main_window::TidyView;
-use crate::views::{checkbox, text_button};
+use crate::views::{checkbox, large_button, text_button};
 
 pub const RUN_LABEL: &str = "Run Check up";
 pub const RUNNING_LABEL: &str = "Running Check up";
@@ -336,7 +336,7 @@ pub fn cards(m: &TidyModel) -> Cards {
             line: if s.first_run {
                 "This is your first check".to_string()
             } else if s.gray > 0 {
-                format!("{} could not be checked", s.gray)
+                format!("{} not checked", s.gray)
             } else {
                 String::new()
             },
@@ -410,32 +410,59 @@ pub fn reminder_note(
 
 // ---------- drawing ----------
 
-/// A switch: 34 x 20 pt, a white knob that sits right when on.
+/// A switch: 34 x 20 pt, a white knob with Haul's knob shadow that sits right when on. When
+/// `slide` is set (the switch was just clicked) the knob slides to its side over 160 ms
+/// instead of jumping there.
 pub fn switch(
     id: &'static str,
     on: bool,
+    slide: Option<usize>,
     t: &Theme,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    const OFF_X: f32 = 2.;
+    const ON_X: f32 = 16.;
+    let knob = div()
+        .absolute()
+        .top(px(2.))
+        .size(px(16.))
+        .rounded_full()
+        .bg(gpui_kit::white())
+        .shadow(t.knob_shadow());
+    let (from, to) = if on { (OFF_X, ON_X) } else { (ON_X, OFF_X) };
+    let knob = match slide {
+        Some(generation) => knob
+            .left(px(from))
+            .with_animation(
+                ("switch-knob", generation),
+                Animation::new(m::SWITCH).with_easing(m::curve(m::enter())),
+                move |el, d| el.left(px(from + (to - from) * d)),
+            )
+            .into_any_element(),
+        None => knob.left(px(to)).into_any_element(),
+    };
     div()
         .id(id)
         .debug_selector(|| id.to_string())
+        .relative()
         .flex_none()
         .w(px(34.))
         .h(px(20.))
-        .p(px(2.))
         .rounded_full()
-        .flex()
-        .items_center()
-        .when(on, |d| d.justify_end().bg(t.accent))
-        .when(!on, |d| d.justify_start().bg(t.separator_strong))
+        .when(on, |d| d.bg(t.accent))
+        .when(!on, |d| d.bg(t.separator_strong))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx)
         })
-        .child(div().size(px(16.)).rounded_full().bg(gpui_kit::white()))
+        .child(knob)
+}
+
+/// Whether something that changed at `at` is still recent enough to animate.
+pub(crate) fn just_changed(at: Option<std::time::Instant>) -> bool {
+    at.is_some_and(|at| at.elapsed() < m::CHANGE_GATE)
 }
 
 impl TidyView {
@@ -451,7 +478,7 @@ impl TidyView {
         footer: Option<AnyElement>,
     ) -> Stateful<Div> {
         let model = self.model.clone();
-        let hover = t.row_hover;
+        let hover = t.card_hover();
         div()
             .id(key)
             .debug_selector(move || key.to_string())
@@ -459,9 +486,7 @@ impl TidyView {
             .min_w_0()
             .p(px(14.))
             .rounded(px(10.))
-            .border_1()
-            .border_color(t.separator)
-            .bg(t.group_bg)
+            .bg(t.card_bg())
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -492,6 +517,7 @@ impl TidyView {
             )
             .child(
                 div()
+                    .mt(px(2.))
                     .flex()
                     .flex_wrap()
                     .items_baseline()
@@ -590,61 +616,63 @@ impl TidyView {
             )
         });
 
-        // The hero: the button, the date under it, and the macOS updates option.
+        // The summary, as on the other screens: when the last check up was as the Figure, what
+        // a check up does under it. Then the action row: the button and its one option.
         let run_model = model.clone();
         let updates_model = model.clone();
-        let hero = div()
+        let summary = div()
             .debug_selector(|| "checkup-hero".to_string())
             .flex_none()
+            .h(px(metrics::SUMMARY_H))
             .px(px(20.))
-            .pt(px(16.))
-            .pb(px(16.))
             .flex()
-            .items_start()
-            .justify_between()
-            .gap(px(20.))
+            .flex_col()
+            .justify_center()
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(div().flex().child(text_button(
-                        "run-checkup",
-                        "run-checkup".to_string(),
-                        if running { RUNNING_LABEL } else { RUN_LABEL },
-                        true,
-                        !running,
-                        t,
-                        move |_, cx| {
-                            run_model.update(cx, |m, cx| m.run_checkup(cx));
-                        },
-                    )))
-                    .child(
-                        div()
-                            .debug_selector(|| "last-checkup".to_string())
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .text_color(t.text_2)
-                            .font_features(tnum())
-                            .whitespace_nowrap()
-                            .child(last_line(last.as_ref(), now)),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(300.))
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .text_color(t.text_2)
-                            .child(HERO_NOTE),
-                    ),
+                    .debug_selector(|| "last-checkup".to_string())
+                    .text_size(px(figure::SIZE))
+                    .line_height(px(figure::LINE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_features(tnum())
+                    .text_color(t.text)
+                    .whitespace_nowrap()
+                    .child(last_line(last.as_ref(), now)),
             )
             .child(
                 div()
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(t.text_2)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(HERO_NOTE),
+            );
+        let actions = div()
+            .flex_none()
+            .px(px(20.))
+            .pt(px(4.))
+            .pb(px(20.))
+            .flex()
+            .items_center()
+            .gap(px(20.))
+            .child(large_button(
+                "run-checkup",
+                "run-checkup".to_string(),
+                if running { RUNNING_LABEL } else { RUN_LABEL },
+                !running,
+                t,
+                move |_, cx| {
+                    run_model.update(cx, |m, cx| m.run_checkup(cx));
+                },
+            ))
+            .child(
+                div()
+                    .min_w_0()
                     .flex()
                     .items_start()
                     .gap(px(8.))
-                    .flex_none()
-                    .w(px(260.))
                     .child(checkbox(
                         "include-updates",
                         "include-updates".to_string(),
@@ -657,7 +685,6 @@ impl TidyView {
                     ))
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
@@ -697,110 +724,169 @@ impl TidyView {
         let clean_footer = (ticked.0 > 0 || cleaning.is_some())
             .then(|| div().flex().child(clean_button).into_any_element());
 
+        // A card whose part just reported fades its result in over "Checking".
+        let reduce_motion = cx.reduce_motion();
+        let figures = [
+            cards.cleanup.figure.clone(),
+            cards.security.figure.clone(),
+            cards.memory.figure.clone(),
+        ];
+        for (i, figure) in figures.into_iter().enumerate() {
+            let was_checking = self.card_figures[i] == Card::checking().figure;
+            if was_checking && figure != self.card_figures[i] {
+                self.card_changed[i] = Some((std::time::Instant::now(), self.card_generation));
+                self.card_generation += 1;
+            }
+            self.card_figures[i] = figure;
+        }
+        let fade = |i: usize, card: Stateful<Div>| -> AnyElement {
+            match self.card_changed[i] {
+                Some((at, generation)) if !reduce_motion && just_changed(Some(at)) => card
+                    .with_animation(
+                        ("card-in", generation),
+                        Animation::new(m::CARD_IN).with_easing(m::curve(m::enter())),
+                        |el, d| el.opacity(d),
+                    )
+                    .into_any_element(),
+                _ => card.into_any_element(),
+            }
+        };
         let card_row = div()
             .flex_none()
             .px(px(20.))
             .flex()
             .items_stretch()
             .gap(px(12.))
-            .child(self.card(
-                t,
-                "card-cleanup",
-                IconName::Sparkles,
-                "Cleanup",
-                &cards.cleanup,
-                Screen::Cleanup,
-                clean_footer,
+            .child(fade(
+                0,
+                self.card(
+                    t,
+                    "card-cleanup",
+                    IconName::Sparkles,
+                    "Cleanup",
+                    &cards.cleanup,
+                    Screen::Cleanup,
+                    clean_footer,
+                ),
             ))
-            .child(self.card(
-                t,
-                "card-security",
-                IconName::ShieldCheck,
-                "Security",
-                &cards.security,
-                Screen::Security,
-                None,
+            .child(fade(
+                1,
+                self.card(
+                    t,
+                    "card-security",
+                    IconName::ShieldCheck,
+                    "Security",
+                    &cards.security,
+                    Screen::Security,
+                    None,
+                ),
             ))
-            .child(self.card(
-                t,
-                "card-memory",
-                IconName::MemoryStick,
-                "Memory",
-                &cards.memory,
-                Screen::Memory,
-                None,
+            .child(fade(
+                2,
+                self.card(
+                    t,
+                    "card-memory",
+                    IconName::MemoryStick,
+                    "Memory",
+                    &cards.memory,
+                    Screen::Memory,
+                    None,
+                ),
             ));
 
-        // The weekly reminder.
+        // The weekly reminder, as a Haul settings row: the title and note at the left, the
+        // switch at the right.
         let denied = reminder_on && permission == Some(Permission::Denied);
         let toggle_model = model.clone();
+        let toggle_view = view.clone();
+        let slide = (!reduce_motion && just_changed(self.switch_flipped.map(|(at, _)| at)))
+            .then(|| self.switch_flipped.map_or(0, |(_, g)| g));
         let reminder = div()
             .debug_selector(|| "reminder".to_string())
             .mx(px(20.))
-            .mt(px(16.))
+            .mt(px(12.))
             .mb(px(20.))
-            .p(px(14.))
+            .px(px(14.))
+            .py(px(12.))
             .rounded(px(10.))
-            .border_1()
-            .border_color(t.separator)
+            .bg(t.card_bg())
             .flex()
-            .items_start()
-            .gap(px(12.))
-            .child(switch("reminder-toggle", reminder_on, t, move |_, cx| {
-                toggle_model.update(cx, |m, cx| m.set_reminder(!reminder_on, cx));
-            }))
+            .flex_col()
+            .gap(px(10.))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .items_center()
+                    .gap(px(16.))
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .line_height(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.text)
-                            .child(REMINDER_TITLE),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "reminder-note".to_string())
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .font_weight(if denied {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if denied { t.warning } else { t.text_2 })
-                            .child(reminder_note(reminder_on, permission, next.as_ref())),
-                    )
-                    .children(denied.then(|| {
-                        div()
-                            .mt(px(6.))
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(px(8.))
+                            .gap(px(2.))
                             .child(
                                 div()
+                                    .text_size(px(13.))
+                                    .line_height(px(17.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(t.text)
+                                    .child(REMINDER_TITLE),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "reminder-note".to_string())
                                     .text_size(px(12.))
                                     .line_height(px(16.))
-                                    .text_color(t.text_2)
-                                    .child(REMINDER_DENIED_NOTE),
-                            )
-                            .child(div().flex().child(text_button(
-                                "notifications-settings",
-                                "notifications-settings".to_string(),
-                                SettingsLink::Notifications.label(),
-                                false,
-                                true,
-                                t,
-                                move |_, cx| open_settings(SettingsLink::Notifications, cx),
-                            )))
-                    })),
-            );
+                                    .font_weight(if denied {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if denied { t.warning } else { t.text_2 })
+                                    .child(reminder_note(reminder_on, permission, next.as_ref())),
+                            ),
+                    )
+                    .child(switch(
+                        "reminder-toggle",
+                        reminder_on,
+                        slide,
+                        t,
+                        move |_, cx| {
+                            let _ = toggle_view.update(cx, |v, cx| {
+                                v.switch_flipped =
+                                    Some((std::time::Instant::now(), v.card_generation));
+                                v.card_generation += 1;
+                                cx.notify();
+                            });
+                            toggle_model.update(cx, |m, cx| m.set_reminder(!reminder_on, cx));
+                        },
+                    )),
+            )
+            .children(denied.then(|| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(t.text_2)
+                            .child(REMINDER_DENIED_NOTE),
+                    )
+                    .child(text_button(
+                        "notifications-settings",
+                        "notifications-settings".to_string(),
+                        SettingsLink::Notifications.label(),
+                        false,
+                        true,
+                        &t.on(t.card_bg()),
+                        move |_, cx| open_settings(SettingsLink::Notifications, cx),
+                    ))
+            }));
 
         let body = div()
             .id("checkup-body")
@@ -809,15 +895,13 @@ impl TidyView {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.checkup_scroll)
-            .child(hero)
+            .child(summary)
+            .child(actions)
             .child(card_row)
             .child(reminder);
 
-        let left = match (reminder_on, next) {
-            (true, Some(d)) => format!("Next reminder {}", format::reminder_when(&d)),
-            _ => String::new(),
-        };
-        let status = self.status_bar(t, left, None);
+        // The reminder row already says when it fires, so the status bar has nothing to add.
+        let status = self.status_bar(t, String::new(), None);
 
         div()
             .debug_selector(|| "checkup".to_string())
@@ -876,6 +960,15 @@ mod tests {
             "Tidy will remind you on Oct 30 at 10:00 AM. One reminder at most, even if you don't open Tidy."
         );
         assert!(reminder_note(true, Some(Permission::Granted), None).contains("next check up"));
+    }
+
+    #[test]
+    fn motion_plays_only_right_after_a_change() {
+        use std::time::{Duration, Instant};
+        assert!(!just_changed(None));
+        assert!(just_changed(Some(Instant::now())));
+        let old = Instant::now().checked_sub(Duration::from_secs(2));
+        assert!(old.is_none_or(|at| !just_changed(Some(at))));
     }
 
     #[test]

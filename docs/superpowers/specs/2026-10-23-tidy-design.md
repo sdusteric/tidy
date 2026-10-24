@@ -76,16 +76,16 @@ An item whose owner app is running is shown unticked and disabled, with the meta
 
 **Item row content.** Checkbox, a glyph tile for the group, the name (the app or tool name when known, otherwise the folder name), the meta line (the rule's reason, for example "Cache, rebuilt by the app" or "Build output, project not touched for 41 days"), and the size on the right. Hover shows Reveal in Finder and a "..." menu with "Never show this again" (adds the path to the ignore list in settings) and "Copy Path".
 
-**Clean safe items.** The primary toolbar button reads "Clean 6.3 GB" (the sum of ticked items) and is disabled at zero.
+**Clean safe items.** The primary toolbar button reads "Clean 6.3 GB" (the sum of ticked items). With nothing ticked it reads "Clean" and is disabled, the summary Figure reads "Nothing selected" (no "ready to clean" after it), and the status bar says what is left ("6 items, none selected").
 
 - When every ticked item is Safe, clicking it cleans immediately with no dialog, because everything goes to the Trash and can be put back (C7).
 - When any Review item is ticked, the button reads "Clean selected" and opens a confirm dialog that lists the ticked Review items by name and size: "Move these to the Trash? You can put them back from the Trash until you empty it." Buttons: Cancel, Move to Trash.
 
 **During a clean.** The button shows "Cleaning 4 of 12". Each row fades out over 140 ms as its item reaches the Trash (Haul's REMOVE motion; instant under Reduce Motion). Right before moving each item, Tidy re-runs that item's checks (section 6.2). An item that fails a check stays in the list with the reason ("Google Chrome opened, skipped"). One clean writes one history entry.
 
-**After a clean.** A notice band under the toolbar: "Moved 6.3 GB to the Trash. The space is freed when you empty the Trash." with buttons Empty Trash and Show History. It stays until dismissed or the next scan.
+**After a clean.** A notice band under the toolbar: "Moved 6.3 GB to the Trash. Empty the Trash to free the space." with buttons "Empty Trash…" and Show History. It stays until dismissed or the next scan.
 
-**Status bar.** Left: "12 selected, 6.3 GB". Right: "In the Trash from Tidy: 2.1 GB" and a text button "Empty Trash...".
+**Status bar.** Left: "12 selected, 6.3 GB". Right: "In the Trash from Tidy: 2.1 GB" and a text button "Empty Trash…".
 
 **Empty Trash.** A separate action, never part of Clean (decided before this document). It opens a confirm dialog: "Permanently delete the 214 items Tidy moved to the Trash (2.1 GB)? This can't be undone." Buttons: Cancel, Empty Trash (destructive style). It deletes only the items Tidy put there, using the Trash paths recorded in history, because listing `~/.Trash` needs Full Disk Access (C8). If macOS refuses (EPERM), Tidy shows "macOS didn't let Tidy empty the Trash. Empty it from Finder." and writes the failure to history. Other items in the Trash are never touched and never counted.
 
@@ -121,7 +121,7 @@ Row content: checkbox, a glyph tile by kind (film, archive, disk image, app, fol
 Purpose: answer "why is my Mac slow right now" and let the user quit what is heavy.
 
 - **Verdict line** at the top, chosen from memory pressure: Normal: "Memory is fine. macOS is using spare memory for caching, which is normal." Warning: "Memory is tight. Quitting a large app below will help." Critical: "Memory is very tight. Your Mac is moving memory to disk, which slows it down."
-- **Three figures**: Pressure (Normal, Warning, Critical from `kern.memorystatus_vm_pressure_level`), Swap used (from `vm.swapusage`), Compressed (compressor pages times page size). Each has a one-line explanation under it. A small pressure history graph covers the time the screen has been open (no background sampling).
+- **Three figures**: Pressure (Normal, Warning, Critical from `kern.memorystatus_vm_pressure_level`), Swap used (from `vm.swapusage`), Compressed (compressor pages times page size). Each has a one-line explanation under it that says what the figure is, never whether it is fine, so it cannot contradict a Warning figure: "How hard macOS works to find free memory.", "Memory macOS moved to disk to make room.", "Memory macOS compressed to fit more in." The verdict line is in `text` like the other screens' summaries; only the Pressure figure and the graph bars carry the warning and error colors. A small pressure history graph covers the time the screen has been open (no background sampling); its caption says how long that is ("Pressure since you opened this screen", "2 min"), and once it is full, "Pressure in the last 5 min".
 - **Top apps by memory**: processes grouped under their responsible app (`responsibility_get_pid_responsible_for_pid` via `dlsym`, falling back to the parent chain and then to the `.app` prefix of `proc_pidpath`). Each row: app icon, name, footprint ("4.2 GB"), number of helper processes, and a Quit button. Rows for processes Tidy cannot attribute show the process name. Root-owned and other users' processes cannot be read by an app; they are summed into one row "System processes" (sized with `top`, see the M2 notes), without a Quit button.
 - **Quit** sends `terminate`. The row shows "Quit requested" and then disappears when the app exits. After 10 seconds without exit, the row shows "Still open. The app may be asking to save." and the "..." menu offers Force Quit with a confirm ("Unsaved changes in X will be lost."). Tidy itself, Finder, WindowServer and loginwindow have no Quit button.
 - Refresh every 2 seconds while the screen is visible; nothing runs when it is not.
@@ -134,7 +134,7 @@ A list of checks, each with a status dot (green, amber, gray for "could not chec
 | Check | Source | Amber when | Button |
 |---|---|---|---|
 | FileVault | `fdesetup status` | Off | Open Privacy & Security |
-| Firewall | `socketfilterfw --getglobalstate` | Disabled | Open Network settings (firewall anchor unverified) |
+| Firewall | `socketfilterfw --getglobalstate` | Disabled | Open Network Settings (firewall anchor unverified) |
 | Gatekeeper | `spctl --status` | Assessments disabled | Open Privacy & Security |
 | System Integrity Protection | `csrutil status` | Disabled | none, explains how to turn it back on in Recovery |
 | XProtect | mtime and version of `XProtect.bundle/Contents/Info.plist` | Not updated in 60 days | Open Software Update |
@@ -142,7 +142,9 @@ A list of checks, each with a status dot (green, amber, gray for "could not chec
 | Login items and background helpers | plists in `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`, plus `launchctl print gui/<uid>` | An item is new since the last check, or its program is unsigned or not notarized | Reveal in Finder, Move to Trash (user agents only), Open Login Items |
 | Chrome extensions | `Secure Preferences` of every Chrome profile (copied before parsing) | An extension was added since the last check | Open `chrome://extensions` is not possible from outside Chrome, so the row says where to look |
 
-Login items list "new since last check" first. Each item shows label, program path, signer (team name or "Apple" or "Not signed"), notarized yes or no (from `SecStaticCodeCheckValidity` and `SecAssessment`), and whether it runs at load. Signature checks run in the background, one item at a time.
+Login items list "new since last check" first. Each item shows label, program path, signer (team name or "Apple" or "Not signed"), notarized yes or no (from `SecStaticCodeCheckValidity` and `SecAssessment`, shown as "Checked by Apple" or "Not checked by Apple"), and whether it runs at load ("Starts automatically" or "Runs when needed"; a launch daemon adds "System service"). Signature checks run in the background, one item at a time.
+
+The summary line joins its parts with " · " and drops a sentence's own full stop there: "This is your first check. Next time Tidy will show what changed · 1 not checked". A gray check counts as "not checked" (it could not run, or it is macOS updates, which wait for a click). On screen the macOS updates row says "Not checked. Tidy asks Apple for updates only when you click Check Now." next to a Check Now button; tidyctl keeps the core's longer sentence.
 
 The first run has nothing to compare against and says "This is your first check. Next time Tidy will show what changed." Gray items say why ("Tidy couldn't read this without Full Disk Access") with no button that asks for access.
 
@@ -150,9 +152,9 @@ Copy rules: no "threat", "infected", "danger" or "risk score". An amber item say
 
 ### 5.5 Check up (M2)
 
-One button, "Run Check up", that runs the cleanup scan, the security check (without the slow `softwareupdate --list` unless the user ticked "Include macOS updates") and a memory snapshot. The result is three cards: Cleanup ("6.3 GB ready to clean" with a Clean button that does the same as on the Cleanup screen), Security ("All good" or "2 things to look at"), Memory (the verdict line). Each card links to its screen. The date of the last check up shows under the button.
+One button, "Run Check up", that runs the cleanup scan, the security check (without the slow `softwareupdate --list` unless the user ticked "Include macOS updates") and a memory snapshot. The result is three cards: Cleanup ("6.3 GB ready to clean" with a Clean button that does the same as on the Cleanup screen), Security ("All good" or "2 things to look at"), Memory (the verdict line). Each card links to its screen. The date of the last check up is the screen's summary Figure ("Last check up 2 days ago", with "Cleanup, security and memory in one pass. Nothing is cleaned until you choose." under it), the same 64 pt strip the other screens open with; the Run Check up button (the large primary, 28 pt) and "Include macOS updates" share the row under it. A card fades its result in over 200 ms when its part reports during a run.
 
-**Weekly reminder** (opt-in toggle on this screen, off by default). Turning it on requests notification permission at that moment, never at launch. Tidy schedules one non-repeating `UNCalendarNotificationTrigger` for 7 days after the last check up, at 10:00 on that day, and reschedules it on each launch and after each check up (C16). If the app is never opened again, at most one reminder arrives. The notification says "Time for your weekly check up." and opens Tidy on Check up. If permission is denied, the toggle shows "Notifications are off for Tidy" with a button to open Notifications settings.
+**Weekly reminder** (opt-in toggle on this screen, off by default). Turning it on requests notification permission at that moment, never at launch. Tidy schedules one non-repeating `UNCalendarNotificationTrigger` for 7 days after the last check up, at 10:00 on that day, and reschedules it on each launch and after each check up (C16). If the app is never opened again, at most one reminder arrives. The notification says "Time for your weekly check up." and opens Tidy on Check up. If permission is denied, the toggle shows "Notifications are off for Tidy" with a button "Open Notifications Settings". The reminder is a Haul settings row: title and note at the left, the switch at the right. The note already says when the reminder fires, so the screen has no status bar.
 
 ## 6. Cleanup rules
 
@@ -394,6 +396,9 @@ Reuse Haul v2 (`haul/docs/mockup/v2/DESIGN.md`) as the base: the same `Theme` st
 | `sidebar_selected` | black 7% | white 9% | Selected sidebar row |
 | `tag_border` | = `separator_strong` | = `separator_strong` | Review, App data, Package tags |
 | `danger_button` | = `error_badge` | = `error_badge` | Empty Trash confirm button fill, white text |
+| `checkbox_border` | black 28% | white 30% | Outline of an unticked checkbox (about 3:1 on the window). A disabled unticked box is filled with `fill` and outlined with `separator_strong`, so it does not read as clickable |
+
+Cards and groups (Check up cards, the reminder row, Memory figures and graph) share one treatment: `fill` flattened on `window_bg` (`Theme::card_bg`), radius 10, no border; a clickable card hovers to `row_hover` over that. The switch knob takes Haul's knob shadow (`0 1px 2px black 30%` + a 0.5 pt black 6% edge).
 
 **New type role**: Figure, 22 / 28, weight 600, tabular, `text`. Used for the summary number.
 
@@ -401,38 +406,38 @@ Reuse Haul v2 (`haul/docs/mockup/v2/DESIGN.md`) as the base: the same `Theme` st
 
 **Sidebar** (200 pt wide, `sidebar_bg`, a hairline `separator` on its right edge):
 - Top 52 pt holds the traffic lights only.
-- Rows start at y 52, inset 10 left and right: height 28, radius 6, padding 0 8, gap 8; Lucide icon 16 (Check up `Stethoscope`, Cleanup `Sparkles`, Large files `HardDrive`, Memory `MemoryStick`, Security `ShieldCheck`; add any not bundled to `icon_assets!`) in `text_2`, label 13/400 `text`, trailing figure 12 tnum `text_2` (Cleanup: the safe total after a scan, "6.3 GB"; Large files: the item count). Selected row: `sidebar_selected` fill, icon in `accent`. 4 pt between rows.
+- Rows start at y 52, inset 10 left and right: height 28, radius 6, padding 0 8, gap 8; Lucide icon 16 (Check up `Stethoscope`, Cleanup `Sparkles`, Large files `HardDrive`, Memory `MemoryStick`, Security `ShieldCheck`; add any not bundled to `icon_assets!`) in `text_2`, label 13/400 `text`, trailing figure 12 tnum `text_2` (Cleanup: the safe total after a scan, "6.3 GB", hidden when it is zero; Large files: the item count). Selected row: `sidebar_selected` fill, icon in `accent`. 4 pt between rows.
 - Bottom, 16 pt from the edge: "Macintosh HD" 12/500 `text`, a 4 pt bar (track `track`, fill `accent`, radius 2) showing used space, and "212 GB available of 1 TB" 12 tnum `text_2`. Available means `NSURLVolumeAvailableCapacityForImportantUsageKey`, which matches Finder (C25).
 
 **Content area** (`window_bg`):
-- **Toolbar** 52 pt, aligned with the title bar, padding 0 12 0 20. Left: screen title 15/600. Right, gap 8: screen controls, then the primary button. Drag and double-click on empty toolbar space move and zoom the window (Haul's `start_window_move`). A hairline under it only when the list is scrolled.
+- **Toolbar** 52 pt, aligned with the title bar, padding 0 12 0 20. Left: screen title 15/600. Right, gap 8: screen controls, then the primary button. Drag and double-click on empty toolbar space move and zoom the window (Haul's `start_window_move`). A hairline shows only when the list is scrolled, at the edge where the list goes under what stays put: under the summary strip on Cleanup, under the "Top apps by memory" header on Memory, under the breadcrumb in Folders mode, and under the toolbar elsewhere. On Security the summary scrolls with the checks.
 - **Summary strip** 64 pt, padding 0 20: the Figure ("6.3 GB" with " ready to clean" in 15/400 `text_2` on the same baseline), and under it one 12/400 `text_2` line ("34 GB more to review · Scanned 2 min ago").
 - **Notice band** (when present) as in Haul: margin 2 12 6, padding 8 8 8 12, radius 8, `fill` background, icon, sentence, buttons on the right.
 - **List** in a `uniform_list`, inset 8 left and right.
-- **Status bar** 30 pt, `bar_bg`, hairline on top, padding 0 10 0 20: left text 12 tnum `text_2`, right text buttons.
+- **Status bar** 30 pt, `bar_bg`, hairline on top, padding 0 10 0 20: left text 12 tnum `text_2`, right text buttons. Left out when it has nothing to say (the empty states before a first scan, Check up).
 
 **Cleanup list** (every row 44 pt so `uniform_list` holds; group headers are rows too):
-- Group header row: padding 0 10, gap 8: chevron 12 `text_3` (rotates 90 degrees when expanded, snap, no animation), checkbox 16 (tri-state), name 13/600 `text`, count 12 `text_2` ("14 items"), flexible space, size 13/600 tnum `text`. A hairline `separator` above every group header except the first.
-- Item row: left padding 34 (aligns under the group name), gap 10: checkbox 16, glyph tile 28 (radius 6, `fill_2`, icon 16 `text_2`), a text column (name 13/500 `text` on top, meta 12/400 `text_2` below; meta uses `warning` for "Quit X first" and `text_2` otherwise), an optional tag (11/600 `text_2`, 1 px `tag_border`, radius 4, height 16, padding 0 5, text "Review" or "Report only"), flexible space, size 13/400 tnum `text_2`, and a 60 pt trailing area holding the hover actions (Reveal `FolderSearch`, more `Ellipsis`, 26 pt icon buttons). Hover fill `row_hover`, radius 8. Disabled (blocked) rows show the checkbox at 40% opacity.
+- Group header row: padding 0 10, gap 8: chevron 12 `text_3` (rotates 90 degrees when expanded, snap, no animation), checkbox 16 (tri-state), name 13/600 `text`, count 12 `text_2` ("14 items"), flexible space, size 13/600 tnum `text`, then an empty 60 pt area so the group total lines up with the item sizes. A hairline `separator` above every group header except the first.
+- Item row: left padding 30 (its checkbox sits under the group's checkbox, one column of boxes), gap 10: checkbox 16, glyph tile 28 (radius 6, `fill_2`, icon 16 `text_2`), a text column (name 13/500 `text` on top with an optional tag 8 pt after it, as Haul's quality tag; meta 12/400 `text_2` below; meta uses `warning` for "Quit X first" and `text_2` otherwise; the tag is 11/600 `text_2`, 1 px `tag_border`, radius 4, height 16, padding 0 5, text "Review" or "Report only"), flexible space, size 13/400 tnum `text_2`, and a 60 pt trailing area holding the hover actions (Reveal `FolderSearch`, more `Ellipsis`, 26 pt icon buttons). Hover fill `row_hover`, radius 8. Disabled (blocked) rows show the checkbox at 40% opacity.
 - Report only rows have no checkbox; a `Lock` icon 12 `text_3` takes its place.
 - Toolbar controls: History (clock icon button), Rescan (`RefreshCw` icon button), primary "Clean 6.3 GB" (Haul's primary text button, 24 pt high).
-- Empty state (before the first scan, or after a scan finds nothing): centered column, max width 360: icon 32 `text_3`, title 15/600, one line 13 `text_2`, primary button. Copy before the first scan: "Find space you can get back" / "Tidy looks at caches, old logs, old build output and package caches. Nothing moves until you choose, and everything goes to the Trash." / "Scan". After an empty result: "Nothing to clean right now" / "Caches of apps that are open aren't counted. Quit them and scan again." / "Scan Again".
+- Empty state (before the first scan, or after a scan finds nothing): centered column, max width 360: icon 32 `text_3`, title 15/600, one line 13 `text_2`, the large primary button (28 pt, radius 7, 13/500, also used for Run Check up). Copy before the first scan: "Find space you can get back" / "Tidy looks at caches, old logs, old build output and package caches. Nothing moves until you choose, and everything goes to the Trash." / "Scan". After an empty result: "Nothing to clean right now" / "Caches of apps that are open aren't counted. Quit them and scan again." / "Scan Again".
 
 **Large files list** (every row 52 pt):
-- Toolbar controls, left to right: segmented "Files | Folders" (gpui-component tab or a two-button group, 24 pt), segmented "Biggest | Not opened lately" (hidden in Folders mode), threshold select "Over 500 MB", Rescan icon button. No primary button; the action lives in the status bar.
-- Breadcrumb row (Folders mode only, 28 pt, padding 0 20): segments 12/500 `text_2` separated by `ChevronRight` 12 `text_3`; the last segment in `text`; earlier segments are buttons.
-- Row: padding 0 10, gap 10: checkbox 16, glyph tile 32 (radius 7, `fill_2`, icon 18 `text_2`), text column (name 13/500 `text`; path 12 mono `text_2`, middle-truncated; in Folders mode the path line is replaced by the 4 pt share bar, 160 pt wide, `track` and `accent`), tags, flexible space, the date phrase 12 `text_2` (fixed 150 pt column, right-aligned), size 13/500 tnum `text` (fixed 80 pt column, right-aligned), 60 pt hover actions (Reveal, Move to Trash `Trash2`). In Folders mode folders show a trailing `ChevronRight` instead of Move to Trash at rest.
+- Toolbar controls, left to right: segmented "Biggest | Not opened lately" (hidden in Folders mode), segmented "Files | Folders" (a two-button group, 24 pt), threshold select "Over 500 MB", Rescan icon button. Files | Folders sits right of the filter so hiding the filter does not move the control just clicked. The selected segment is the secondary button flattened on the track, so it stands out in dark mode too. No primary button; the action lives in the status bar.
+- Breadcrumb row (Folders mode only, 28 pt, padding 0 20 0 16, so the first segment's text lines up with the title at 20): segments 12/500 `text_2` separated by `ChevronRight` 12 `text_3`; the last segment in `text`; earlier segments are buttons.
+- Row: padding 0 10, gap 10: checkbox 16, glyph tile 32 (radius 7, `fill_2`, icon 18 `text_2`), text column (name 13/500 `text` with the tags 8 pt after it on the same line; path 12 mono `text_2`, middle-truncated to the whole column width; in Folders mode the path line is replaced by the 4 pt share bar, 160 pt wide, `track` and `accent`), flexible space, the date phrase 12 `text_2` (fixed 150 pt column, right-aligned), size 13/500 tnum `text` (fixed 80 pt column, right-aligned), 60 pt hover actions (Reveal, Move to Trash `Trash2`). In Folders mode folders show a trailing `ChevronRight` instead of Move to Trash at rest.
 - The "smaller items" row: no checkbox, name in `text_2`, no actions.
-- Status bar: left "3 selected, 12.4 GB" or "48 items, up to 214 GB"; right "Move to Trash..." text button, disabled with no selection.
+- Status bar: left "3 selected, 12.4 GB" or "48 items, up to 214 GB"; right "Move to Trash…" text button, disabled with no selection.
 - Scanning: the toolbar shows a spinner and "Scanning, 214,000 files" in 12 tnum `text_2`; a Stop text button cancels. The previous result stays visible, dimmed to 50%, until the new one arrives.
 
 **Dialogs**: gpui-component dialog, 420 pt wide, title 13/600, body 13/400 with the item list in a scrollable box up to 200 pt high (12 tnum rows: name left, size right), buttons right-aligned: Cancel (secondary) and the action (primary; Empty Trash uses `danger_button`). Return confirms, Escape cancels.
 
 **History sheet**: 560 x 480 pt, rows 44 pt: date 13/500, action and counts 12 `text_2`, size right; expanded items are 32 pt rows with mono paths.
 
-**Motion**: only Haul's existing motions apply. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. Nothing counts up, nothing celebrates.
+**Motion**: Haul's existing motions, plus two state changes. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. The reminder switch knob slides to its side over 160 ms (`enter` curve) after a click, and a Check up card fades its result in over 200 ms when its part reports; both play only within 400 ms of the change (`CHANGE_GATE`), so a window that opens on a settled state shows it still, and both are instant under Reduce Motion. Nothing counts up, nothing celebrates.
 
-**Copy rules**: sentence case, plain words, sizes with one decimal above 1 GB ("6.3 GB", "640 MB"), dates as relative phrases ("8 months ago"), no exclamation marks.
+**Copy rules**: sentence case for text and labels, title case for buttons and menu items ("Open Network Settings", "Check Now", "Scan Home Folder"), plain words, sizes with one decimal above 1 GB ("6.3 GB", "640 MB"), dates as relative phrases ("8 months ago"), no exclamation marks. A button or menu item that opens a confirm ends in an ellipsis character ("Empty Trash…", "Move to Trash…", "Force Quit…"), and middle-truncated paths use it too (`~/Movies/2025/…/trip.mov`).
 
 ## 12. Packaging
 

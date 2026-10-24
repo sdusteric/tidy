@@ -489,7 +489,13 @@ fn ticks_update_the_totals_and_the_group_checkbox(cx: &mut TestAppContext) {
 
     click(cx, "clean-check:r:log");
     let snap = view.read_with(cx, |v, cx| v.cleanup_snapshot(cx));
-    assert_eq!(snap.status_left(), "Nothing selected");
+    assert!(
+        snap.status_left().ends_with(" items, none selected"),
+        "{}",
+        snap.status_left()
+    );
+    assert_eq!(snap.figure(), "Nothing selected");
+    assert_eq!(snap.button_label(), "Clean");
     assert!(!snap.can_clean(), "the button is disabled at zero");
     click(cx, "clean-button");
     assert!(h.drain().is_empty(), "a disabled button sends nothing");
@@ -776,7 +782,10 @@ fn done_shows_the_notice_and_the_trash_total(cx: &mut TestAppContext) {
         snap.trash_line().as_deref(),
         Some("In the Trash from Tidy: 5.6 GB")
     );
-    assert_eq!(snap.button_label(), "Clean 0 KB");
+    assert_eq!(snap.button_label(), "Clean");
+    assert_eq!(snap.figure(), "Nothing selected");
+    // A safe total of zero leaves the sidebar row without a figure, not "0 KB".
+    assert!(!has(cx, "sidebar-cleanup-figure"));
 
     // The notice stays until dismissed, then fades out over 200 ms.
     advance(cx, 5_000);
@@ -2160,7 +2169,7 @@ fn security_report(first_run: bool) -> SecurityReport {
         check(
             CheckId::MacosUpdates,
             Status::Gray,
-            "Checked on demand. Press Check now to look for updates.",
+            "Checked on demand. Press Check Now to look for updates.",
         ),
         login,
         check(
@@ -2277,7 +2286,7 @@ fn rows_have_dots_marks_and_amber_buttons_but_gray_rows_have_none(cx: &mut TestA
     });
     assert_eq!(
         line,
-        "New and changed since your check 2 days ago \u{b7} 1 could not be checked"
+        "New and changed since your check 2 days ago \u{b7} 1 not checked"
     );
     let status = model(cx).read_with(cx, |m, _| {
         crate::views::security::status_line(m.security.report.as_ref().unwrap(), NOW)
@@ -2310,7 +2319,7 @@ fn the_first_run_says_so(cx: &mut TestAppContext) {
     });
     assert_eq!(
         line,
-        "This is your first check. Next time Tidy will show what changed. \u{b7} 1 could not be checked"
+        "This is your first check. Next time Tidy will show what changed \u{b7} 1 not checked"
     );
     assert!(!has(cx, "sec-mark:Firewall") && !has(cx, "sec-login-mark:user:com.example.sync"));
 }
@@ -2665,7 +2674,7 @@ fn the_three_cards_fill_in_and_link_to_their_screens(cx: &mut TestAppContext) {
     );
     let c = model(cx).read_with(cx, |m, _| crate::views::checkup::cards(m));
     assert_eq!(c.security.figure, "2 things to look at");
-    assert_eq!(c.security.line, "1 could not be checked");
+    assert_eq!(c.security.line, "1 not checked");
     assert_eq!(c.memory.figure, "Warning");
     assert_eq!(c.memory.line, Pressure::Warning.verdict());
     assert!(!model(cx).read_with(cx, |m, _| m.checkup.running));
@@ -2972,11 +2981,10 @@ fn long_paths_in_large_files_are_fitted_to_the_row(cx: &mut TestAppContext) {
         &PathBuf::from("/fake").join(long),
         Path::new("/fake"),
         viewport,
-        1,
         char_w,
     );
-    let room = crate::views::large::text_col_width(viewport, 1);
-    assert!(text.contains("..."), "{text}");
+    let room = crate::views::large::text_col_width(viewport);
+    assert!(text.contains('\u{2026}'), "{text}");
     assert!(text.starts_with("~/"), "{text}");
     assert!(
         text.chars().count() as f32 * char_w <= room,

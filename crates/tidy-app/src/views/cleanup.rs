@@ -16,7 +16,9 @@ use crate::format;
 use crate::theme::{Theme, figure, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
-use crate::views::{checkbox, glyph_tile, icon_button, plain_button, tag, text_button};
+use crate::views::{
+    checkbox, glyph_tile, icon_button, plain_button, scroll_edge, tag, text_button,
+};
 
 pub const EMPTY_FIRST_TITLE: &str = "Find space you can get back";
 pub const EMPTY_FIRST_BODY: &str = "Tidy looks at caches, old logs, old build output and package caches. Nothing moves until you choose, and everything goes to the Trash.";
@@ -271,6 +273,8 @@ fn render_header(
                 .text_color(t.text)
                 .child(format::size(bytes)),
         )
+        // The hover-action area of the item rows, so group totals line up with item sizes.
+        .child(div().flex_none().w(px(metrics::TRAIL_W)))
         .into_any_element()
 }
 
@@ -342,7 +346,8 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
         .debug_selector(move || format!("clean-row:{selector_id}"))
         .w_full()
         .h(px(metrics::CLEANUP_ROW_H))
-        .pl(px(34.))
+        // 10 + chevron 12 + gap 8: the checkbox sits under the group's checkbox.
+        .pl(px(30.))
         .pr(px(10.))
         .gap(px(10.))
         .rounded(px(8.))
@@ -366,15 +371,24 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                 .flex()
                 .flex_col()
                 .child(
+                    // The tag sits right after the name, as Haul's quality tag does.
                     div()
-                        .text_size(px(13.))
-                        .line_height(px(17.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.text)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(item.name.clone()),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .line_height(px(17.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.text)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(item.name.clone()),
+                        )
+                        .children(item.tag().map(|label| tag(label, t))),
                 )
                 .child(
                     div()
@@ -391,7 +405,6 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                         .child(item.meta.clone()),
                 ),
         )
-        .children(item.tag().map(|label| tag(label, t)))
         .child(
             div()
                 .flex_none()
@@ -630,7 +643,9 @@ impl TidyView {
                     ))
                 })
         };
-        let toolbar = self.toolbar(t, "Cleanup", scrolled, controls, cx);
+        // The summary stays put above the list, so the edge that shows when the list is
+        // scrolled is under the summary, not under the toolbar.
+        let toolbar = self.toolbar(t, "Cleanup", false, controls, cx);
 
         let shown = snap
             .notice
@@ -705,6 +720,7 @@ impl TidyView {
                 .flex()
                 .flex_col()
                 .child(self.summary_strip(t, &snap, now))
+                .child(scroll_edge(t, scrolled))
                 .child(list)
                 .into_any_element()
         };
@@ -725,7 +741,7 @@ impl TidyView {
                 .child(plain_button(
                     "empty-trash",
                     "empty-trash".to_string(),
-                    "Empty Trash...",
+                    "Empty Trash\u{2026}",
                     true,
                     t,
                     move |_, cx| {
@@ -776,13 +792,15 @@ impl TidyView {
                             .whitespace_nowrap()
                             .child(snap.figure()),
                     )
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .text_color(t.text_2)
-                            .whitespace_nowrap()
-                            .child("ready to clean"),
-                    ),
+                    .when(snap.ticked_bytes > 0, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(15.))
+                                .text_color(t.text_2)
+                                .whitespace_nowrap()
+                                .child("ready to clean"),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -830,7 +848,8 @@ impl CleanupView {
         if !self.has_plan || self.empty_result {
             String::new()
         } else if self.ticked_count == 0 {
-            "Nothing selected".to_string()
+            // The summary already says "Nothing selected"; say what is left instead.
+            format!("{}, none selected", format::items(self.item_count()))
         } else {
             format::selected_line(self.ticked_count, self.ticked_bytes)
         }
@@ -842,9 +861,25 @@ impl CleanupView {
             .then(|| format!("In the Trash from Tidy: {}", format::size(self.trash.bytes)))
     }
 
-    /// The Figure: "6.3 GB".
+    /// The Figure: "6.3 GB", or "Nothing selected" when nothing is ticked (after a clean, or
+    /// when every box was unticked), rather than "0 KB ready to clean".
     pub(crate) fn figure(&self) -> String {
-        format::size(self.ticked_bytes)
+        if self.ticked_bytes == 0 {
+            "Nothing selected".to_string()
+        } else {
+            format::size(self.ticked_bytes)
+        }
+    }
+
+    /// How many items the list holds, collapsed groups included.
+    pub(crate) fn item_count(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|r| match r {
+                CleanRow::Header { count, .. } => *count,
+                CleanRow::Item(_) => 0,
+            })
+            .sum()
     }
 
     /// The line under the Figure: "34 GB more to review · Scanned 2 min ago".

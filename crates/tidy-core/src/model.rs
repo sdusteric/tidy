@@ -1075,10 +1075,10 @@ impl SettingsLink {
     pub fn label(self) -> &'static str {
         match self {
             SettingsLink::PrivacySecurity => "Open Privacy & Security",
-            SettingsLink::Network => "Open Network settings",
+            SettingsLink::Network => "Open Network Settings",
             SettingsLink::SoftwareUpdate => "Open Software Update",
             SettingsLink::LoginItems => "Open Login Items",
-            SettingsLink::Notifications => "Open Notifications settings",
+            SettingsLink::Notifications => "Open Notifications Settings",
         }
     }
 }

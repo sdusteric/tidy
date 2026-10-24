@@ -200,8 +200,8 @@ pub fn display_path(path: &Path, root: &Path) -> String {
     }
 }
 
-/// Shortens `s` to at most `max` characters by replacing the middle with "...", keeping the
-/// start and the file name: `~/Movies/2025/.../trip.mov`.
+/// Shortens `s` to at most `max` characters by replacing the middle with an ellipsis, keeping
+/// the start and the file name: `~/Movies/2025/…/trip.mov`.
 pub fn middle_truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -210,7 +210,7 @@ pub fn middle_truncate(s: &str, max: usize) -> String {
     if parts.len() >= 3 {
         let last = parts[parts.len() - 1];
         for keep in (1..parts.len() - 1).rev() {
-            let candidate = format!("{}/.../{}", parts[..keep].join("/"), last);
+            let candidate = format!("{}/\u{2026}/{}", parts[..keep].join("/"), last);
             if candidate.chars().count() <= max {
                 return candidate;
             }
@@ -218,11 +218,11 @@ pub fn middle_truncate(s: &str, max: usize) -> String {
     }
     // One long name: keep both ends of it.
     let chars: Vec<char> = s.chars().collect();
-    let room = max.saturating_sub(3);
+    let room = max.saturating_sub(1);
     let head = room.div_ceil(2);
     let tail = room / 2;
     let mut out: String = chars[..head].iter().collect();
-    out.push_str("...");
+    out.push('\u{2026}');
     out.extend(chars[chars.len() - tail..].iter());
     out
 }
@@ -241,6 +241,8 @@ pub fn clean_label(
     match cleaning {
         Some((done, total)) => format!("Cleaning {done} of {total}"),
         None if any_review => "Clean selected".to_string(),
+        // Nothing ticked: the disabled button says what it does, not "Clean 0 KB".
+        None if selected_bytes == 0 => "Clean".to_string(),
         None => format!("Clean {}", size(selected_bytes)),
     }
 }
@@ -423,13 +425,13 @@ mod tests {
         assert_eq!(middle_truncate("~/a/b.mov", 40), "~/a/b.mov");
         assert_eq!(
             middle_truncate("~/Movies/2025/trips/italy/trip.mov", 26),
-            "~/Movies/2025/.../trip.mov"
+            "~/Movies/2025/\u{2026}/trip.mov"
         );
         let long = middle_truncate("~/Movies/2025/trips/italy/a-very-long-file-name.mov", 20);
         assert!(long.chars().count() <= 20, "{long}");
-        assert!(long.contains("..."));
+        assert!(long.contains('\u{2026}'));
         let one = middle_truncate("abcdefghijklmnopqrstuvwxyz", 11);
-        assert_eq!(one, "abcd...wxyz");
+        assert_eq!(one, "abcde\u{2026}vwxyz");
         assert!(one.chars().count() <= 11);
     }
 
@@ -441,7 +443,7 @@ mod tests {
         );
         assert_eq!(clean_label(6_300_000_000, false, None), "Clean 6.3 GB");
         assert_eq!(clean_label(6_300_000_000, true, None), "Clean selected");
-        assert_eq!(clean_label(0, false, None), "Clean 0 KB");
+        assert_eq!(clean_label(0, false, None), "Clean");
         assert_eq!(clean_label(5, false, Some((4, 12))), "Cleaning 4 of 12");
         assert_eq!(selected_line(12, 6_300_000_000), "12 selected, 6.3 GB");
         assert_eq!(over(500_000_000), "Over 500 MB");

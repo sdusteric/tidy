@@ -834,7 +834,7 @@ pub fn security_report(first_run: bool) -> SecurityReport {
         CheckResult::new(
             CheckId::MacosUpdates,
             Status::Gray,
-            "Checked on demand. Press Check now to look for updates.",
+            tidy_core::security::system::UPDATES_NOT_CHECKED,
         ),
         login,
         chrome,

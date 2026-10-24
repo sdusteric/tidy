@@ -85,6 +85,9 @@ pub struct Theme {
     pub sidebar_selected: Hsla,
     /// Outline of the Review, App data and Package tags. Equals `separator_strong`.
     pub tag_border: Hsla,
+    /// Outline of an unticked checkbox: black 28% (light) or white 30% (dark), so an empty box
+    /// reads as a control (about 3:1 on the window), not as a faint frame.
+    pub checkbox_border: Hsla,
     /// Fill of the Empty Trash confirm button (white text). Equals `error_badge`.
     pub danger_button: Hsla,
     /// The opaque color secondary buttons sit on (`window_bg` unless set with [`Theme::on`]).
@@ -133,6 +136,7 @@ impl Theme {
             sidebar_bg: hex(0xf4f4f6),
             sidebar_selected: black(0.07),
             tag_border: separator_strong,
+            checkbox_border: black(0.28),
             danger_button: error_badge,
             surface: hex(0xffffff),
             scale: 2.,
@@ -175,6 +179,7 @@ impl Theme {
             sidebar_bg: hex(0x232326),
             sidebar_selected: white(0.09),
             tag_border: separator_strong,
+            checkbox_border: white(0.30),
             danger_button: error_badge,
             surface: hex(0x1e1e20),
             scale: 2.,
@@ -246,6 +251,32 @@ impl Theme {
                 inset: false,
             },
         ]
+    }
+
+    /// The switch knob (Haul's): `0 1px 2px black 30%` + `0 0 0 .5px black 6%`. gpui's blur
+    /// reaches about twice as far as the CSS blur of the same value, so it is halved.
+    pub fn knob_shadow(&self) -> Vec<BoxShadow> {
+        vec![
+            BoxShadow {
+                color: black(0.30),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(1.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+            self.edge(black(0.06)),
+        ]
+    }
+
+    /// Cards and groups (Check up, Memory): `fill` flattened on the window, so a hover tint
+    /// on top of it stays opaque.
+    pub fn card_bg(&self) -> Hsla {
+        self.window_bg.blend(self.fill)
+    }
+
+    /// A card under the pointer: `row_hover` over [`Theme::card_bg`].
+    pub fn card_hover(&self) -> Hsla {
+        self.card_bg().blend(self.row_hover)
     }
 
     /// The scrim behind a dialog.
@@ -324,6 +355,13 @@ pub mod motion {
     pub const NOTE_OUT: Duration = Duration::from_millis(200);
     /// One turn of the scanning spinner.
     pub const SPIN: Duration = Duration::from_millis(900);
+    /// The switch knob sliding to its new side after a click.
+    pub const SWITCH: Duration = Duration::from_millis(160);
+    /// A Check up card's result fading in over "Checking" when its part reports.
+    pub const CARD_IN: Duration = Duration::from_millis(200);
+    /// Play SWITCH or CARD_IN only within this time of the change, so a window that opens on
+    /// a settled state (or a demo shot of it) shows it still.
+    pub const CHANGE_GATE: Duration = Duration::from_millis(400);
 
     fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> Easing {
         Easing::cubic_bezier(x1, y1, x2, y2).expect("control points are in range")
@@ -425,6 +463,10 @@ mod tests {
         assert_eq!(d.tag_border, d.separator_strong);
         assert_eq!(l.danger_button, l.error_badge);
         assert_eq!(d.danger_button, d.error_badge);
+        assert!((l.checkbox_border.a - 0.28).abs() < 1e-6 && l.checkbox_border.l == 0.);
+        assert!((d.checkbox_border.a - 0.30).abs() < 1e-6 && d.checkbox_border.l == 1.);
+        assert!((l.card_bg().a - 1.).abs() < 1e-4 && (d.card_hover().a - 1.).abs() < 1e-4);
+        assert_ne!(l.card_bg(), l.card_hover());
     }
 
     #[test]
@@ -444,6 +486,7 @@ mod tests {
         assert_eq!(d.button_shadow().len(), 1);
         assert_eq!(l.pop_shadow().len(), 2);
         assert!(l.pop_shadow().iter().all(|s| !s.inset));
+        assert_eq!(l.knob_shadow().len(), 2);
     }
 
     #[test]
@@ -482,7 +525,15 @@ mod tests {
     #[test]
     fn motion_durations_are_positive_and_curves_end_at_one() {
         use motion::*;
-        for d in [REMOVE, NOTE_IN, NOTE_OUT, SPIN] {
+        for d in [
+            REMOVE,
+            NOTE_IN,
+            NOTE_OUT,
+            SPIN,
+            SWITCH,
+            CARD_IN,
+            CHANGE_GATE,
+        ] {
             assert!(d > std::time::Duration::ZERO);
         }
         assert_eq!(REMOVE, std::time::Duration::from_millis(140));

@@ -29,6 +29,8 @@ pub const EMPTY_DONE_BODY: &str =
 /// An entry of the "..." menu on a Cleanup row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuEntry {
+    /// Opens the item's details popover (design 17.1).
+    ShowDetails,
     /// Adds the path to the ignore list in settings.
     NeverShow,
     CopyPath,
@@ -37,6 +39,7 @@ pub enum MenuEntry {
 impl MenuEntry {
     pub fn label(self) -> &'static str {
         match self {
+            MenuEntry::ShowDetails => "Show Details",
             MenuEntry::NeverShow => "Never show this again",
             MenuEntry::CopyPath => "Copy Path",
         }
@@ -44,11 +47,16 @@ impl MenuEntry {
 
     /// The entries, in menu order.
     pub fn all() -> Vec<MenuEntry> {
-        vec![MenuEntry::NeverShow, MenuEntry::CopyPath]
+        vec![
+            MenuEntry::ShowDetails,
+            MenuEntry::NeverShow,
+            MenuEntry::CopyPath,
+        ]
     }
 
     fn selector(self) -> &'static str {
         match self {
+            MenuEntry::ShowDetails => "menu-show-details",
             MenuEntry::NeverShow => "menu-never-show",
             MenuEntry::CopyPath => "menu-copy-path",
         }
@@ -274,7 +282,7 @@ fn render_header(
                 .child(format::size(bytes)),
         )
         // The hover-action area of the item rows, so group totals line up with item sizes.
-        .child(div().flex_none().w(px(metrics::TRAIL_W)))
+        .child(div().flex_none().w(px(metrics::CLEAN_TRAIL_W)))
         .into_any_element()
 }
 
@@ -288,6 +296,9 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
     let reveal_path = item.path.clone();
     let menu_view = env.view.clone();
     let menu_path = item.path.clone();
+    let details_view = env.view.clone();
+    let details_id = id.clone();
+    let details_selector = format!("clean-details:{id}");
     let (row_id, check_id, menu_row_id, hover_key) =
         (id.clone(), id.clone(), id.clone(), id.clone());
     let selector_id = id.clone();
@@ -321,6 +332,17 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
         div()
             .flex()
             .items_center()
+            .child(icon_button(
+                ("clean-details", ix),
+                details_selector,
+                IconName::Info,
+                t,
+                move |window, cx| {
+                    let at = window.mouse_position();
+                    let id = details_id.clone();
+                    let _ = details_view.update(cx, |v, cx| v.open_details(id, at, cx));
+                },
+            ))
             .child(icon_button(
                 ("clean-reveal", ix),
                 reveal_selector,
@@ -419,7 +441,7 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
         .child(
             div()
                 .flex_none()
-                .w(px(metrics::TRAIL_W))
+                .w(px(metrics::CLEAN_TRAIL_W))
                 .flex()
                 .justify_end()
                 .children(actions),
@@ -463,6 +485,9 @@ impl TidyView {
             return;
         };
         match entry {
+            MenuEntry::ShowDetails => {
+                self.open_details(menu.id, menu.at, cx);
+            }
             MenuEntry::NeverShow => {
                 self.model.update(cx, |m, cx| m.ignore_item(&menu.id, cx));
             }
@@ -1074,7 +1099,10 @@ mod tests {
     #[test]
     fn menu_entries_in_order() {
         let labels: Vec<_> = MenuEntry::all().into_iter().map(MenuEntry::label).collect();
-        assert_eq!(labels, ["Never show this again", "Copy Path"]);
+        assert_eq!(
+            labels,
+            ["Show Details", "Never show this again", "Copy Path"]
+        );
     }
 
     #[test]

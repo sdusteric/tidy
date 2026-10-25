@@ -88,10 +88,18 @@ pub enum Scenario {
     SecurityFirst,
     /// Security scrolled to the login items.
     SecurityItems,
+    /// Cleanup with the details popover of a Safe row open (design 17.1).
+    CleanupWhy,
+    /// Check up with the System Data sheet open (design 17.2).
+    SystemData,
+    /// Check up scrolled to the System Data row and "What Tidy never does" (design 17.3).
+    CheckupTrust,
+    /// The System Data sheet scrolled to its report-only rows (Docker, snapshots).
+    SystemDataReport,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 13] = [
+    pub const ALL: [Scenario; 17] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -105,6 +113,10 @@ impl Scenario {
         Scenario::Security,
         Scenario::SecurityFirst,
         Scenario::SecurityItems,
+        Scenario::CleanupWhy,
+        Scenario::SystemData,
+        Scenario::CheckupTrust,
+        Scenario::SystemDataReport,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -128,13 +140,23 @@ impl Scenario {
             Scenario::Security => "security",
             Scenario::SecurityFirst => "security-first",
             Scenario::SecurityItems => "security-items",
+            Scenario::CleanupWhy => "cleanup-why",
+            Scenario::SystemData => "system-data",
+            Scenario::CheckupTrust => "checkup-trust",
+            Scenario::SystemDataReport => "system-data-report",
         }
     }
 
     fn screen(self) -> Screen {
         match self {
-            Scenario::Cleanup | Scenario::CleanupDone | Scenario::CleanupEmpty => Screen::Cleanup,
-            Scenario::Checkup => Screen::Checkup,
+            Scenario::Cleanup
+            | Scenario::CleanupDone
+            | Scenario::CleanupEmpty
+            | Scenario::CleanupWhy => Screen::Cleanup,
+            Scenario::Checkup
+            | Scenario::SystemData
+            | Scenario::SystemDataReport
+            | Scenario::CheckupTrust => Screen::Checkup,
             Scenario::Memory | Scenario::MemoryTight => Screen::Memory,
             Scenario::Security | Scenario::SecurityFirst | Scenario::SecurityItems => {
                 Screen::Security
@@ -237,6 +259,12 @@ pub struct DemoState {
     pub hovered: Option<String>,
     /// How far the Security list starts scrolled, in points (a hidden window can't scroll).
     pub scroll_y: f32,
+    /// How far the Check up screen starts scrolled, in points.
+    pub checkup_scroll_y: f32,
+    /// How far the System Data sheet starts scrolled, in points.
+    pub sysdata_scroll_y: f32,
+    /// The item whose details popover is open, and where it was asked for (x, y in points).
+    pub details: Option<(String, f32, f32)>,
 }
 
 impl Global for DemoState {}
@@ -247,7 +275,9 @@ impl DemoState {
             scenario,
             now_unix: NOW,
             hovered: match scenario {
-                Scenario::Cleanup => Some("spotify:Library/Caches/com.spotify.client".to_string()),
+                Scenario::Cleanup | Scenario::CleanupWhy => {
+                    Some("cache.app:Library/Caches/com.spotify.client".to_string())
+                }
                 Scenario::Large | Scenario::LargeNotOpened => {
                     Some("Movies/2025/trip-raw.mov".to_string())
                 }
@@ -258,6 +288,23 @@ impl DemoState {
                 Scenario::SecurityItems => 372.,
                 _ => 0.,
             },
+            checkup_scroll_y: match scenario {
+                Scenario::CheckupTrust => 330.,
+                _ => 0.,
+            },
+            sysdata_scroll_y: match scenario {
+                Scenario::SystemDataReport => 470.,
+                _ => 0.,
+            },
+            // Where the Spotify row's Details button sits: the popover's top right corner
+            // hangs under it.
+            details: (scenario == Scenario::CleanupWhy).then(|| {
+                (
+                    "cache.app:Library/Caches/com.spotify.client".to_string(),
+                    830.,
+                    185.,
+                )
+            }),
         }
     }
 }
@@ -334,7 +381,7 @@ pub fn cleanup_plan() -> Plan {
     };
     plan.items = vec![
         clean_item(
-            "spotify:Library/Caches/com.spotify.client",
+            "cache.app:Library/Caches/com.spotify.client",
             Caches,
             Safe,
             "Spotify",
@@ -343,7 +390,7 @@ pub fn cleanup_plan() -> Plan {
             1_400 * MB,
         ),
         clean_item(
-            "chrome:Library/Caches/Google/Chrome",
+            "cache.chrome:Library/Caches/Google/Chrome/Default",
             Caches,
             Safe,
             "Google Chrome",
@@ -352,7 +399,7 @@ pub fn cleanup_plan() -> Plan {
             1_200 * MB,
         ),
         clean_item(
-            "slack:Library/Caches/com.tinyspeck.slackmacgap",
+            "cache.app:Library/Caches/com.tinyspeck.slackmacgap",
             Caches,
             Safe,
             "Slack",
@@ -361,7 +408,7 @@ pub fn cleanup_plan() -> Plan {
             842 * MB,
         ),
         clean_item(
-            "unknown:Library/Caches/com.example.updater",
+            "cache.unknown:Library/Caches/com.example.updater",
             Caches,
             Review,
             "com.example.updater",
@@ -370,7 +417,7 @@ pub fn cleanup_plan() -> Plan {
             210 * MB,
         ),
         clean_item(
-            "logs:Library/Logs",
+            "logs.app.small:Library/Logs",
             Logs,
             Safe,
             "App logs",
@@ -379,7 +426,7 @@ pub fn cleanup_plan() -> Plan {
             164 * MB,
         ),
         clean_item(
-            "crash:Library/Logs/DiagnosticReports",
+            "logs.diag.small:Library/Logs/DiagnosticReports",
             Logs,
             Safe,
             "Crash reports",
@@ -388,7 +435,7 @@ pub fn cleanup_plan() -> Plan {
             38 * MB,
         ),
         clean_item(
-            "xcode:Library/Developer/Xcode/DerivedData",
+            "dev.deriveddata.small:Library/Developer/Xcode/DerivedData",
             Developer,
             Safe,
             "Xcode DerivedData",
@@ -397,7 +444,7 @@ pub fn cleanup_plan() -> Plan {
             2_000 * MB,
         ),
         clean_item(
-            "rust:Documents/projects/tidy/target",
+            "proj.target:Documents/projects/tidy/target",
             Developer,
             Safe,
             "tidy (Rust target)",
@@ -406,7 +453,7 @@ pub fn cleanup_plan() -> Plan {
             1_100 * MB,
         ),
         clean_item(
-            "npm:.npm/_cacache",
+            "dev.npm-cacache:.npm/_cacache",
             Developer,
             Safe,
             "npm cache",
@@ -415,7 +462,7 @@ pub fn cleanup_plan() -> Plan {
             800 * MB,
         ),
         clean_item(
-            "dist:Documents/projects/web-dashboard/dist",
+            "proj.dist:Documents/projects/web-dashboard/dist",
             Developer,
             Review,
             "web-dashboard (dist)",
@@ -424,7 +471,7 @@ pub fn cleanup_plan() -> Plan {
             96 * MB,
         ),
         clean_item(
-            "hf:.cache/huggingface",
+            "ai.huggingface.small:.cache/huggingface/hub",
             AiModels,
             Review,
             "Hugging Face models",
@@ -433,7 +480,7 @@ pub fn cleanup_plan() -> Plan {
             18_400 * MB,
         ),
         clean_item(
-            "ltx:Library/Application Support/LTX Studio",
+            "ai.ltx.small:Library/Application Support/LTXDesktop/models",
             AiModels,
             ReportOnly,
             "LTX Studio models",
@@ -442,7 +489,7 @@ pub fn cleanup_plan() -> Plan {
             66_900 * MB,
         ),
         clean_item(
-            "vm:Library/Containers/com.utmapp.UTM",
+            "ai.vm:.colima",
             AiModels,
             ReportOnly,
             "Virtual machine disks",
@@ -934,6 +981,83 @@ pub fn reminder_date() -> ReminderDate {
     }
 }
 
+/// The System Data report of the `system-data` scenario.
+pub fn system_data_report() -> tidy_core::sysdata::SystemDataReport {
+    use tidy_core::sysdata::{Snapshots, SysKind, SysRow, SysSize, snapshot_row};
+    let row = |kind: SysKind, bytes: u64, note: &str| SysRow {
+        kind,
+        title: kind.title().to_string(),
+        note: note.to_string(),
+        size: SysSize::Measured(bytes),
+        report_only: false,
+        commands: Vec::new(),
+    };
+    let mut sims = row(
+        SysKind::Simulators,
+        14_800 * MB,
+        "Simulator devices and what you installed on them.",
+    );
+    sims.commands = vec![tidy_core::sysdata::CopyCommand {
+        label: "Remove simulators whose runtime is gone".to_string(),
+        command: "xcrun simctl delete unavailable".to_string(),
+    }];
+    let docker = SysRow {
+        kind: SysKind::Docker,
+        title: SysKind::Docker.title().to_string(),
+        note: "Docker keeps images, containers and build cache in one disk image inside its app container, which Tidy doesn't open. Run these in Terminal to see and reclaim that space.".to_string(),
+        size: SysSize::NotMeasured,
+        report_only: true,
+        commands: vec![
+            tidy_core::sysdata::CopyCommand {
+                label: "See what Docker uses".to_string(),
+                command: "docker system df".to_string(),
+            },
+            tidy_core::sysdata::CopyCommand {
+                label: "Remove stopped containers, unused images and build cache".to_string(),
+                command: "docker system prune".to_string(),
+            },
+        ],
+    };
+    let snapshots = snapshot_row(&Some(Snapshots {
+        names: vec![
+            "com.apple.TimeMachine.2026-10-25-081502.local".to_string(),
+            "com.apple.TimeMachine.2026-10-25-101112.local".to_string(),
+        ],
+    }));
+    let mut backups = row(SysKind::IosBackups, 0, "");
+    backups.size = SysSize::NeedsFullDiskAccess;
+    backups.note = "macOS keeps this folder behind Full Disk Access. Finder shows and removes them: select the device, then Manage Backups.".to_string();
+    tidy_core::sysdata::SystemDataReport {
+        at: NOW - 20,
+        rows: vec![
+            row(
+                SysKind::Caches,
+                9_200 * MB,
+                "Apps keep these to load faster. Cleanup offers the ones Tidy knows are safe.",
+            ),
+            row(
+                SysKind::Logs,
+                640 * MB,
+                "App logs and crash reports. Cleanup offers the old ones.",
+            ),
+            row(
+                SysKind::Xcode,
+                21_400 * MB,
+                "Build data, archives and device symbols. Cleanup offers old build data; archives and device symbols wait for your review.",
+            ),
+            sims,
+            row(
+                SysKind::VirtualMachines,
+                12_100 * MB,
+                "Disks of Colima, Lima, Android emulators and Claude. Remove them from the app that made them.",
+            ),
+            backups,
+            docker,
+            snapshots,
+        ],
+    }
+}
+
 // ---------- startup ----------
 
 /// How long the offscreen export waits before reading the window's frame. The only frame is
@@ -1016,9 +1140,13 @@ fn set_accessory_policy() {
 /// Fills the model for a scenario.
 fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
     let (plan, large) = match scenario {
-        Scenario::Cleanup | Scenario::CleanupDone | Scenario::Checkup => {
-            (Some(cleanup_plan()), None)
-        }
+        Scenario::Cleanup
+        | Scenario::CleanupDone
+        | Scenario::CleanupWhy
+        | Scenario::Checkup
+        | Scenario::SystemData
+        | Scenario::SystemDataReport
+        | Scenario::CheckupTrust => (Some(cleanup_plan()), None),
         Scenario::Large | Scenario::LargeNotOpened | Scenario::LargeFolders => {
             (None, Some(large_scan()))
         }
@@ -1038,7 +1166,14 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
             };
             m.cleanup.notice = Some(Notice::Moved { bytes: 6_344 * MB });
         }
-        Scenario::Checkup => {
+        Scenario::Checkup
+        | Scenario::SystemData
+        | Scenario::SystemDataReport
+        | Scenario::CheckupTrust => {
+            if matches!(scenario, Scenario::SystemData | Scenario::SystemDataReport) {
+                m.system_data.open = true;
+                m.system_data.report = Some(system_data_report());
+            }
             m.settings.reminder_enabled = true;
             m.checkup.last = Some(last_checkup());
             m.checkup.loaded = true;
@@ -1139,7 +1274,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 13);
+        assert_eq!(Scenario::ALL.len(), 17);
     }
 
     #[test]

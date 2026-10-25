@@ -13,6 +13,8 @@
 //! | `memory` | One memory snapshot: `{"event":"memory",...}` |
 //! | `security [--include-updates]` | The Security checks: progress lines, then `{"event":"security",...}` |
 //! | `checkup [--include-updates]` | Cleanup scan, Security checks and a memory snapshot, then `{"event":"checkup",...}` |
+//! | `explain ID` | Cleanup scan, then the details of one item: `{"event":"explain",...}` |
+//! | `system-data` | What Tidy can measure of System Data: `{"event":"system_data",...}` |
 //!
 //! Exit codes: 0 done, 1 error, 2 bad usage, 3 some items were skipped or failed (for
 //! `checkup`: a part could not be done), 4 another Tidy holds the lock, 5 refused. The
@@ -60,6 +62,8 @@ commands:
   memory                                 Memory figures and top apps by memory
   security [--include-updates]           Security checks (softwareupdate only when asked)
   checkup [--include-updates]            Cleanup scan, Security checks and memory
+  explain ID                             Why a Cleanup item is offered and what rebuilds it
+  system-data                            What Tidy can measure of System Data (read-only)
 
 Destructive commands need TIDY_HOME, or --real to use the real home folder.";
 
@@ -112,6 +116,10 @@ enum Cmd {
     Checkup {
         include_updates: bool,
     },
+    Explain {
+        id: String,
+    },
+    SystemData,
 }
 
 impl Cmd {
@@ -244,6 +252,15 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
                 Cmd::Checkup { include_updates }
             })
         }
+        "explain" => match (it.next(), it.next()) {
+            (Some(id), None) if !id.starts_with("--") => Ok(Cmd::Explain { id: id.clone() }),
+            (None, _) => Err("explain needs an item id".into()),
+            _ => Err("explain takes one item id".into()),
+        },
+        "system-data" => match it.next() {
+            None => Ok(Cmd::SystemData),
+            Some(a) => Err(format!("system-data takes no arguments, got {a}")),
+        },
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -463,6 +480,36 @@ fn with_core(cmd: Cmd) -> u8 {
             core.send(Command::RunCheckup { include_updates });
             session.checkup()
         }
+        Cmd::Explain { id } => {
+            core.send(Command::ScanCleanup);
+            match session.plan() {
+                Some(plan) => match plan.item(&id) {
+                    Some(item) => {
+                        let mut line = tagged("explain", &tidy_core::explain::explain(item));
+                        line["id"] = Value::String(id);
+                        print_line(&line);
+                        code::OK
+                    }
+                    None => {
+                        print_line(&json!({
+                            "event": "error", "what": "explain",
+                            "message": format!("no item {id} in the plan"),
+                        }));
+                        code::ERROR
+                    }
+                },
+                None => code::ERROR,
+            }
+        }
+        Cmd::SystemData => match rt.block_on(core.system_data()) {
+            Some(report) => {
+                let mut line = tagged("system_data", &report);
+                line["measured_bytes"] = json!(report.measured_bytes());
+                print_line(&line);
+                code::OK
+            }
+            None => code::ERROR,
+        },
         Cmd::Help | Cmd::History { .. } => unreachable!("handled in run"),
     };
     rt.block_on(core.shutdown());
@@ -795,6 +842,17 @@ mod tests {
         );
         assert_eq!(parse(&args("clean --help")), Ok(Cmd::Help));
         assert_eq!(parse(&args("memory")), Ok(Cmd::Memory));
+        assert_eq!(parse(&args("system-data")), Ok(Cmd::SystemData));
+        assert!(parse(&args("system-data now")).is_err());
+        assert_eq!(
+            parse(&args("explain cache.app:Library/Caches/x")),
+            Ok(Cmd::Explain {
+                id: "cache.app:Library/Caches/x".into()
+            })
+        );
+        assert!(parse(&args("explain")).is_err());
+        assert!(parse(&args("explain a b")).is_err());
+        assert_eq!(Cmd::SystemData.real(), None);
         assert_eq!(
             parse(&args("security")),
             Ok(Cmd::Security {

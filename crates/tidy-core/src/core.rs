@@ -279,6 +279,21 @@ impl Actor {
                     reminder::next_reminder(last.map(|c| c.at), self.env.now(), &self.env.tz);
                 let _ = reply.send(date);
             }
+            Command::MeasureSystemData { reply } => {
+                // Read-only and possibly slow (a walk of a few folders): run it beside the
+                // actor so scans and actions are not held up.
+                let env = self.env.clone();
+                tokio::spawn(async move {
+                    let report =
+                        tokio::task::spawn_blocking(move || crate::sysdata::measure(&env)).await;
+                    match report {
+                        Ok(r) => {
+                            let _ = reply.send(r);
+                        }
+                        Err(e) => tracing::warn!("system data measure failed: {e}"),
+                    }
+                });
+            }
             // Handled in `run`; kept so the match stays exhaustive.
             Command::Shutdown(done) => {
                 let _ = done.send(());
@@ -844,6 +859,28 @@ mod tests {
             self.wait();
             RunningSet::default()
         }
+    }
+
+    #[test]
+    fn system_data_is_measured_off_the_actor_and_only_lists_snapshots() {
+        let r = running();
+        r.put("Library/Caches/com.example.app/blob", 2 * MIB);
+        let core = r.core.clone();
+        let report =
+            r.rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), core.system_data()).await
+            })
+            .expect("a report in time")
+            .expect("the core answered");
+        let caches = report.row(crate::sysdata::SysKind::Caches).unwrap();
+        assert!(caches.size.bytes() >= 2 * MIB as u64);
+        // The test runner has no reply for tmutil, so the row says it could not list them.
+        assert_eq!(
+            report.row(crate::sysdata::SysKind::Snapshots).unwrap().size,
+            crate::sysdata::SysSize::NotListed
+        );
+        // Nothing moved: the file is still there.
+        assert!(r.env.at("Library/Caches/com.example.app/blob").is_file());
     }
 
     #[test]

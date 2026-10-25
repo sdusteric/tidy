@@ -20,7 +20,11 @@ icon_assets!(
         Disc,
         AppWindow,
         Puzzle,
-        X
+        X,
+        Smartphone,
+        TabletSmartphone,
+        Container,
+        Layers
     ]
 );
 
@@ -68,7 +72,13 @@ mod tests {
             IconName::Stethoscope,
             IconName::ShieldCheck,
             IconName::X,
+            IconName::Smartphone,
+            IconName::TabletSmartphone,
+            IconName::Container,
+            IconName::Layers,
             // From gpui-kit's default set.
+            IconName::Info,
+            IconName::Ban,
             IconName::HardDrive,
             IconName::MemoryStick,
             IconName::Cpu,

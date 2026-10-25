@@ -932,7 +932,6 @@ impl TidyView {
             .debug_selector(|| "auto-update".to_string())
             .mx(px(20.))
             .mt(px(12.))
-            .mb(px(20.))
             .px(px(14.))
             .py(px(12.))
             .rounded(px(10.))
@@ -977,7 +976,9 @@ impl TidyView {
             .child(actions)
             .child(card_row)
             .child(reminder)
-            .child(updates);
+            .child(updates)
+            .child(self.system_data_row(t))
+            .child(self.never_card(t));
 
         // The reminder row already says when it fires, so the status bar has nothing to add.
         let status = self.status_bar(t, String::new(), None);

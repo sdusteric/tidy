@@ -146,6 +146,11 @@ pub struct Rule {
     /// Names the wildcard segments never match (case-insensitive). An entry that ends with
     /// `*` is a prefix.
     pub skip: &'static [&'static str],
+    /// What brings the target back once it is gone, or what is lost, for the item details
+    /// (design 17.1).
+    pub rebuild: &'static str,
+    /// The command Tidy suggests and never runs, for a Report only row (design section 4).
+    pub command: Option<&'static str>,
 }
 
 const D: Rule = Rule {
@@ -161,6 +166,8 @@ const D: Rule = Rule {
     label: "",
     reason: "",
     skip: &[],
+    rebuild: "",
+    command: None,
 };
 
 /// The subfolders that are safe to remove in Electron and Chromium apps (table 6.1).
@@ -208,6 +215,7 @@ pub const EXCLUDED: &[&str] = &[
 /// The rule for a cache folder whose owner is unknown (Review).
 pub const UNKNOWN_CACHE: Rule = Rule {
     id: "cache.unknown",
+    rebuild: "Most apps make a new cache when theirs is gone, but Tidy can't confirm which app this belongs to.",
     group: Group::Caches,
     class: Class::Review,
     reason: "Tidy couldn't tell which app owns this.",
@@ -221,6 +229,7 @@ pub static RULES: &[Rule] = &[
     // ---------- System and app caches ----------
     Rule {
         id: "cache.chrome",
+        rebuild: "Chrome makes a new cache as you browse. Pages may load a little slower at first, and your logins stay.",
         group: Group::Caches,
         targets: &[
             Target::Glob("Library/Caches/Google/Chrome/*"),
@@ -234,6 +243,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "cache.chrome.crx",
+        rebuild: "Chrome downloads these again when it needs them.",
         group: Group::Caches,
         targets: &[Target::Glob(
             "Library/Application Support/Google/Chrome/component_crx_cache|extensions_crx_cache|GraphiteDawnCache|GrShaderCache|ShaderCache",
@@ -246,6 +256,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "cache.electron",
+        rebuild: "The app makes a new cache the next time it runs.",
         group: Group::Caches,
         targets: &[Target::Chromium(CHROMIUM_SAFE)],
         owner: Owner::Folder,
@@ -255,6 +266,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "cache.electron.sw",
+        rebuild: "Websites fill it again when you visit them. Offline copies that some sites keep are lost.",
         group: Group::Caches,
         class: Class::Review,
         targets: &[Target::Chromium(CHROMIUM_REVIEW)],
@@ -265,6 +277,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "cache.app",
+        rebuild: "The app makes a new cache the next time it needs one.",
         group: Group::Caches,
         targets: &[
             Target::CacheFolders("Library/Caches"),
@@ -279,6 +292,7 @@ pub static RULES: &[Rule] = &[
     // ---------- Logs ----------
     Rule {
         id: "logs.app",
+        rebuild: "Nothing needs old logs to run. The app keeps writing new ones.",
         group: Group::Logs,
         targets: &[Target::Files("Library/Logs/*")],
         age: Age::Target(14),
@@ -290,6 +304,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "logs.diag",
+        rebuild: "Nothing needs old crash reports to run. macOS writes a new one if an app crashes again.",
         group: Group::Logs,
         targets: &[Target::Files("Library/Logs/DiagnosticReports")],
         age: Age::Target(30),
@@ -300,6 +315,7 @@ pub static RULES: &[Rule] = &[
     // ---------- Developer ----------
     Rule {
         id: "dev.deriveddata",
+        rebuild: "Xcode builds it again on the next build, which takes longer once.",
         targets: &[Target::Glob("Library/Developer/Xcode/DerivedData/*")],
         age: Age::Target(7),
         owner: Owner::Fixed(&owners::XCODE),
@@ -310,6 +326,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.previews",
+        rebuild: "Xcode makes previews again when you open the canvas.",
         targets: &[Target::Glob("Library/Developer/Xcode/UserData/Previews")],
         owner: Owner::Fixed(&owners::XCODE),
         label: "Xcode previews",
@@ -318,6 +335,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.coresim-caches",
+        rebuild: "The simulator rebuilds its caches when it starts.",
         targets: &[Target::Glob("Library/Developer/CoreSimulator/Caches")],
         owner: Owner::Fixed(&owners::CORE_SIMULATOR),
         label: "Simulator caches",
@@ -326,6 +344,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.devicesupport",
+        rebuild: "Xcode copies the symbols from the device again when you connect it.",
         class: Class::Review,
         targets: &[Target::Glob(
             "Library/Developer/Xcode/iOS DeviceSupport|watchOS DeviceSupport|tvOS DeviceSupport|visionOS DeviceSupport|xrOS DeviceSupport/*",
@@ -338,6 +357,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.archives",
+        rebuild: "Nothing rebuilds an archive. Without it you can't read crash reports from that build.",
         class: Class::Review,
         targets: &[Target::Glob("Library/Developer/Xcode/Archives/*/*")],
         age: Age::Target(90),
@@ -348,6 +368,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.xcode-codingassistant",
+        rebuild: "Tidy doesn't know what reads this folder, so it leaves it alone.",
         class: Class::ReportOnly,
         targets: &[Target::Glob("Library/Developer/Xcode/CodingAssistant")],
         label: "Xcode coding assistant",
@@ -356,6 +377,8 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.simulators",
+        rebuild: "Xcode can add any simulator again. The command below removes only simulators whose runtime is gone.",
+        command: Some("xcrun simctl delete unavailable"),
         class: Class::ReportOnly,
         targets: &[Target::Glob("Library/Developer/CoreSimulator/Devices")],
         label: "Simulator devices",
@@ -364,6 +387,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.npm-cacache",
+        rebuild: "npm downloads packages again the next time a project installs them.",
         targets: &[Target::Glob(".npm/_cacache")],
         owner: Owner::Fixed(&owners::NPM),
         label: "npm cache",
@@ -372,6 +396,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.npx",
+        rebuild: "npx downloads the tool again the next time you run it.",
         targets: &[Target::Glob(".npm/_npx")],
         owner: Owner::Fixed(&owners::NPM_OR_NPX),
         label: "npx cache",
@@ -380,6 +405,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.node-gyp",
+        rebuild: "node-gyp downloads the Node headers again on the next native build.",
         targets: &[Target::Glob("Library/Caches/node-gyp")],
         owner: Owner::Fixed(&owners::NODE_GYP),
         label: "node-gyp cache",
@@ -388,6 +414,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.brew-downloads",
+        rebuild: "Homebrew downloads the file again if it needs it.",
         targets: &[Target::Files("Library/Caches/Homebrew/downloads")],
         age: Age::Target(30),
         owner: Owner::Fixed(&owners::BREW),
@@ -398,6 +425,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.pip",
+        rebuild: "pip downloads packages again on the next install.",
         targets: &[
             Target::Glob("Library/Caches/pip"),
             Target::Glob(".cache/pip"),
@@ -409,6 +437,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.pnpm",
+        rebuild: "pnpm downloads packages again on the next install.",
         targets: &[Target::Glob("Library/Caches/pnpm")],
         owner: Owner::Fixed(&owners::PNPM),
         label: "pnpm cache",
@@ -417,6 +446,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.uv",
+        rebuild: "uv downloads packages again on the next install.",
         targets: &[Target::Glob(".cache/uv")],
         owner: Owner::Fixed(&owners::UV),
         label: "uv cache",
@@ -425,6 +455,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.bun",
+        rebuild: "Bun downloads packages again on the next install.",
         targets: &[Target::Glob(".bun/install/cache")],
         owner: Owner::Fixed(&owners::BUN),
         label: "Bun cache",
@@ -433,6 +464,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.gradle-caches",
+        rebuild: "Gradle downloads dependencies again on the next build.",
         targets: &[Target::Glob(".gradle/caches")],
         owner: Owner::Fixed(&owners::GRADLE),
         label: "Gradle cache",
@@ -441,6 +473,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.gradle-wrapper",
+        rebuild: "Gradle downloads its distribution again on the next build.",
         class: Class::Review,
         targets: &[Target::Glob(".gradle/wrapper")],
         label: "Gradle wrapper",
@@ -449,6 +482,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.m2",
+        rebuild: "Maven downloads published libraries again, but anything you installed with mvn install is gone until you build it again.",
         class: Class::Review,
         targets: &[Target::Glob(".m2/repository")],
         label: "Maven repository",
@@ -457,6 +491,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.cargo-registry",
+        rebuild: "Cargo downloads crates again on the next build. Offline builds fail until then.",
         class: Class::Review,
         targets: &[Target::Glob(".cargo/registry/cache|src")],
         owner: Owner::Fixed(&owners::CARGO),
@@ -467,6 +502,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.cocoapods-repos",
+        rebuild: "CocoaPods downloads its spec repos again on the next pod install.",
         class: Class::Review,
         targets: &[Target::Glob(".cocoapods/repos")],
         label: "CocoaPods repos",
@@ -475,6 +511,8 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.pnpm-store",
+        rebuild: "The command below removes only packages that no project uses.",
+        command: Some("pnpm store prune"),
         class: Class::ReportOnly,
         targets: &[Target::Glob("Library/pnpm/store")],
         label: "pnpm store",
@@ -483,6 +521,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.playwright",
+        rebuild: "Playwright downloads this browser build again if a project asks for it.",
         class: Class::Review,
         targets: &[Target::Glob("Library/Caches/ms-playwright/*")],
         keep: Keep::Newest(KeepBy::BeforeLastDash),
@@ -493,6 +532,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.agent-versions",
+        rebuild: "The tool runs from its newest version. Going back to this one would need a new download.",
         class: Class::Review,
         targets: &[
             Target::Glob(".local/share/claude/versions/*"),
@@ -507,6 +547,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.zed",
+        rebuild: "Zed downloads it again when a language or tool needs it.",
         class: Class::Review,
         targets: &[Target::Glob(
             "Library/Application Support/Zed/languages|node",
@@ -519,6 +560,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.androidstudio",
+        rebuild: "The newest Android Studio keeps its own settings.",
         class: Class::Review,
         targets: &[Target::Glob(
             "Library/Application Support/Google/AndroidStudio*",
@@ -531,6 +573,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "dev.cache",
+        rebuild: "The tool makes a new cache the next time it runs.",
         targets: &[
             Target::Glob(".cache/firebase"),
             Target::Glob(".cache/gh"),
@@ -545,6 +588,7 @@ pub static RULES: &[Rule] = &[
     // ---------- AI models and large app data ----------
     Rule {
         id: "ai.huggingface",
+        rebuild: "The tool that uses this model downloads it again, which can take a while.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(".cache/huggingface/hub/models--*")],
@@ -555,6 +599,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.lmstudio",
+        rebuild: "LM Studio downloads the model again when you pick it.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[
@@ -569,6 +614,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.ollama",
+        rebuild: "ollama pull downloads the models again.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(".ollama/models")],
@@ -579,6 +625,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.whisper",
+        rebuild: "Downloaded again the next time a Whisper tool runs.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(".cache/whisper")],
@@ -589,6 +636,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.fluidaudio",
+        rebuild: "Downloaded again when the app needs it.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[
@@ -602,6 +650,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.hyperframes",
+        rebuild: "HyperFrames downloads it again when needed.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(".cache/hyperframes/*")],
@@ -613,6 +662,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.ltx",
+        rebuild: "LTX Desktop downloads the model again.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(
@@ -626,6 +676,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.anythingllm",
+        rebuild: "AnythingLLM downloads the models again.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(
@@ -638,6 +689,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.anythingllm-data",
+        rebuild: "Nothing rebuilds your workspaces and chats.",
         group: Group::AiModels,
         class: Class::ReportOnly,
         targets: &[Target::Glob(
@@ -651,6 +703,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.chrome-models",
+        rebuild: "Chrome downloads it again when a feature needs it.",
         group: Group::AiModels,
         class: Class::Review,
         targets: &[Target::Glob(
@@ -664,6 +717,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "ai.vm",
+        rebuild: "Nothing rebuilds a virtual machine disk. Remove it from the app that made it.",
         group: Group::AiModels,
         class: Class::ReportOnly,
         targets: &[
@@ -713,6 +767,8 @@ pub struct ProjectRule {
     pub age: Age,
     pub owner: Owner,
     pub reason: &'static str,
+    /// What brings the folder back once it is gone (design 17.1).
+    pub rebuild: &'static str,
 }
 
 const P: ProjectRule = ProjectRule {
@@ -723,6 +779,7 @@ const P: ProjectRule = ProjectRule {
     age: Age::Project(30),
     owner: Owner::None,
     reason: "Build output, project not touched for {days} days",
+    rebuild: "The project's build makes it again.",
 };
 
 /// Table 6.3, in match order: the first row whose name and markers fit wins, so the Android
@@ -730,6 +787,7 @@ const P: ProjectRule = ProjectRule {
 pub static PROJECT_RULES: &[ProjectRule] = &[
     ProjectRule {
         id: "proj.target",
+        rebuild: "cargo build makes it again.",
         names: &["target"],
         markers: Markers::CargoTarget,
         owner: Owner::Fixed(&owners::CARGO),
@@ -737,12 +795,14 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.node_modules",
+        rebuild: "npm, pnpm or yarn install puts it back.",
         names: &["node_modules"],
         markers: Markers::ParentHasAny(&["package.json"]),
         ..P
     },
     ProjectRule {
         id: "proj.web-cache",
+        rebuild: "The next build or dev server run makes it again.",
         names: &[
             ".next",
             ".nuxt",
@@ -756,18 +816,21 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.pods",
+        rebuild: "pod install puts it back.",
         names: &["Pods"],
         markers: Markers::Pods,
         ..P
     },
     ProjectRule {
         id: "proj.swiftpm",
+        rebuild: "swift build makes it again.",
         names: &[".build"],
         markers: Markers::ParentHasAny(&["Package.swift"]),
         ..P
     },
     ProjectRule {
         id: "proj.gradle",
+        rebuild: "The next Gradle build makes it again.",
         names: &[".gradle"],
         markers: Markers::ParentHasAny(&["build.gradle", "build.gradle.kts", "settings.gradle*"]),
         owner: Owner::Fixed(&owners::GRADLE),
@@ -775,6 +838,7 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.gradle-build",
+        rebuild: "The next Gradle build makes it again.",
         names: &["build"],
         markers: Markers::ParentHasAny(&["build.gradle", "build.gradle.kts", "settings.gradle*"]),
         owner: Owner::Fixed(&owners::GRADLE),
@@ -782,12 +846,14 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.venv",
+        rebuild: "You make it again with python -m venv and a new install of the requirements.",
         names: &[".venv", "venv"],
         markers: Markers::Venv,
         ..P
     },
     ProjectRule {
         id: "proj.pycache",
+        rebuild: "Python writes it again when the code runs.",
         names: &["__pycache__"],
         markers: Markers::PythonSource,
         age: Age::None,
@@ -796,6 +862,7 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.deriveddata",
+        rebuild: "Xcode builds it again.",
         names: &["DerivedData"],
         markers: Markers::XcodeProject,
         age: Age::Project(7),
@@ -804,6 +871,7 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.dist",
+        rebuild: "The project's build makes it again.",
         names: &["dist"],
         markers: Markers::GitIgnored(&[
             "package.json",
@@ -817,6 +885,7 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.build",
+        rebuild: "The project's build makes it again.",
         names: &["build"],
         markers: Markers::GitIgnored(&[
             "package.json",
@@ -830,6 +899,7 @@ pub static PROJECT_RULES: &[ProjectRule] = &[
     },
     ProjectRule {
         id: "proj.vendor",
+        rebuild: "composer install or bundle install puts it back.",
         names: &["vendor"],
         markers: Markers::WithLockfile(
             &["composer.json", "Gemfile"],

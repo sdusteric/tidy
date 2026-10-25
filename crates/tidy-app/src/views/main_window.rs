@@ -21,6 +21,7 @@ use crate::theme::{Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
 use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
 use crate::views::memory::MemoryMenu;
+use crate::views::trust::DetailsAt;
 use crate::views::{hairline, icon_button, large_button, text_button};
 
 pub struct TidyView {
@@ -31,6 +32,7 @@ pub struct TidyView {
     pub(crate) memory_scroll: UniformListScrollHandle,
     pub(crate) security_scroll: ScrollHandle,
     pub(crate) checkup_scroll: ScrollHandle,
+    pub(crate) sysdata_scroll: ScrollHandle,
     /// The row under the pointer (its key), which shows its hover actions.
     pub hovered: Option<String>,
     /// The "..." menu of a Cleanup row, when open.
@@ -39,6 +41,10 @@ pub struct TidyView {
     pub threshold_menu: Option<Point<Pixels>>,
     /// The "..." menu of a Memory row (Force Quit), when open.
     pub memory_menu: Option<MemoryMenu>,
+    /// The details popover of a Cleanup item, when open (design 17.1).
+    pub details: Option<DetailsAt>,
+    /// The command whose Copy button was clicked last ("Copied").
+    pub copied: Option<String>,
     /// The confirm dialog, when open.
     pub dialog: Option<DialogSpec>,
     pub history_open: bool,
@@ -133,6 +139,14 @@ impl TidyView {
         if let Some(d) = crate::demo::state(cx).filter(|d| d.scroll_y > 0.) {
             security_scroll.set_offset(point(px(0.), px(-d.scroll_y)));
         }
+        let sysdata_scroll = ScrollHandle::new();
+        if let Some(d) = crate::demo::state(cx).filter(|d| d.sysdata_scroll_y > 0.) {
+            sysdata_scroll.set_offset(point(px(0.), px(-d.sysdata_scroll_y)));
+        }
+        let checkup_scroll = ScrollHandle::new();
+        if let Some(d) = crate::demo::state(cx).filter(|d| d.checkup_scroll_y > 0.) {
+            checkup_scroll.set_offset(point(px(0.), px(-d.checkup_scroll_y)));
+        }
         TidyView {
             model,
             focus,
@@ -140,11 +154,19 @@ impl TidyView {
             large_scroll: UniformListScrollHandle::new(),
             memory_scroll: UniformListScrollHandle::new(),
             security_scroll,
-            checkup_scroll: ScrollHandle::new(),
+            checkup_scroll,
+            sysdata_scroll,
             hovered: crate::demo::state(cx).and_then(|d| d.hovered.clone()),
             menu: None,
             threshold_menu: None,
             memory_menu: None,
+            details: crate::demo::state(cx).and_then(|d| {
+                d.details.as_ref().map(|(id, x, y)| DetailsAt {
+                    id: id.clone(),
+                    at: point(px(*x), px(*y)),
+                })
+            }),
+            copied: None,
             dialog: None,
             history_open: false,
             history_expanded: HashSet::new(),
@@ -180,6 +202,7 @@ impl TidyView {
             self.menu = None;
             self.threshold_menu = None;
             self.memory_menu = None;
+            self.details = None;
             self.dialog = Some(spec);
             cx.notify();
         }
@@ -190,12 +213,15 @@ impl TidyView {
         if self.menu.take().is_some()
             || self.threshold_menu.take().is_some()
             || self.memory_menu.take().is_some()
+            || self.details.take().is_some()
             || self.dialog.take().is_some()
         {
             cx.notify();
         } else if self.history_open {
             self.history_open = false;
             cx.notify();
+        } else if self.model.read(cx).system_data.open {
+            self.model.update(cx, |m, cx| m.close_system_data(cx));
         }
     }
 
@@ -609,6 +635,9 @@ impl TidyView {
         if let Some(menu) = self.memory_menu.clone() {
             layers.push(self.render_memory_menu(t, &menu, cx));
         }
+        if let Some(at) = self.details.clone() {
+            layers.push(self.render_details(t, &at, cx));
+        }
         if let Some(spec) = self.dialog.clone() {
             let view = cx.entity().downgrade();
             let cancel_view = view.clone();
@@ -631,6 +660,9 @@ impl TidyView {
         }
         if self.history_open {
             layers.push(self.render_history(t, cx));
+        }
+        if self.model.read(cx).system_data.open {
+            layers.push(self.render_system_data(t, cx));
         }
         layers
     }

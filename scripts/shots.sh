@@ -4,7 +4,8 @@
 # Usage: scripts/shots.sh [scenario ...]    (default: the five screens, in sidebar order:
 #        checkup cleanup large memory security)
 #        Scenarios: checkup cleanup cleanup-done cleanup-empty large large-not-opened
-#        large-folders large-empty memory memory-tight security security-first security-items.
+#        large-folders large-empty memory memory-tight security security-first security-items
+#        cleanup-why system-data system-data-report checkup-trust.
 #        Each one is captured in light and dark and written to $OUT/<scenario>-<light|dark>.png.
 # Env:   TIDY_APP  bundle to launch (default target/bundle/Tidy.app)
 #        OUT       where the PNGs go (default docs/app-shots)
@@ -56,7 +57,7 @@ SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -gt 0 ] || SCENARIOS=(checkup cleanup large memory security)
 
 # The app maps an unknown TIDY_DEMO name to cleanup, so a typo here would shoot the wrong screen.
-KNOWN_SCENARIOS=" checkup cleanup cleanup-done cleanup-empty large large-not-opened large-folders large-empty memory memory-tight security security-first security-items "
+KNOWN_SCENARIOS=" checkup cleanup cleanup-done cleanup-empty large large-not-opened large-folders large-empty memory memory-tight security security-first security-items cleanup-why system-data system-data-report checkup-trust "
 for s in "${SCENARIOS[@]}"; do
   case "$KNOWN_SCENARIOS" in
     *" $s "*) ;;

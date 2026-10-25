@@ -28,6 +28,7 @@ use crate::views::checkup::CheckupState;
 use crate::views::main_window::open_main_window;
 use crate::views::memory::MemoryState;
 use crate::views::security::SecurityState;
+use crate::views::trust::SystemDataState;
 
 actions!(
     tidy,
@@ -649,6 +650,8 @@ pub struct TidyModel {
     pub memory: MemoryState,
     pub security: SecurityState,
     pub checkup: CheckupState,
+    /// The System Data sheet (design 17.2).
+    pub system_data: SystemDataState,
     pub disk: Option<DiskInfo>,
     /// Number of applied batches (tests check the pump's throttle with it).
     pub applies: usize,
@@ -667,6 +670,7 @@ impl TidyModel {
             memory: MemoryState::default(),
             security: SecurityState::default(),
             checkup: CheckupState::default(),
+            system_data: SystemDataState::default(),
             disk: None,
             applies: 0,
             activity: None,

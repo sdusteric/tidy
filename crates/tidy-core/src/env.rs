@@ -19,8 +19,9 @@
 //!
 //! The production memory probe and command runner only read: the memory probe lists
 //! processes, and the runner is used for read-only status commands (`fdesetup status`,
-//! `spctl --status` and the like). [`SystemRunner`] refuses `softwareupdate` under
-//! `TIDY_HOME` and in this crate's tests.
+//! `spctl --status` and the like, and `tmutil listlocalsnapshots /` for the System Data
+//! sheet). [`SystemRunner`] refuses `softwareupdate` and `tmutil` under `TIDY_HOME` and in
+//! this crate's tests, and refuses `docker` and every `tmutil` verb but the listing always.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -494,16 +495,30 @@ const PIPE_GRACE: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemRunner;
 
-/// Whether [`SystemRunner`] refuses `program`: `softwareupdate` under `TIDY_HOME` (or in
-/// tests).
-pub fn runner_refuses(program: &str, tidy_home_set: bool) -> bool {
-    file_name(program) == "softwareupdate" && (tidy_home_set || cfg!(test))
+/// The one `tmutil` call Tidy makes: list the local snapshots of the startup volume. It only
+/// reads (design 17.2, C30).
+pub const TMUTIL_LIST: [&str; 2] = ["listlocalsnapshots", "/"];
+
+/// Whether [`SystemRunner`] refuses `program` with `args`:
+///
+/// - `softwareupdate` and `tmutil` under `TIDY_HOME` (or in tests), so tests and agents never
+///   ask the real Mac;
+/// - `tmutil` with anything but [`TMUTIL_LIST`], always: Tidy never changes snapshots;
+/// - `docker`, always: Tidy only shows Docker commands for the user to copy (design section 4).
+pub fn runner_refuses(program: &str, args: &[&str], tidy_home_set: bool) -> bool {
+    let guarded = tidy_home_set || cfg!(test);
+    match file_name(program) {
+        "softwareupdate" => guarded,
+        "tmutil" => guarded || args != TMUTIL_LIST,
+        "docker" => true,
+        _ => false,
+    }
 }
 
 impl CommandRunner for SystemRunner {
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<CommandOutput> {
         let tidy_home_set = std::env::var_os(HOME_ENV).is_some_and(|v| !v.is_empty());
-        if runner_refuses(program, tidy_home_set) {
+        if runner_refuses(program, args, tidy_home_set) {
             return Err(ReplayError::Refused.to_io(&command_line(program, args)));
         }
         use std::os::unix::process::CommandExt;
@@ -1259,15 +1274,54 @@ mod tests {
 
     #[test]
     fn system_runner_refuses_softwareupdate_under_tidy_home_and_in_tests() {
-        assert!(runner_refuses("/usr/sbin/softwareupdate", true));
-        assert!(runner_refuses("softwareupdate", false), "always in tests");
-        assert!(!runner_refuses("/usr/bin/fdesetup", true));
+        assert!(runner_refuses(
+            "/usr/sbin/softwareupdate",
+            &["--list"],
+            true
+        ));
+        assert!(
+            runner_refuses("softwareupdate", &[], false),
+            "always in tests"
+        );
+        assert!(!runner_refuses("/usr/bin/fdesetup", &["status"], true));
         let e = SystemRunner
             .run(
                 "/usr/sbin/softwareupdate",
                 &["--list"],
                 Duration::from_secs(1),
             )
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn system_runner_never_changes_snapshots_or_runs_docker() {
+        // tmutil: only the listing, and never under TIDY_HOME or in tests.
+        assert!(runner_refuses("/usr/bin/tmutil", &TMUTIL_LIST, true));
+        assert!(
+            runner_refuses("tmutil", &TMUTIL_LIST, false),
+            "always in tests"
+        );
+        for args in [
+            &["deletelocalsnapshots", "/"][..],
+            &["thinlocalsnapshots", "/", "1", "4"],
+            &["listlocalsnapshots", "/Volumes/Other"],
+            &[],
+        ] {
+            assert!(runner_refuses("/usr/bin/tmutil", args, false), "{args:?}");
+        }
+        // docker: never, with any arguments.
+        for args in [&["system", "df"][..], &["system", "prune"], &[]] {
+            assert!(runner_refuses("/usr/local/bin/docker", args, false));
+        }
+        assert!(!runner_refuses("/usr/bin/csrutil", &["status"], false));
+        // The guard is in the runner itself, before anything is spawned.
+        let e = SystemRunner
+            .run("/usr/bin/tmutil", &TMUTIL_LIST, Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        let e = SystemRunner
+            .run("docker", &["system", "df"], Duration::from_secs(1))
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
     }

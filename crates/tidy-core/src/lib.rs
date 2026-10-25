@@ -13,6 +13,7 @@ pub mod clean;
 pub mod cleanup;
 pub mod core;
 pub mod env;
+pub mod explain;
 pub mod history;
 pub mod large;
 pub mod lastused;
@@ -28,6 +29,7 @@ pub mod rules;
 pub mod security;
 pub mod settings;
 pub mod store;
+pub mod sysdata;
 pub mod trash;
 pub mod walk;
 

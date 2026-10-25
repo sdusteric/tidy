@@ -21,6 +21,7 @@ use crate::model::{
 };
 use crate::reminder::ReminderDate;
 use crate::settings::Settings;
+use crate::sysdata::SystemDataReport;
 
 /// Which scan a progress or stop event is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -102,6 +103,14 @@ pub enum Command {
     /// reminder is on, and reschedules its single notification with the answer.
     NextReminder {
         reply: oneshot::Sender<ReminderDate>,
+    },
+
+    /// Measure what Tidy can see of System Data (design 17.2): known folders under the scan
+    /// root, read-only, and the local Time Machine snapshots from `tmutil listlocalsnapshots
+    /// /`. Sent only when the user opens the System Data sheet. Runs off the actor, so other
+    /// commands are not held up.
+    MeasureSystemData {
+        reply: oneshot::Sender<SystemDataReport>,
     },
 
     /// Stop everything cleanly, then reply on the channel.
@@ -210,6 +219,16 @@ impl CoreHandle {
     pub async fn next_reminder(&self) -> Option<ReminderDate> {
         let (reply, rx) = oneshot::channel();
         if self.send(Command::NextReminder { reply }) {
+            rx.await.ok()
+        } else {
+            None
+        }
+    }
+
+    /// Asks the core to measure System Data. None when the core is gone.
+    pub async fn system_data(&self) -> Option<SystemDataReport> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::MeasureSystemData { reply }) {
             rx.await.ok()
         } else {
             None

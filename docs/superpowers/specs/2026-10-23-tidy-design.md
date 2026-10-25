@@ -519,6 +519,11 @@ Made in this document:
 - C24. Four new tokens (`sidebar_bg`, `sidebar_selected`, `tag_border`, `danger_button`) and one new type role (Figure).
 - C25. Free space uses "available for important usage", matching Finder.
 - C26. M1 acceptance has only the offline group; no GUI launch group.
+- C27. Every Cleanup row, Safe ones included, opens a details popover (section 17.1). Its text comes from the rule table only: the existing reason, plus a `rebuild` sentence and, for Report only rows, a `command` per rule.
+- C28. "System Data on this Mac" is a sheet with History's chrome, opened from a Check up row and from a link under the disk figure in the sidebar. It measures only when opened (section 17.2).
+- C29. The sheet never says Tidy will shrink Apple's System Data figure. It names what Tidy can measure, says "Not measured" or "Needs Full Disk Access" where it cannot, and gives the rest one row with no number.
+- C30. Docker and local Time Machine snapshots are Report only rows of that sheet, each with a plain explanation and a Copy button for its command. Tidy runs only the read-only `tmutil listlocalsnapshots /`; `SystemRunner` refuses `docker` always, every other `tmutil` verb always, and `tmutil` entirely under `TIDY_HOME` and in tests.
+- C31. Check up ends with a "What Tidy never does" card of six items (section 17.3).
 
 ## 16. As-built: M2 (Memory, Security, Check up and reminder)
 
@@ -554,3 +559,35 @@ A full run has FAIL 0 and SKIP 0. `ACCEPT_SKIP_GATES=1` and `ACCEPT_SKIP_BUNDLE=
 - `spctl --status` prints "assessments disabled" and exits 1. The Gatekeeper check takes exit 1 as an answer; every other status command answers only with exit 0.
 - A check up sends its events through the core actor, so the actor holds the Cleanup plan before the app shows it, and a Cleanup scan asked for while the check up is scanning waits for the check up's plan instead of starting a second scan.
 - The Check up screen has its own primary button in the content area ("Run Check up"), not in the toolbar.
+
+## 17. Trust surfaces (design note, 2026-10-25)
+
+From the user research (`reddit/tidy.md`, gap rows 3, 5, 6, 11 and 18): people trust a cleaner that says why each item is safe, explains System Data without promising to shrink it, and states what it never does. These three surfaces add no deletion path, need no Full Disk Access, sudo or background agent, and reuse section 11's tokens (`card_bg`, `pop_bg`, `pop_shadow`, `fill`, `text`, `text_2`, `text_3`, `tag_border`, `accent`), type roles and motion. Nothing new animates.
+
+### 17.1 Item details (C27)
+
+- **Open.** A fourth hover action on every Cleanup item row, `Info` 16 in the 26 pt icon button, left of Reveal; the trailing area grows from 60 to 86 pt (group totals keep lining up with item sizes). The "..." menu gets "Show Details" as its first entry. Both open the same popover at the click, drawn like the row menu (`pop_bg`, `pop_shadow`, radius 10), 420 pt wide, its top right corner 14 pt under the click, snapped 8 pt inside the window. A click outside or Escape closes it. It is a popover, not a modal: the list stays live and nothing is asked.
+- **Content**, top to bottom, padding 14:
+  - Name 13/600 `text` with the row's tag after it (Review, Report only), the size 13 tnum `text_2` at the right.
+  - The verdict, 13/400 `text`, one or two lines: Safe "Safe to clean. <reason>", Review "Worth a look before you clean it. <reason>", Report only "Tidy won't remove this. <reason>".
+  - A hairline, then a two-column list like Finder's Get Info: labels 12 `text_2` in an 80 pt column, values 12 `text` (the rule id in mono `text`, patterns and the path in mono `text_2`; 420 pt keeps a 40 character pattern on one line). Rows: **If removed** (the rule's `rebuild` sentence), **Checks** (one line each behind a `Check` 11 in `text_3`, built from the rule: the owner not running, the age rule, the newest entry kept, the 24 hour skip, and always "Checked again right before the move" and "Goes to the Trash, so you can put it back"; Report only rows say "Tidy never moves it"), **Rule** (rule id in mono, then the matched pattern such as `Library/Caches/<app>`), **Path** (the item's path from `~`, middle-truncated).
+  - Report only rows with a command add a command box: `fill` background, radius 6, the command in 12 mono `text`, and a secondary "Copy" text button at the right. Copying writes the clipboard only.
+- **Model.** `tidy_core::explain::explain(&Item) -> Explanation` is pure and tested; the popover only draws it. An item whose rule id is unknown (a demo row) still gets its reason and path.
+
+### 17.2 System Data on this Mac (C28, C29, C30)
+
+- **Open.** On Check up, a row in the settings-row style under Automatic updates: `HardDrive` 16 `text_2`, title "What is System Data on this Mac?" 13/500, note "See what Tidy can measure without Full Disk Access." 12 `text_2`, a `ChevronRight` 12 `text_3`; the whole row is clickable and hovers to `card_hover`. In the sidebar, a plain text button "What's in System Data?" under the disk line.
+- **Sheet.** History's chrome at 600 x 520 pt: 44 pt header with the title "System Data on this Mac" and a close button, a hairline, then a scrolling body with 16 pt side padding.
+  - Lead paragraph, 13 `text`, across the sheet (two lines): "System Settings counts caches, logs, developer files, virtual machines and snapshots as System Data. Here is the part Tidy can measure without Full Disk Access."
+  - The figure line: Figure 22/600 tnum with " measured" in 15 `text_2`, and one 12 `text_2` line ("Measured just now"). While measuring: the spinner and "Measuring" in the toolbar style.
+  - Rows, 52 pt where single-line and taller when the note wraps, separated by hairlines: glyph tile 28 (`fill_2`, icon 16), title 13/500 with the tag "Report only" on the report rows, a note 12 `text_2` that says what it is and what to do, and the size 13 tnum `text_2` at the right, or "Not measured" / "Needs Full Disk Access" / "None right now" in 12 `text_2`. Report rows carry one command box each (as 17.1).
+  - Rows, in order: Caches (`Library/Caches`), Logs (`Library/Logs`), Xcode build data (DerivedData, Archives, device support, Previews), Simulators (`Library/Developer/CoreSimulator`, command `xcrun simctl delete unavailable`), Virtual machines (`.colima`, `.lima`, `.android/avd`, Claude's `vm_bundles`), iPhone and iPad backups (`Library/Application Support/MobileSync/Backup`, "Needs Full Disk Access" when it cannot be read), Docker (Report only, shown when `.docker` exists; its disk image lives in Docker's app container, which Tidy never opens, so it is not measured; commands `docker system df` and `docker system prune`), Local Time Machine snapshots (Report only; the count and the newest date from `tmutil listlocalsnapshots /`; macOS does not report their size; command `tmutil listlocalsnapshots /`). Rows with nothing found are left out, except the snapshots row.
+  - Last row, no size, `Lock` glyph: "Everything else" / "macOS itself, other apps' private data, and Mail, Messages and Photos libraries. Tidy can't measure these without Full Disk Access, and it doesn't ask for it."
+  - Footer, 12 `text_2`: "Moving things to the Trash frees disk space, but macOS computes System Data its own way, so that figure may not drop by the same amount. Caches also grow back as apps use them."
+- **Measuring** is read-only (`walk::measure` with the denylist on) and runs once per opening, on a click, never at launch or in a check up. `tidyctl system-data` prints the same report.
+
+### 17.3 What Tidy never does (C31)
+
+- The last block on Check up, after the System Data row: the heading "What Tidy never does" 13/600 `text` 20 pt from the row above, then one `card_bg` card (radius 10, padding 14) holding a two-column grid of six items, 12 pt column gap, 10 pt row gap. Each item: a `Ban` icon 14 `text_3`, a title 13/500 `text`, and a note 12 `text_2`.
+- Items: "Ask for Full Disk Access" / "It works with what macOS gives every app."; "Run in the background" / "Nothing starts at login or runs after you quit."; "Use sudo or ask for your password" / "No helper tools and no admin rights."; "Delete outside the Trash" / "Everything it removes can be put back."; "Empty the Trash on its own" / "Emptying it is a separate step you confirm."; "Use scare tactics" / "No red badges, countdowns or alarm words."
+- Demo scenarios `cleanup-why`, `system-data`, `system-data-report` (the sheet scrolled to Docker and the snapshots) and `checkup-trust` (Check up scrolled to the end) cover the three surfaces in the screenshots.

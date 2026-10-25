@@ -10,6 +10,8 @@ use crate::app::{Screen, TidyModel};
 use crate::format;
 use crate::theme::{Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
+use crate::views::plain_button;
+use crate::views::trust::SYSDATA_LINK;
 
 /// The sidebar row for a screen: its icon.
 pub fn icon_for(screen: Screen) -> IconName {
@@ -64,6 +66,7 @@ impl TidyView {
             .map(|s| (s, figure_for(s, model)))
             .collect();
         let disk = model.disk.clone();
+        let link_model = self.model.clone();
 
         let drag = self.drag_area(
             div()
@@ -177,7 +180,19 @@ impl TidyView {
                                 .text_color(t.text_2)
                                 .whitespace_nowrap()
                                 .child(format::disk_line(disk.available, disk.total)),
-                        ),
+                        )
+                        // The button's own 6 pt padding sits outside the column, so its
+                        // text lines up with the disk line above it.
+                        .child(div().ml(px(-6.)).flex().child(plain_button(
+                            "sysdata-link",
+                            "sysdata-link".to_string(),
+                            SYSDATA_LINK,
+                            true,
+                            &t,
+                            move |_, cx| {
+                                link_model.update(cx, |m, cx| m.open_system_data(cx));
+                            },
+                        ))),
                 )
             })
     }

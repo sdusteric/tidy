@@ -8,8 +8,8 @@ The sidebar has five screens, in this order, reachable with Cmd-1 to Cmd-5:
 
 | Screen | Key | What it does |
 |---|---|---|
-| Check up | Cmd-1 | One button runs the cleanup scan, the Security checks and a memory snapshot, and shows three cards that link to their screens. Holds the opt-in weekly reminder. |
-| Cleanup | Cmd-2 | Space you can get back, in five groups. Safe items are ticked, Review items are not. |
+| Check up | Cmd-1 | One button runs the cleanup scan, the Security checks and a memory snapshot, and shows three cards that link to their screens. Holds the opt-in weekly reminder, the "What is System Data on this Mac?" sheet and the "What Tidy never does" list. |
+| Cleanup | Cmd-2 | Space you can get back, in five groups. Safe items are ticked, Review items are not. Every row's Details button (or Show Details in its "..." menu) says why it is offered, what rebuilds it, which checks guard the move, and the rule and path pattern that matched. |
 | Large files | Cmd-3 | The biggest files and folders, or the ones not opened lately, with Reveal and Move to Trash. |
 | Memory | Cmd-4 | A verdict from memory pressure, three figures (Pressure, Swap used, Compressed), a pressure graph and the top apps by memory with a polite Quit. The only screen that polls: every 2 seconds, and only while it is visible. |
 | Security | Cmd-5 | FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against your last check. It never asks for a permission. |
@@ -21,6 +21,8 @@ Cmd-R runs the current screen again.
 **Weekly reminder.** Off by default. Switching it on asks for notification permission at that moment, never at launch. Tidy then schedules one notification for 10:00 local time, 7 days after the last check up, and moves it after each check up and on each launch, so an ignored reminder never repeats. If permission is denied, the toggle shows a button to open Notifications settings.
 
 **Updates of Tidy itself.** Tidy updates itself with Sparkle (see Updates below). Tidy > Check for Updates… asks the update feed now. The Check up screen has an "Automatically install updates" switch under the weekly reminder (on by default): Tidy downloads updates by itself and installs them when it quits. With it off, Tidy still checks daily and asks first.
+
+**System Data.** "What is System Data on this Mac?" on Check up (and "What's in System Data?" under the disk figure) opens a sheet that measures, read-only and only when opened, the parts of System Data Tidy can see without Full Disk Access: caches, logs, Xcode build data, simulators, virtual machine disks and iPhone backups when readable. Docker and local Time Machine snapshots are Report only rows with commands to copy; Tidy only ever runs `tmutil listlocalsnapshots /` and never runs `docker`. The sheet never says Apple's System Data figure will shrink.
 
 **Check up and macOS updates.** `softwareupdate --list` is slow and asks Apple, so it runs only when you press Check now on the Security screen or tick Include macOS updates on Check up.
 
@@ -81,6 +83,8 @@ TIDY_HOME="$D/tidy" TIDY_SCAN_ROOT="$D/home" TIDY_TEST_NOW=<printed> cargo run -
 | `memory` | One memory snapshot with the apps grouped under their responsible app |
 | `security [--include-updates]` | The Security checks, saved as `data/security/<id>.json`, one file per run |
 | `checkup [--include-updates]` | Cleanup scan, Security checks and a memory snapshot; appends one entry to `data/checkups.jsonl` |
+| `explain ID` | Cleanup scan, then the details of one item: reason, what rebuilds it, checks, rule and pattern |
+| `system-data` | What Tidy can measure of System Data; lists local snapshots with `tmutil listlocalsnapshots /` (refused under `TIDY_HOME` unless `TIDY_TEST_COMMANDS` replays it) |
 
 The full offline acceptance run is `scripts/accept.sh offline`. It prints PASS, FAIL or SKIP for AC1 to AC9 (M1 and M2) and U1 (the update contract) and a summary; a full run has FAIL 0 and SKIP 0. AC6 and AC7 read this Mac, read-only (`sysctl`, `vm_stat`, `top`, `fdesetup`, `socketfilterfw`, `spctl`, `csrutil`, the launch agent folders and signatures); nothing is quit, signalled or asked for.
 
@@ -121,7 +125,7 @@ Tidy updates itself with Sparkle 2.10.0, following the shared contract in `../ap
 | `TIDY_NO_UPDATES=1` | Sparkle does not start: no update checks in this run. |
 | `SPARKLE_FRAMEWORK=<path>` | The Sparkle.framework that the build links and `scripts/bundle.sh` embeds (default `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`). |
 | `APP_UPDATES_PUBLISH=<path>` | The publish.sh that `scripts/release.sh` calls (default `../app-updates/tools/publish.sh`). |
-| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `security`, `security-first`, `security-items`. No core, no lock, no disk access. |
+| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`. No core, no lock, no disk access. |
 | `TIDY_DEMO_SHOT=<file.png>` | With the `shot-export` feature, renders the first frame offscreen at 2x and writes the PNG. |
 | `TIDY_DEMO_EXIT_SECS` | Demo self-quit, default 30. |
 | `TIDY_APPEARANCE=<light or dark>` | Forces the appearance. |
@@ -138,4 +142,5 @@ Without `TIDY_HOME`, the test hooks are ignored and logged, and destructive tidy
 - Never request notification permission or post a notification from a test or an agent run. Tests use the fake `Notifier`.
 - Never let Sparkle start or check for updates in a test or an agent run. Tests use `FakeUpdates`; set `TIDY_NO_UPDATES=1` for anything else that runs the app.
 - Never run `softwareupdate`. `SystemRunner` refuses it under `TIDY_HOME` and in tests.
+- Never run `tmutil` or `docker` against this Mac. `SystemRunner` refuses `tmutil` under `TIDY_HOME` and in tests (and every verb but `listlocalsnapshots /` always), and refuses `docker` always; tests replay `tmutil` output through `TIDY_TEST_COMMANDS` or `ReplayRunner`.
 - Security reads of the real Mac are read-only and limited to the status commands, the XProtect plist, the launch agent and daemon folders, `launchctl print`, signature checks of the programs those name, and a copy of Chrome's Secure Preferences.

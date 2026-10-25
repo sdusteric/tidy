@@ -321,6 +321,8 @@ pub mod metrics {
     pub const ACTION: f32 = 26.;
     /// The trailing area of a row that holds the hover actions.
     pub const TRAIL_W: f32 = 60.;
+    /// The hover actions of a Cleanup row: Details, Reveal and more (design 17.1).
+    pub const CLEAN_TRAIL_W: f32 = 86.;
     pub const BAR_H: f32 = 4.;
     pub const MAIN_W: f32 = 900.;
     pub const MAIN_H: f32 = 620.;

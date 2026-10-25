@@ -971,7 +971,11 @@ fn the_more_menu_has_never_show_and_copy_path(cx: &mut TestAppContext) {
     let entries = view.read_with(cx, |v, _| v.menu.as_ref().map(|m| m.entries.clone()));
     assert_eq!(
         entries,
-        Some(vec![MenuEntry::NeverShow, MenuEntry::CopyPath])
+        Some(vec![
+            MenuEntry::ShowDetails,
+            MenuEntry::NeverShow,
+            MenuEntry::CopyPath
+        ])
     );
     assert!(has(cx, "row-menu") && has(cx, "menu-never-show") && has(cx, "menu-copy-path"));
 
@@ -997,6 +1001,122 @@ fn the_more_menu_has_never_show_and_copy_path(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.menu.is_some()));
     keys(cx, "escape");
     assert!(view.read_with(cx, |v, _| v.menu.is_none()) && h.drain().is_empty());
+}
+
+// ---------- Trust surfaces (design 17) ----------
+
+#[::gpui::test]
+fn every_row_opens_its_details_safe_ones_included(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    hover(cx, "clean-row:r:a");
+    assert!(
+        has(cx, "clean-details:r:a"),
+        "the Details button is a hover action"
+    );
+    click(cx, "clean-details:r:a");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.details.as_ref().map(|d| d.id.clone())),
+        Some("r:a".to_string())
+    );
+    assert!(has(cx, "details") && has(cx, "details-verdict"));
+    // Opening details neither ticks nor moves anything.
+    assert!(h.drain().is_empty());
+    keys(cx, "escape");
+    assert!(view.read_with(cx, |v, _| v.details.is_none()));
+
+    // The same popover from the "..." menu, for a Review row.
+    hover(cx, "clean-row:r:b");
+    click(cx, "clean-more:r:b");
+    click(cx, "menu-show-details");
+    assert!(view.read_with(cx, |v, _| v.menu.is_none()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.details.as_ref().map(|d| d.id.clone())),
+        Some("r:b".to_string())
+    );
+    assert!(has(cx, "details"));
+    assert!(h.drain().is_empty());
+}
+
+#[::gpui::test]
+fn the_system_data_sheet_measures_on_open_and_only_copies_commands(cx: &mut TestAppContext) {
+    use tidy_core::sysdata::{CopyCommand, SysKind, SysRow, SysSize, SystemDataReport};
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    h.drain();
+    assert!(has(cx, "never"), "Check up lists what Tidy never does");
+    assert!(has(cx, "sysdata-open"));
+    assert!(!has(cx, "system-data"));
+
+    click(cx, "sysdata-open");
+    assert!(model(cx).read_with(cx, |m, _| m.system_data.open && m.system_data.measuring));
+    let reply = match h.drain().into_iter().next() {
+        Some(Command::MeasureSystemData { reply }) => reply,
+        other => panic!("{other:?}"),
+    };
+    assert!(has(cx, "system-data"));
+    let report = SystemDataReport {
+        at: NOW,
+        rows: vec![
+            SysRow {
+                kind: SysKind::Caches,
+                title: "Caches".into(),
+                note: "n".into(),
+                size: SysSize::Measured(3 * GB),
+                report_only: false,
+                commands: vec![],
+            },
+            SysRow {
+                kind: SysKind::Docker,
+                title: "Docker".into(),
+                note: "n".into(),
+                size: SysSize::NotMeasured,
+                report_only: true,
+                commands: vec![CopyCommand {
+                    label: "See what Docker uses".into(),
+                    command: "docker system df".into(),
+                }],
+            },
+        ],
+    };
+    reply.send(report).unwrap();
+    cx.run_until_parked();
+    assert!(model(cx).read_with(cx, |m, _| !m.system_data.measuring));
+    assert!(has(cx, "sysdata-row:caches") && has(cx, "sysdata-row:docker"));
+    assert!(has(cx, "sysdata-row:rest"), "the rest has its own row");
+    assert!(has(cx, "sysdata-footer"));
+
+    click(cx, "copy:docker-0");
+    let clip = cx.read_from_clipboard().and_then(|c| c.text());
+    assert_eq!(clip.as_deref(), Some("docker system df"));
+    assert!(h.drain().is_empty(), "copying runs nothing");
+
+    keys(cx, "escape");
+    assert!(model(cx).read_with(cx, |m, _| !m.system_data.open));
+}
+
+#[::gpui::test]
+fn the_sidebar_link_opens_the_system_data_sheet(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    model(cx).update(cx, |m, cx| {
+        m.disk = Some(crate::macos::DiskInfo {
+            name: "Macintosh HD".into(),
+            total: 1_000 * GB,
+            available: 212 * GB,
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    h.drain();
+    click(cx, "sysdata-link");
+    assert!(model(cx).read_with(cx, |m, _| m.system_data.open));
+    assert!(matches!(
+        h.drain().as_slice(),
+        [Command::MeasureSystemData { .. }]
+    ));
+    click(cx, "sysdata-close");
+    assert!(model(cx).read_with(cx, |m, _| !m.system_data.open));
 }
 
 #[::gpui::test]

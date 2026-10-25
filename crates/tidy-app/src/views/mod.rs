@@ -9,6 +9,7 @@ pub mod main_window;
 pub mod memory;
 pub mod security;
 pub mod sidebar;
+pub mod trust;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;

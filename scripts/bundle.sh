@@ -5,7 +5,8 @@
 # Test overrides (all optional):
 #   TIDY_BUNDLE_BIN  use this binary instead of running cargo build
 #   INSTALL_DIR      install target dir (default: $HOME/Applications)
-#   SIGN_ID          signing identity SHA-1 (default: the Apple Development cert)
+#   SIGN_ID          signing identity SHA-1 or name (default: the Developer ID Application cert of team
+#                    8N9KUZLT8N when the keychain has one, else the Apple Development cert)
 #   TIDY_BUNDLE_ID   CFBundleIdentifier (default dev.sdusteric.tidy). scripts/shots-bundle.sh
 #                    gives the screenshot-only bundle its own id, so LaunchServices never
 #                    confuses it with an installed Tidy.
@@ -34,8 +35,16 @@ done
 
 BIN_NAME=tidy
 BUNDLE_ID="${TIDY_BUNDLE_ID:-dev.sdusteric.tidy}"
-# SHA-1 of the cert, not the name: three certs share the CN on this Mac and two are expired.
-SIGN_ID="${SIGN_ID:-1EDDD87FAAACC222585E8C76E983DB798EC38331}"
+# Signing identity. SIGN_ID (a SHA-1 or a name) overrides. Otherwise: the Developer ID Application
+# certificate of team 8N9KUZLT8N when it is in the keychain, else the Apple Development
+# certificate. Picked by SHA-1, not name: several certs can share the CN and some are expired.
+TEAM_ID=8N9KUZLT8N
+APPLE_DEV_SHA=1EDDD87FAAACC222585E8C76E983DB798EC38331
+IDENTITIES="$(security find-identity -v -p codesigning)"
+if [ -z "${SIGN_ID:-}" ]; then
+  SIGN_ID="$(awk -v team="($TEAM_ID)" '/"Developer ID Application: / && index($0, team) { print $2; exit }' <<<"$IDENTITIES")"
+  SIGN_ID="${SIGN_ID:-$APPLE_DEV_SHA}"
+fi
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
@@ -56,10 +65,18 @@ SPARKLE="${SPARKLE_FRAMEWORK:-$REPO/../app-updates/vendor/Sparkle-2.10.0/Sparkle
 }
 
 # Check the signing identity before spending time on a build.
-if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
-  echo "signing identity not valid; renew the Apple Development certificate in Xcode" >&2
+SIGN_LINE="$(grep -F -- "$SIGN_ID" <<<"$IDENTITIES" | head -n 1 || true)"
+if [ -z "$SIGN_LINE" ]; then
+  echo "signing identity $SIGN_ID is not valid; renew the Apple Development certificate in Xcode" >&2
   exit 1
 fi
+# A secure timestamp needs the network and Apple's server; notarization requires it. The Apple
+# Development fallback skips it so a build works offline.
+case "$SIGN_LINE" in
+  *'"Developer ID Application: '*) TIMESTAMP=--timestamp ;;
+  *) TIMESTAMP=--timestamp=none ;;
+esac
+echo "signing with:${SIGN_LINE#*)}"
 
 if [ -n "${TIDY_BUNDLE_BIN:-}" ]; then
   BIN="$TIDY_BUNDLE_BIN"
@@ -103,10 +120,10 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$SET" -o "$OUT/Contents/Resources/AppIcon.icns"
 
-# Sign inside out with the same certificate: Sparkle's helpers, then the framework, then the
-# app. Sparkle's parts keep the hardened runtime they ship with (Sparkle's documented commands)
-# and get no entitlements; Autoupdate's application-identifier is dropped on purpose, since it
-# would need a provisioning profile. No --deep.
+# Sign inside out with one identity, all with the hardened runtime: Sparkle's helpers, then the
+# framework, then the app. Sparkle's parts get no entitlements; Autoupdate's application-identifier
+# is dropped on purpose, since it would need a provisioning profile. No --deep.
+sign() { codesign --force --sign "$SIGN_ID" "$TIMESTAMP" --options runtime "$@"; }
 FW="$OUT/Contents/Frameworks/Sparkle.framework"
 for part in \
   "$FW/Versions/B/XPCServices/Installer.xpc" \
@@ -114,12 +131,12 @@ for part in \
   "$FW/Versions/B/Updater.app" \
   "$FW/Versions/B/Autoupdate" \
   "$FW"; do
-  codesign --force --sign "$SIGN_ID" --timestamp=none -o runtime "$part"
+  sign "$part"
 done
-# The app: Apple Development cert, no hardened runtime, no entitlements, as before.
-# --timestamp=none needs no network. The designated requirement keys on bundle id and cert CN,
-# so TCC grants survive rebuilds.
-codesign --force --sign "$SIGN_ID" --timestamp=none "$OUT"
+# The app, with resources/Tidy.entitlements. The designated requirement keys on the bundle id and
+# the certificate, so TCC grants survive rebuilds with the same certificate (they reset once when
+# the certificate changes).
+sign --entitlements "$REPO/resources/Tidy.entitlements" "$OUT"
 codesign --verify --deep --strict --verbose=2 "$OUT"
 
 if [ "$INSTALL" = 1 ]; then

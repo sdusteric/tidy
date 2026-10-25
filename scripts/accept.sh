@@ -421,14 +421,14 @@ ac5() {
     bad="$bad [plutil failed]"
   fi
 
-  # The designated requirement names the bundle id and the Apple Development certificate.
+  # The designated requirement names the bundle id and the signing certificate (Apple Development, or Developer ID once it exists).
   local dr
   dr=$(codesign -d -r- "$app" 2>&1)
   if printf '%s' "$dr" | grep -q 'identifier "dev.sdusteric.tidy"' &&
-    printf '%s' "$dr" | grep -q 'Apple Development'; then
+    printf '%s' "$dr" | grep -Eq 'Apple Development|Developer ID Application|1\.2\.840\.113635\.100\.6\.1\.13'; then
     detail="$detail designated-requirement"
   else
-    bad="$bad [designated requirement lacks dev.sdusteric.tidy or Apple Development: $dr]"
+    bad="$bad [designated requirement lacks dev.sdusteric.tidy or an Apple Development or Developer ID certificate: $dr]"
   fi
 
   # Info.plist content: executable, id, minimum system, the three folder strings, and none of

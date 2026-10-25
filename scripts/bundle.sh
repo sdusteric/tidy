@@ -11,6 +11,12 @@
 #                    confuses it with an installed Tidy.
 #   CARGO_TARGET_DIR cargo target dir (default: target in the repo). The bundle goes to
 #                    <target dir>/bundle/Tidy.app.
+#   SPARKLE_FRAMEWORK the Sparkle.framework to embed (default: the app-updates repo next to
+#                    this one, ../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework). The
+#                    tidy-app build script links the same path.
+#
+# Versions: CFBundleShortVersionString is the VERSION file at the repo root, CFBundleVersion is
+# the UTC build time YYYYMMDDHHMM (app-updates/CONTRACT.md).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,10 +42,18 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO/$TARGET_DIR" ;; esac
 OUT="$TARGET_DIR/bundle/Tidy.app"
 
-# Version from [workspace.package] in the root Cargo.toml.
-VERSION="$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && $1=="version"{gsub(/"/,"",$3); print $3; exit}' "$REPO/Cargo.toml")"
-[ -n "$VERSION" ] || { echo "could not read version from Cargo.toml" >&2; exit 1; }
-BUILD="$(date +%Y%m%d%H%M)"
+# Short version from the VERSION file (semver), build number from the UTC clock.
+[ -f "$REPO/VERSION" ] || { echo "missing $REPO/VERSION" >&2; exit 1; }
+VERSION="$(tr -d '[:space:]' < "$REPO/VERSION")"
+printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "VERSION is not semver: $VERSION" >&2; exit 1; }
+BUILD="$(date -u +%Y%m%d%H%M)"
+
+# Sparkle.framework, embedded in Contents/Frameworks.
+SPARKLE="${SPARKLE_FRAMEWORK:-$REPO/../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework}"
+[ -f "$SPARKLE/Versions/B/Sparkle" ] || {
+  echo "Sparkle.framework not found at $SPARKLE (check out app-updates next to this repo or set SPARKLE_FRAMEWORK)" >&2
+  exit 1
+}
 
 # Check the signing identity before spending time on a build.
 if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
@@ -62,8 +76,10 @@ fi
 # Only ever delete the bundle dir inside the target dir.
 case "$OUT" in */bundle/Tidy.app) ;; *) echo "refusing odd output path $OUT" >&2; exit 1 ;; esac
 if [ -d "$OUT" ]; then rm -rf "$OUT"; fi
-mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
+mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources" "$OUT/Contents/Frameworks"
 cp "$BIN" "$OUT/Contents/MacOS/$BIN_NAME"
+# ditto keeps the framework's symlinks (Versions/Current, the top-level links).
+ditto --norsrc --noextattr "$SPARKLE" "$OUT/Contents/Frameworks/Sparkle.framework"
 
 # Info.plist
 sed -e "s|@BUNDLE_ID@|$BUNDLE_ID|" -e "s|@VERSION@|$VERSION|" -e "s|@BUILD@|$BUILD|" \
@@ -87,11 +103,24 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$SET" -o "$OUT/Contents/Resources/AppIcon.icns"
 
-# Sign: Apple Development cert, no hardened runtime, no entitlements, no --deep.
+# Sign inside out with the same certificate: Sparkle's helpers, then the framework, then the
+# app. Sparkle's parts keep the hardened runtime they ship with (Sparkle's documented commands)
+# and get no entitlements; Autoupdate's application-identifier is dropped on purpose, since it
+# would need a provisioning profile. No --deep.
+FW="$OUT/Contents/Frameworks/Sparkle.framework"
+for part in \
+  "$FW/Versions/B/XPCServices/Installer.xpc" \
+  "$FW/Versions/B/XPCServices/Downloader.xpc" \
+  "$FW/Versions/B/Updater.app" \
+  "$FW/Versions/B/Autoupdate" \
+  "$FW"; do
+  codesign --force --sign "$SIGN_ID" --timestamp=none -o runtime "$part"
+done
+# The app: Apple Development cert, no hardened runtime, no entitlements, as before.
 # --timestamp=none needs no network. The designated requirement keys on bundle id and cert CN,
 # so TCC grants survive rebuilds.
 codesign --force --sign "$SIGN_ID" --timestamp=none "$OUT"
-codesign --verify --strict --verbose=2 "$OUT"
+codesign --verify --deep --strict --verbose=2 "$OUT"
 
 if [ "$INSTALL" = 1 ]; then
   DEST_DIR="${INSTALL_DIR:-$HOME/Applications}"

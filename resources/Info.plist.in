@@ -17,6 +17,13 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
   <key>NSSupportsSuddenTermination</key><false/>
+  <!-- Sparkle auto-update (app-updates/CONTRACT.md). The user's choices live in Sparkle's own
+       defaults; these are the starting values. -->
+  <key>SUFeedURL</key><string>https://sdusteric.github.io/app-updates/tidy/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>PMaW+8sZRzOkfIwy1KBGk0CHTVoN49FE9o8gUlNGdZc=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
   <key>NSDocumentsFolderUsageDescription</key>
   <string>Tidy measures the size of folders in Documents to find large files and old project build folders.</string>
   <key>NSDesktopFolderUsageDescription</key>

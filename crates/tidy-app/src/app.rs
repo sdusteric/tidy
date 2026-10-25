@@ -33,6 +33,7 @@ actions!(
     tidy,
     [
         Quit,
+        CheckForUpdates,
         CloseWindow,
         GoCheckup,
         GoCleanup,
@@ -1524,7 +1525,12 @@ pub fn init(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
             name: "Tidy".into(),
-            items: vec![MenuItem::action("Quit Tidy", Quit)],
+            items: vec![
+                // Greyed out unless the updater runs (crate::updates::install adds its handler).
+                MenuItem::action("Check for Updates\u{2026}", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Quit Tidy", Quit),
+            ],
             disabled: false,
         },
         Menu {

@@ -20,6 +20,8 @@ Cmd-R runs the current screen again.
 
 **Weekly reminder.** Off by default. Switching it on asks for notification permission at that moment, never at launch. Tidy then schedules one notification for 10:00 local time, 7 days after the last check up, and moves it after each check up and on each launch, so an ignored reminder never repeats. If permission is denied, the toggle shows a button to open Notifications settings.
 
+**Updates of Tidy itself.** Tidy updates itself with Sparkle (see Updates below). Tidy > Check for Updates… asks the update feed now. The Check up screen has an "Automatically install updates" switch under the weekly reminder (on by default): Tidy downloads updates by itself and installs them when it quits. With it off, Tidy still checks daily and asks first.
+
 **Check up and macOS updates.** `softwareupdate --list` is slow and asks Apple, so it runs only when you press Check now on the Security screen or tick Include macOS updates on Check up.
 
 It is a Rust + GPUI app built on the same stack and look as Haul. The design document is the contract: [docs/superpowers/specs/2026-10-23-tidy-design.md](docs/superpowers/specs/2026-10-23-tidy-design.md).
@@ -80,7 +82,7 @@ TIDY_HOME="$D/tidy" TIDY_SCAN_ROOT="$D/home" TIDY_TEST_NOW=<printed> cargo run -
 | `security [--include-updates]` | The Security checks, saved as `data/security/<id>.json`, one file per run |
 | `checkup [--include-updates]` | Cleanup scan, Security checks and a memory snapshot; appends one entry to `data/checkups.jsonl` |
 
-The full offline acceptance run is `scripts/accept.sh offline`. It prints PASS, FAIL or SKIP for AC1 to AC9 (M1 and M2) and a summary; a full run has FAIL 0 and SKIP 0. AC6 and AC7 read this Mac, read-only (`sysctl`, `vm_stat`, `top`, `fdesetup`, `socketfilterfw`, `spctl`, `csrutil`, the launch agent folders and signatures); nothing is quit, signalled or asked for.
+The full offline acceptance run is `scripts/accept.sh offline`. It prints PASS, FAIL or SKIP for AC1 to AC9 (M1 and M2) and U1 (the update contract) and a summary; a full run has FAIL 0 and SKIP 0. AC6 and AC7 read this Mac, read-only (`sysctl`, `vm_stat`, `top`, `fdesetup`, `socketfilterfw`, `spctl`, `csrutil`, the launch agent folders and signatures); nothing is quit, signalled or asked for.
 
 Screenshots of the five screens, light and dark, 1800 x 1240 px, without a window or a change of the frontmost app:
 
@@ -89,6 +91,19 @@ scripts/shots-bundle.sh && SHOTS_RENDER=1 scripts/shots.sh checkup memory securi
 ```
 
 They are written to `docs/app-shots/<scenario>-<light|dark>.png`. With no arguments `scripts/shots.sh` shoots the same five.
+
+## Updates
+
+Tidy updates itself with Sparkle 2.10.0, following the shared contract in `../app-updates/CONTRACT.md` (the app-updates repo next to this one).
+
+- The framework is `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`, or the path in `SPARKLE_FRAMEWORK`. `crates/tidy-app/build.rs` links it into the `tidy` binary only (rpath `@executable_path/../Frameworks`; debug builds also get an rpath to the framework's own folder so tests and `cargo run` start). The build stops with a message when the framework is missing. tidy-core and `tidyctl` never link it.
+- `scripts/bundle.sh` copies it into `Tidy.app/Contents/Frameworks` with `ditto` and signs inside out with the same certificate: `Installer.xpc`, `Downloader.xpc`, `Updater.app`, `Autoupdate`, the framework, then the app. The app's own signature is unchanged (no hardened runtime, no entitlements). `codesign --verify --deep --strict` must pass.
+- Info.plist has `SUFeedURL` (`https://sdusteric.github.io/app-updates/tidy/appcast.xml`), `SUPublicEDKey` (the contract key), `SUEnableAutomaticChecks`, `SUAutomaticallyUpdate` and `SUScheduledCheckInterval` (86400).
+- `CFBundleShortVersionString` is the `VERSION` file at the repo root (semver; keep it equal to the version in `Cargo.toml`). `CFBundleVersion` is the UTC build time `YYYYMMDDHHMM`.
+- The app starts one `SPUStandardUpdaterController` on the main thread after launch and keeps it while it runs (`crates/tidy-app/src/updates.rs`). Sparkle keeps the user's choices in its own defaults; Tidy saves nothing for it.
+- The updater never starts with `TIDY_NO_UPDATES=1`, `TIDY_BACKGROUND`, `TIDY_DEMO`, `TIDY_DEMO_SHOT`, `SHOTS_RENDER`, `TIDY_HOME`, in unit tests, or outside a bundle that has `SUFeedURL`. Check for Updates… is then greyed out and the Check up row shows "Off". `updates::decide` is that rule and has its own tests.
+- `scripts/check-updates.sh <Tidy.app> <tidyctl>` checks a bundle against the contract: the framework is there, `SUPublicEDKey` is the contract key, `otool -L` shows `@rpath/Sparkle.framework/Versions/B/Sparkle` for the app and no Sparkle for `tidyctl`, and `codesign --verify --deep --strict` passes. `scripts/accept.sh offline` runs it as U1, right after the AC5 bundle.
+- `scripts/release.sh [--notes notes.md] [--dry-run <dir>]` runs `scripts/accept.sh offline` (with `ACCEPT_SKIP_BUNDLE=1`, never `ACCEPT_SKIP_GATES`), builds the release bundle and a release `tidyctl`, runs `scripts/check-updates.sh`, then calls `../app-updates/tools/publish.sh --app tidy --bundle <Tidy.app>` with the notes and the dry-run folder. `APP_UPDATES_PUBLISH` points it at another publish.sh. Without `--dry-run` it publishes for real.
 
 ## Environment variables
 
@@ -102,7 +117,10 @@ They are written to `docs/app-shots/<scenario>-<light|dark>.png`. With no argume
 | `TIDY_TEST_MEMORY=<file.json>` | A fake process table and vm figures that replace the real memory probe. `tidy-fixture-home` writes `memory.json`. Only under `TIDY_HOME`. |
 | `TIDY_TEST_TZ=<POSIX TZ rule>` | A fixed time zone for the reminder date, for example `PST8PDT,M3.2.0,M11.1.0`. Only under `TIDY_HOME`. |
 | `TIDY_TEST_NO_SPOTLIGHT=1` | Last-use dates from file times only. The default under `TIDY_HOME`; set it to `0` to allow Spotlight. |
-| `TIDY_BACKGROUND=1` | The app never activates and never shows a window. Forced on by `TIDY_DEMO`. |
+| `TIDY_BACKGROUND=1` | The app never activates and never shows a window. Forced on by `TIDY_DEMO`. Sparkle does not start. |
+| `TIDY_NO_UPDATES=1` | Sparkle does not start: no update checks in this run. |
+| `SPARKLE_FRAMEWORK=<path>` | The Sparkle.framework that the build links and `scripts/bundle.sh` embeds (default `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`). |
+| `APP_UPDATES_PUBLISH=<path>` | The publish.sh that `scripts/release.sh` calls (default `../app-updates/tools/publish.sh`). |
 | `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `security`, `security-first`, `security-items`. No core, no lock, no disk access. |
 | `TIDY_DEMO_SHOT=<file.png>` | With the `shot-export` feature, renders the first frame offscreen at 2x and writes the PNG. |
 | `TIDY_DEMO_EXIT_SECS` | Demo self-quit, default 30. |
@@ -118,5 +136,6 @@ Without `TIDY_HOME`, the test hooks are ignored and logged, and destructive tidy
 - Never show a window or take focus. Screenshots render offscreen with `SHOTS_RENDER=1 scripts/shots.sh`.
 - Never quit, terminate or signal an app or process you did not start. Tests use the fake `Terminator`; a test that needs a real process spawns its own `/bin/sleep` and acts on that PID only.
 - Never request notification permission or post a notification from a test or an agent run. Tests use the fake `Notifier`.
+- Never let Sparkle start or check for updates in a test or an agent run. Tests use `FakeUpdates`; set `TIDY_NO_UPDATES=1` for anything else that runs the app.
 - Never run `softwareupdate`. `SystemRunner` refuses it under `TIDY_HOME` and in tests.
 - Security reads of the real Mac are read-only and limited to the status commands, the XProtect plist, the launch agent and daemon folders, `launchctl print`, signature checks of the programs those name, and a copy of Chrome's Secure Preferences.

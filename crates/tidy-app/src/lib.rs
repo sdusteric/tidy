@@ -9,6 +9,7 @@ pub mod format;
 pub mod macos;
 pub mod motion;
 pub mod theme;
+pub mod updates;
 pub mod views;
 
 #[cfg(test)]

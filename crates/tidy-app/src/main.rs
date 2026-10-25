@@ -262,6 +262,9 @@ fn run_app() {
         gpui_kit::init(cx);
         tidy_app::init(cx);
         tidy_app::install(rt, core, settings, clock, cached_large, &home, events, cx);
+        // Sparkle, once the app has finished launching. Off in background, shot and test runs
+        // and with TIDY_NO_UPDATES=1 (see tidy_app::updates::decide).
+        tidy_app::updates::start(cx);
         // `kill <pid>` quits the same way as Cmd-Q.
         tidy_app::quit_on_signals(cx);
 
@@ -302,6 +305,11 @@ fn run_demo(scenario: tidy_app::demo::Scenario, rt: tokio::runtime::Runtime) {
         apply_appearance_override(cx);
         gpui_kit::init(cx);
         tidy_app::init(cx);
+        // Never starts Sparkle: Check up shows a stand-in with Sparkle's defaults.
+        tidy_app::updates::install(
+            std::rc::Rc::new(tidy_app::updates::FakeUpdates::new(true, true)),
+            cx,
+        );
         // Never activates: the window is created hidden.
         tidy_app::demo::start(scenario, rt, cx);
     });

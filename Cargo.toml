@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/tidy-core", "crates/tidy-app", "crates/tidy-cli", "crates/tidy-fixtures"]
 
-# scripts/bundle.sh reads this version for CFBundleShortVersionString.
+# CFBundleShortVersionString comes from the VERSION file (scripts/bundle.sh); keep the two equal.
 [workspace.package]
 edition = "2024"
 version = "0.1.0"

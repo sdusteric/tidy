@@ -2814,6 +2814,54 @@ fn permission_is_not_asked_at_launch_or_when_visiting_check_up(cx: &mut TestAppC
 }
 
 #[::gpui::test]
+fn the_auto_update_switch_drives_sparkle_and_saves_nothing(cx: &mut TestAppContext) {
+    use crate::updates::{FakeUpdates, install};
+
+    let fake = Rc::new(FakeUpdates::new(true, true));
+    let mut h = setup_with(cx, Settings::default());
+    cx.update(|cx| install(fake.clone(), cx));
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    h.drain();
+
+    // The row sits under the weekly reminder.
+    let reminder = bounds(cx, "reminder").expect("reminder row");
+    let row = bounds(cx, "auto-update").expect("auto update row");
+    assert!(reminder.bottom() <= row.top());
+    assert!(has(cx, "auto-update-toggle") && !has(cx, "auto-update-off"));
+
+    // Off: Sparkle stops downloading by itself but keeps its daily check. On again: both.
+    click(cx, "auto-update-toggle");
+    assert!(!fake.automatic_downloads.get());
+    assert!(fake.automatic_checks.get());
+    fake.automatic_checks.set(false);
+    click(cx, "auto-update-toggle");
+    assert!(fake.automatic_downloads.get() && fake.automatic_checks.get());
+    // Sparkle keeps the choice in its own defaults: nothing goes to the core.
+    assert!(h.drain().is_empty());
+    assert_eq!(h.notifier.requests.get(), 0);
+
+    // The menu item asks the updater to check.
+    cx.dispatch_action(crate::app::CheckForUpdates);
+    cx.run_until_parked();
+    assert_eq!(fake.checks.get(), 1);
+}
+
+#[::gpui::test]
+fn without_an_updater_check_up_says_off_and_check_for_updates_is_unavailable(
+    cx: &mut TestAppContext,
+) {
+    let (_h, _view, cx) = on_checkup(cx, Settings::default());
+    // Unit tests never start Sparkle, so there is no updater and no handler for the menu item.
+    cx.update(|_, cx| crate::updates::start(cx));
+    assert!(cx.update(|_, cx| crate::updates::control(cx).is_none()));
+    assert!(!cx.update(|_, cx| cx.is_action_available(&crate::app::CheckForUpdates)));
+    cx.run_until_parked();
+    assert!(has(cx, "auto-update-off"));
+    assert!(!has(cx, "auto-update-toggle"));
+}
+
+#[::gpui::test]
 fn switching_the_reminder_on_asks_once_then_schedules_the_single_notification(
     cx: &mut TestAppContext,
 ) {

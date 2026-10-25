@@ -34,6 +34,14 @@ pub const REMINDER_DENIED: &str = "Notifications are off for Tidy";
 pub const REMINDER_DENIED_NOTE: &str =
     "Turn them on in System Settings and Tidy will schedule the reminder.";
 pub const REMINDER_UNAVAILABLE: &str = "Reminders need the installed Tidy app.";
+/// The automatic update row under the reminder. Sparkle keeps the choice in its own defaults,
+/// not in Tidy's settings.
+pub const AUTO_UPDATE_TITLE: &str = "Automatically install updates";
+pub const AUTO_UPDATE_ON_NOTE: &str = "Tidy checks daily and installs updates when it quits.";
+pub const AUTO_UPDATE_OFF_NOTE: &str = "Tidy checks daily and asks before installing.";
+/// No updater in this run: TIDY_NO_UPDATES, a test or screenshot run, or not the app bundle.
+pub const AUTO_UPDATE_OFF_LABEL: &str = "Off";
+pub const AUTO_UPDATE_UNAVAILABLE: &str = "This copy of Tidy does not update itself.";
 pub const HERO_NOTE: &str =
     "Cleanup, security and memory in one pass. Nothing is cleaned until you choose.";
 
@@ -805,7 +813,6 @@ impl TidyView {
             .debug_selector(|| "reminder".to_string())
             .mx(px(20.))
             .mt(px(12.))
-            .mb(px(20.))
             .px(px(14.))
             .py(px(12.))
             .rounded(px(10.))
@@ -888,6 +895,77 @@ impl TidyView {
                     ))
             }));
 
+        // Automatic updates, the same kind of row under the reminder. Sparkle saves the choice.
+        let auto_update = crate::updates::control(cx).map(|c| crate::updates::auto_install(&*c));
+        let update_slide = (!reduce_motion && just_changed(self.updates_flipped.map(|(at, _)| at)))
+            .then(|| self.updates_flipped.map_or(0, |(_, g)| g));
+        let update_note = match auto_update {
+            Some(true) => AUTO_UPDATE_ON_NOTE,
+            Some(false) => AUTO_UPDATE_OFF_NOTE,
+            None => AUTO_UPDATE_UNAVAILABLE,
+        };
+        let update_control = match auto_update {
+            Some(on) => {
+                let flip_view = view.clone();
+                switch("auto-update-toggle", on, update_slide, t, move |_, cx| {
+                    let _ = flip_view.update(cx, |v, cx| {
+                        v.updates_flipped = Some((std::time::Instant::now(), v.card_generation));
+                        v.card_generation += 1;
+                        cx.notify();
+                    });
+                    if let Some(c) = crate::updates::control(cx) {
+                        crate::updates::set_auto_install(&*c, !on);
+                    }
+                })
+                .into_any_element()
+            }
+            None => div()
+                .debug_selector(|| "auto-update-off".to_string())
+                .flex_none()
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(t.text_2)
+                .child(AUTO_UPDATE_OFF_LABEL)
+                .into_any_element(),
+        };
+        let updates = div()
+            .debug_selector(|| "auto-update".to_string())
+            .mx(px(20.))
+            .mt(px(12.))
+            .mb(px(20.))
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(px(10.))
+            .bg(t.card_bg())
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(17.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.text)
+                            .child(AUTO_UPDATE_TITLE),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "auto-update-note".to_string())
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(t.text_2)
+                            .child(update_note),
+                    ),
+            )
+            .child(update_control);
+
         let body = div()
             .id("checkup-body")
             .debug_selector(|| "checkup-body".to_string())
@@ -898,7 +976,8 @@ impl TidyView {
             .child(summary)
             .child(actions)
             .child(card_row)
-            .child(reminder);
+            .child(reminder)
+            .child(updates);
 
         // The reminder row already says when it fires, so the status bar has nothing to add.
         let status = self.status_bar(t, String::new(), None);
@@ -983,6 +1062,10 @@ mod tests {
             REMINDER_DENIED,
             REMINDER_DENIED_NOTE,
             REMINDER_UNAVAILABLE,
+            AUTO_UPDATE_TITLE,
+            AUTO_UPDATE_ON_NOTE,
+            AUTO_UPDATE_OFF_NOTE,
+            AUTO_UPDATE_UNAVAILABLE,
             HERO_NOTE,
         ] {
             assert!(!s.contains('\u{2014}'), "{s}");

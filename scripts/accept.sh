@@ -15,10 +15,12 @@
 #   AC7  Security: parser, signer and diff tests, tidyctl security on this Mac (read-only)
 #   AC8  Check up: tidyctl checkup on the fixture home, reminder math and permission tests
 #   AC9  App: sidebar order and Cmd-1 to Cmd-5, long paths, shots of all five screens
+#   U1   update contract on the bundle of AC5: Sparkle embedded and signed, the contract key,
+#        only the app links Sparkle (scripts/check-updates.sh)
 #
 # Environment:
-#   ACCEPT_SKIP_BUNDLE=1  skip AC5 and the shots of AC9 (they sign with the keychain and run
-#                         release builds). They then show as SKIP.
+#   ACCEPT_SKIP_BUNDLE=1  skip AC5, U1 and the shots of AC9 (they sign with the keychain and
+#                         run release builds). They then show as SKIP.
 #   ACCEPT_SKIP_GATES=1   skip AC1 (the full build and test run), for quick runs while
 #                         developing. AC1 then shows as SKIP. tidyctl and tidy-fixture-home are
 #                         still built, because the other criteria need them.
@@ -41,7 +43,7 @@
 . "$(dirname "${BASH_SOURCE[0]}")/accept-lib.sh"
 
 usage() {
-  sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 GROUP=${1:-}
@@ -388,6 +390,7 @@ ac5() {
   clear_tidy_env
   if [ -n "${ACCEPT_SKIP_BUNDLE:-}" ]; then
     skip AC5 "ACCEPT_SKIP_BUNDLE is set: the signed bundle and the screenshots were not made"
+    skip U1 "ACCEPT_SKIP_BUNDLE is set"
     return
   fi
   local app="$TARGET_DIR/bundle/Tidy.app"
@@ -397,7 +400,15 @@ ac5() {
 
   if ! run_logged bundle "$REPO/scripts/bundle.sh" --release; then
     fail AC5 "bundle.sh --release failed, see $LAST_LOG"
+    fail U1 "no bundle to check"
     return
+  fi
+  # U1: Sparkle is embedded and signed, the key and feed are the contract's, and only the app
+  # links it (tidyctl from the AC1 build does not).
+  if run_logged check-updates "$REPO/scripts/check-updates.sh" "$app" "$TIDYCTL"; then
+    pass U1 "update contract: framework, SUPublicEDKey, app links Sparkle, tidyctl does not, codesign --deep"
+  else
+    fail U1 "update contract: $(grep '^FAIL' "$LAST_LOG" | tr '\n' ' ')"
   fi
   if run_logged codesign codesign --verify --strict --verbose=2 "$app"; then
     detail="$detail codesign-verify"

@@ -53,6 +53,8 @@ pub struct TidyView {
     pub(crate) card_generation: usize,
     /// When the reminder switch was last clicked, with the generation keying the knob slide.
     pub(crate) switch_flipped: Option<(std::time::Instant, usize)>,
+    /// The same for the automatic update switch.
+    pub(crate) updates_flipped: Option<(std::time::Instant, usize)>,
     /// Set on a mouse-down on empty toolbar space; the first move then drags the window.
     should_move: bool,
     /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
@@ -150,6 +152,7 @@ impl TidyView {
             card_changed: [None; 3],
             card_generation: 0,
             switch_flipped: None,
+            updates_flipped: None,
             should_move: false,
             window_visible: window.is_visible(),
             _subs: vec![observed, appearance, activation, visibility],

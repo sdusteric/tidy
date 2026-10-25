@@ -312,7 +312,7 @@ impl TidyView {
             .flex_none()
             .h(px(metrics::TOOLBAR_H))
             .pl(px(20.))
-            .pr(px(12.))
+            .pr(px(20.))
             .flex()
             .items_center()
             .gap(px(12.))

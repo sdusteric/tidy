@@ -770,7 +770,7 @@ impl TidyView {
                 self.card(
                     t,
                     "card-cleanup",
-                    IconName::Sparkles,
+                    IconName::BrushCleaning,
                     "Cleanup",
                     &cards.cleanup,
                     Screen::Cleanup,

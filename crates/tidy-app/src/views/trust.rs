@@ -241,7 +241,7 @@ pub const NEVER: [(&str, &str); 6] = [
     ),
     (
         "Delete outside the Trash",
-        "Everything it removes can be put back.",
+        "Items go to the Trash. You can put them back until you empty it.",
     ),
     (
         "Empty the Trash on its own",

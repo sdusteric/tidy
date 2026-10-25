@@ -8,7 +8,7 @@ use gpui_kit::{AssetSource, Result, SharedString};
 icon_assets!(
     pub TidyIcons,
     [
-        Sparkles,
+        BrushCleaning,
         Stethoscope,
         ShieldCheck,
         Clock,
@@ -60,7 +60,7 @@ mod tests {
     fn every_icon_the_screens_use_loads() {
         for icon in [
             // Tidy's own list.
-            IconName::Sparkles,
+            IconName::BrushCleaning,
             IconName::Clock,
             IconName::FolderSearch,
             IconName::Lock,

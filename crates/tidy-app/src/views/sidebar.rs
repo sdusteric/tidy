@@ -17,7 +17,7 @@ use crate::views::trust::SYSDATA_LINK;
 pub fn icon_for(screen: Screen) -> IconName {
     match screen {
         Screen::Checkup => IconName::Stethoscope,
-        Screen::Cleanup => IconName::Sparkles,
+        Screen::Cleanup => IconName::BrushCleaning,
         Screen::Large => IconName::HardDrive,
         Screen::Memory => IconName::MemoryStick,
         Screen::Security => IconName::ShieldCheck,

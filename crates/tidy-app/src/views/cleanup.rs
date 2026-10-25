@@ -697,7 +697,7 @@ impl TidyView {
             let scan_model = model.clone();
             self.empty_state(
                 t,
-                IconName::Sparkles,
+                IconName::BrushCleaning,
                 if first {
                     EMPTY_FIRST_TITLE
                 } else {

@@ -1,6 +1,6 @@
 # Tidy
 
-Tidy is a personal macOS utility that does the useful part of CleanMyMac: it finds space you can get back (caches, old logs, old build output, package caches), shows what takes up your disk, shows what is using your memory, runs a weekly security check, and moves things to the Trash only when you ask. Nothing runs in the background, nothing is deleted outside the Trash, and it never asks for Full Disk Access.
+Tidy is a personal macOS utility that does the useful part of CleanMyMac: it finds space you can get back (caches, old logs, old build output, package caches), shows what takes up your disk, shows what is using your memory, runs a weekly security check, and moves things to the Trash only when you ask. Nothing runs in the background. The only thing Tidy deletes is what it moved to the Trash earlier, and only when you empty it. It never asks for Full Disk Access.
 
 ## Screens
 

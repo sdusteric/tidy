@@ -51,6 +51,9 @@ const CHROMIUM_MARKERS: &[&str] = &[
     "blob_storage",
 ];
 
+/// The skip reason when the process list cannot be read at clean time.
+pub const PROCS_UNKNOWN: &str = "Tidy couldn't read which apps are open, skipped";
+
 /// What a running scan has measured so far.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CleanupProgress {
@@ -61,6 +64,78 @@ pub struct CleanupProgress {
 }
 
 // ---------- Public API ----------
+
+/// How long one rule may take in a scan (gathering, dates and sizes together) before it is
+/// stopped and reported as skipped. The rest of the scan goes on.
+pub const RULE_BUDGET: Duration = Duration::from_secs(30);
+
+/// The time each rule may take: [`RULE_BUDGET`] unless a rule id is listed. Project build
+/// output is budgeted as one rule, `proj`.
+#[derive(Clone, Debug)]
+pub struct ScanBudget {
+    pub default: Duration,
+    pub rules: Vec<(&'static str, Duration)>,
+}
+
+impl Default for ScanBudget {
+    fn default() -> ScanBudget {
+        ScanBudget {
+            default: RULE_BUDGET,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl ScanBudget {
+    fn of(&self, rule: &str) -> Duration {
+        self.rules
+            .iter()
+            .find(|(id, _)| *id == rule)
+            .map_or(self.default, |(_, d)| *d)
+    }
+}
+
+/// The budget key of a candidate's rule: every project rule shares `proj`.
+fn budget_key(rule_id: &'static str) -> &'static str {
+    if rule_id.starts_with("proj.") {
+        PROJECTS_KEY
+    } else {
+        rule_id
+    }
+}
+
+const PROJECTS_KEY: &str = "proj";
+
+/// The plain name of a rule in a "Skipped ..." line.
+fn budget_title(key: &str) -> String {
+    let named = match key {
+        PROJECTS_KEY => "build output in your projects",
+        "cache.app" | "cache.unknown" => "app caches",
+        "cache.electron" => "app caches in Application Support",
+        "cache.electron.sw" => "website data",
+        "cache.electron.scripts" => "service worker scripts",
+        "logs.app" => "app logs",
+        "logs.diag" => "crash reports",
+        "dev.cache" => "tool caches",
+        "dev.jetbrains" => "JetBrains caches",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    match rules::rule(key) {
+        Some(r) if !r.label.is_empty() => r.label.to_string(),
+        _ => key.to_string(),
+    }
+}
+
+/// The line a rule that ran out of time leaves in [`Plan::skipped`].
+pub fn timed_out_line(key: &str) -> String {
+    format!(
+        "Skipped {} because it took too long. Scan again to try it.",
+        budget_title(key)
+    )
+}
 
 /// Runs the Cleanup rules against `env.root` and returns the plan.
 ///
@@ -73,9 +148,20 @@ pub fn scan_cleanup(
     progress: &dyn Fn(CleanupProgress),
     cancel: &Arc<AtomicBool>,
 ) -> Plan {
+    scan_cleanup_within(env, progress, cancel, &ScanBudget::default())
+}
+
+/// [`scan_cleanup`] with a time budget per rule. A rule that runs out of time is stopped, its
+/// items are left out, and the plan's `skipped` says so; the other rules are not affected.
+pub fn scan_cleanup_within(
+    env: &Env,
+    progress: &dyn Fn(CleanupProgress),
+    cancel: &Arc<AtomicBool>,
+    budget: &ScanBudget,
+) -> Plan {
     let now = env.now();
     let mut plan = Plan::empty(env.root.clone(), now);
-    let ctx = Ctx::new(env, cancel.clone());
+    let ctx = Ctx::new(env, cancel.clone(), budget.clone());
     progress(CleanupProgress::default());
 
     let cands = gather(&ctx, &mut plan.skipped);
@@ -92,9 +178,17 @@ pub fn scan_cleanup(
     }
 
     // Step 3: sizes.
-    let cands = run_parallel(&ctx, cands, progress, |c| c.size(&ctx));
+    let mut cands = run_parallel(&ctx, cands, progress, |c| c.size(&ctx));
     if ctx.cancelled() {
         return plan;
+    }
+
+    // A rule that ran out of time offers nothing, and says so.
+    let over = ctx.clocks.over_keys();
+    cands.retain(|c| !over.contains(&budget_key(c.rule_id)));
+    for key in &over {
+        tracing::warn!("cleanup rule {key} ran out of time");
+        plan.skipped.push(timed_out_line(key));
     }
 
     // Step 4: assemble.
@@ -181,13 +275,30 @@ struct Ctx<'a> {
     walk: WalkOpts,
     device: Option<u64>,
     project_ages: Mutex<HashMap<PathBuf, Option<u64>>>,
+    /// The tracked paths of each Git repository the project guard read, by work tree.
+    git_indexes: Mutex<HashMap<PathBuf, GitIndex>>,
+    /// The time each rule has used.
+    clocks: RuleClocks,
     files: AtomicU64,
     bytes: AtomicU64,
     current: Mutex<Option<PathBuf>>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(env: &'a Env, cancel: Arc<AtomicBool>) -> Ctx<'a> {
+    /// The project guard's Git check, with each repository's index read once per scan.
+    fn git_guard(&self, parent: &Path, output: &Path) -> Option<Guard> {
+        let repo = find_repo(&self.root, parent)?;
+        let index = {
+            let mut cache = self.git_indexes.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .entry(repo.clone())
+                .or_insert_with(|| read_git_index(&repo))
+                .clone()
+        };
+        index_guard(&index, &repo, output)
+    }
+
+    fn new(env: &'a Env, cancel: Arc<AtomicBool>, budget: ScanBudget) -> Ctx<'a> {
         let mut walk = WalkOpts::for_root(&env.root);
         walk.cancel = Some(cancel.clone());
         Ctx {
@@ -200,6 +311,8 @@ impl<'a> Ctx<'a> {
             device: device_of(&env.root),
             walk,
             project_ages: Mutex::new(HashMap::new()),
+            git_indexes: Mutex::new(HashMap::new()),
+            clocks: RuleClocks::new(budget),
             files: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             current: Mutex::new(None),
@@ -236,22 +349,148 @@ impl<'a> Ctx<'a> {
         self.now.saturating_sub(mtime)
     }
 
-    /// The newest mtime in the project folder `dir`, without build output and `.git`.
-    fn project_newest(&self, dir: &Path) -> Option<u64> {
+    /// The newest mtime in the project folder `dir`, without build output and `.git`. None
+    /// when the walk was stopped (the scan was cancelled or `key` ran out of time): a partial
+    /// walk may have missed a recent file, so it is never used or kept.
+    fn project_newest(&self, dir: &Path, key: &'static str) -> Option<Option<u64>> {
         if let Some(v) = self
             .project_ages
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(dir)
         {
-            return *v;
+            return Some(*v);
         }
-        let v = newest_mtime(dir, self, None, &|name: &str| rules::is_output_name(name));
+        let halt = || self.cancelled() || self.clocks.over(key);
+        let walk = walk_dates(
+            dir,
+            self,
+            None,
+            &|name: &str| rules::is_output_name(name),
+            None,
+            &halt,
+        );
+        if !walk.complete {
+            return None;
+        }
         self.project_ages
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(dir.to_path_buf(), v);
-        v
+            .insert(dir.to_path_buf(), walk.newest);
+        Some(walk.newest)
+    }
+}
+
+// ---------- Time budget ----------
+
+/// The time each rule has used, and a stop flag per rule that its walks watch.
+struct RuleClocks {
+    budget: ScanBudget,
+    rules: Mutex<HashMap<&'static str, RuleClock>>,
+}
+
+#[derive(Default)]
+struct RuleClock {
+    /// Time used by finished work.
+    spent: Duration,
+    /// Work going on now, by token.
+    active: Vec<(u64, std::time::Instant)>,
+    next: u64,
+    /// Set when the rule ran out of time (or the scan was cancelled): its walks stop.
+    stop: Arc<AtomicBool>,
+    over: bool,
+}
+
+impl RuleClock {
+    fn used(&self, now: std::time::Instant) -> Duration {
+        self.spent
+            + self
+                .active
+                .iter()
+                .map(|(_, at)| now.saturating_duration_since(*at))
+                .sum::<Duration>()
+    }
+}
+
+impl RuleClocks {
+    fn new(budget: ScanBudget) -> RuleClocks {
+        RuleClocks {
+            budget,
+            rules: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<&'static str, RuleClock>> {
+        self.rules.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts timing work for `key`. None when the rule has no time left.
+    fn begin(&self, key: &'static str) -> Option<u64> {
+        let budget = self.budget.of(key);
+        let mut rules = self.lock();
+        let clock = rules.entry(key).or_default();
+        if clock.over || clock.used(std::time::Instant::now()) >= budget {
+            clock.over = true;
+            clock.stop.store(true, Ordering::Relaxed);
+            return None;
+        }
+        let token = clock.next;
+        clock.next += 1;
+        clock.active.push((token, std::time::Instant::now()));
+        Some(token)
+    }
+
+    fn end(&self, key: &'static str, token: u64) {
+        let mut rules = self.lock();
+        let clock = rules.entry(key).or_default();
+        if let Some(i) = clock.active.iter().position(|(t, _)| *t == token) {
+            let (_, at) = clock.active.swap_remove(i);
+            clock.spent += at.elapsed();
+        }
+    }
+
+    /// Whether `key` has run out of time, checked against the clock now (so a walk can stop
+    /// in the middle without waiting for [`RuleClocks::tick`]).
+    fn over(&self, key: &'static str) -> bool {
+        let budget = self.budget.of(key);
+        let mut rules = self.lock();
+        let clock = rules.entry(key).or_default();
+        if !clock.over && clock.used(std::time::Instant::now()) >= budget {
+            clock.over = true;
+            clock.stop.store(true, Ordering::Relaxed);
+        }
+        clock.over
+    }
+
+    /// The stop flag of `key`, for the walker's `cancel`.
+    fn stop_flag(&self, key: &'static str) -> Arc<AtomicBool> {
+        self.lock().entry(key).or_default().stop.clone()
+    }
+
+    /// Called every few milliseconds while work runs: stops every rule that ran out of time,
+    /// and every rule when the scan is cancelled.
+    fn tick(&self, cancelled: bool) {
+        let now = std::time::Instant::now();
+        for (key, clock) in self.lock().iter_mut() {
+            if cancelled {
+                clock.stop.store(true, Ordering::Relaxed);
+            } else if !clock.over && clock.used(now) >= self.budget.of(key) {
+                clock.over = true;
+                clock.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The rules that ran out of time, sorted.
+    fn over_keys(&self) -> Vec<&'static str> {
+        let mut keys: Vec<&'static str> = self
+            .lock()
+            .iter()
+            .filter(|(_, c)| c.over)
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 }
 
@@ -276,6 +515,8 @@ struct Cand {
     app: String,
     /// The project folder for [`Age::Project`].
     project: Option<PathBuf>,
+    /// The folder that holds a project build output, for the project guard.
+    output_parent: Option<PathBuf>,
     // Filled in by the scan.
     newest: Option<u64>,
     project_newest: Option<u64>,
@@ -304,6 +545,7 @@ impl Cand {
             fold_dir,
             app,
             project: None,
+            output_parent: None,
             newest: None,
             project_newest: None,
             dropped: false,
@@ -318,8 +560,14 @@ impl Cand {
             return;
         }
         *ctx.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.path.clone());
+        let key = budget_key(self.rule_id);
         if let (Age::Project(days), Some(project)) = (self.age, &self.project) {
-            self.project_newest = ctx.project_newest(project);
+            let Some(newest) = ctx.project_newest(project, key) else {
+                // The walk stopped early: its date is not known.
+                self.dropped = true;
+                return;
+            };
+            self.project_newest = newest;
             if let Some(t) = self.project_newest
                 && ctx.age_secs(t) <= u64::from(days) * 86_400
             {
@@ -333,7 +581,31 @@ impl Cand {
             .keep
             .is_none()
             .then(|| ctx.now.saturating_sub(RECENT_SECS));
-        self.newest = newest_mtime(&self.path, ctx, stop, &|_| false);
+        let halt = || ctx.cancelled() || ctx.clocks.over(key);
+        let Some(parent) = self.output_parent.clone() else {
+            let walk = walk_dates(&self.path, ctx, stop, &|_| false, None, &halt);
+            self.newest = walk.newest;
+            self.dropped |= !walk.complete;
+            return;
+        };
+        // Build output: the same walk also looks for what the project guard refuses.
+        let walk = walk_dates(&self.path, ctx, stop, &|_| false, Some(&guard_name), &halt);
+        let (newest, flagged) = (walk.newest, walk.guard);
+        self.newest = newest;
+        if !walk.complete {
+            self.dropped = true;
+            return;
+        }
+        if let Some(guard) = flagged {
+            tracing::info!(path = %self.path.display(), "project guard: {}", guard.reason());
+            self.dropped = true;
+            return;
+        }
+        let recent = newest.is_some_and(|t| ctx.age_secs(t) <= RECENT_SECS);
+        if !recent && let Some(guard) = ctx.git_guard(&parent, &self.path) {
+            tracing::info!(path = %self.path.display(), "project guard: {}", guard.reason());
+            self.dropped = true;
+        }
     }
 
     /// Whether the candidate survives the 24-hour skip, its age rule and the in-use check.
@@ -364,7 +636,14 @@ impl Cand {
             return;
         }
         *ctx.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.path.clone());
-        self.size = measure(&self.path, &ctx.walk);
+        let key = budget_key(self.rule_id);
+        let mut walk = ctx.walk.clone();
+        walk.cancel = Some(ctx.clocks.stop_flag(key));
+        self.size = measure(&self.path, &walk);
+        if ctx.clocks.over(key) {
+            // Stopped part way: the size is not the whole folder's.
+            self.dropped = true;
+        }
         ctx.files.fetch_add(self.size.files, Ordering::Relaxed);
         ctx.bytes.fetch_add(self.size.alloc, Ordering::Relaxed);
     }
@@ -400,13 +679,23 @@ fn run_parallel(
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(slot) = slots.get(i) else { break };
                     let mut c = slot.lock().unwrap_or_else(|e| e.into_inner());
+                    if c.dropped {
+                        continue;
+                    }
+                    let key = budget_key(c.rule_id);
+                    let Some(token) = ctx.clocks.begin(key) else {
+                        c.dropped = true;
+                        continue;
+                    };
                     work(&mut c);
+                    ctx.clocks.end(key, token);
                 }
                 active.fetch_sub(1, Ordering::Release);
             });
         }
         while active.load(Ordering::Acquire) > 0 {
             report(ctx, progress);
+            ctx.clocks.tick(ctx.cancelled());
             std::thread::sleep(Duration::from_millis(40));
         }
     });
@@ -597,6 +886,14 @@ fn gather(ctx: &Ctx, skipped: &mut Vec<String>) -> Vec<Cand> {
         if ctx.cancelled() {
             break;
         }
+        if rule.protected && !ctx.env.settings.large_scanned_once {
+            // A folder macOS protects is read only once the user has let Tidy in (design 7).
+            continue;
+        }
+        let key = budget_key(rule.id);
+        let Some(token) = ctx.clocks.begin(key) else {
+            continue;
+        };
         for target in rule.targets {
             match *target {
                 Target::Glob(pattern) => {
@@ -608,6 +905,13 @@ fn gather(ctx: &Ctx, skipped: &mut Vec<String>) -> Vec<Cand> {
                 }
                 Target::Files(pattern) => {
                     for dir in expand_glob(&ctx.root, pattern, rule.skip) {
+                        if rule.protected
+                            && let Err(e) = std::fs::read_dir(&dir)
+                            && e.kind() == io::ErrorKind::PermissionDenied
+                        {
+                            skipped.push(skipped_line(ctx, &dir));
+                            continue;
+                        }
                         for c in file_cands(ctx, rule, &dir) {
                             push(&mut out, c);
                         }
@@ -625,11 +929,15 @@ fn gather(ctx: &Ctx, skipped: &mut Vec<String>) -> Vec<Cand> {
                 }
             }
         }
+        ctx.clocks.end(key, token);
     }
-    let mut projects = Vec::new();
-    project_cands(ctx, &mut projects, skipped);
-    for c in projects {
-        push(&mut out, c);
+    if let Some(token) = ctx.clocks.begin(PROJECTS_KEY) {
+        let mut projects = Vec::new();
+        project_cands(ctx, &mut projects, skipped);
+        ctx.clocks.end(PROJECTS_KEY, token);
+        for c in projects {
+            push(&mut out, c);
+        }
     }
     out
 }
@@ -640,9 +948,14 @@ fn usable(ctx: &Ctx, path: &Path) -> Option<std::fs::Metadata> {
     (ctx.plain(&meta) && ctx.allowed(path)).then_some(meta)
 }
 
-fn display_name(rule: &Rule, entry: &str, owner: Option<&ResolvedOwner>) -> String {
+fn display_name(rule: &Rule, path: &Path, owner: Option<&ResolvedOwner>) -> String {
+    let entry = &file_name_of(path);
     match rule.name {
         Name::Entry => entry.to_string(),
+        Name::ParentEntry => match path.parent().map(file_name_of) {
+            Some(parent) if !parent.is_empty() => format!("{parent}: {entry}"),
+            _ => entry.to_string(),
+        },
         Name::Label => {
             if !rule.label.is_empty() {
                 rule.label.to_string()
@@ -694,11 +1007,19 @@ fn glob_cand(ctx: &Ctx, rule: &Rule, path: PathBuf) -> Option<Cand> {
     let entry = file_name_of(&path);
     let owner = rule_owner(ctx, rule, &entry);
     let mut c = Cand::new(rule, path.clone());
-    c.name = display_name(rule, &entry, owner.as_ref());
+    c.name = display_name(rule, &path, owner.as_ref());
     c.app = owner.as_ref().map_or(entry, |o| o.name.clone());
     c.owner = owner;
     c.keep = keep_for(rule, &path);
     Some(c)
+}
+
+/// Whether `path` has one of `exts` (any file when `exts` is empty).
+fn has_ext(path: &Path, exts: &[&str]) -> bool {
+    exts.is_empty()
+        || path
+            .extension()
+            .is_some_and(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e)))
 }
 
 /// The files directly inside `dir`, one candidate each (Logs, Homebrew downloads).
@@ -722,11 +1043,11 @@ fn file_cands(ctx: &Ctx, rule: &Rule, dir: &Path) -> Vec<Cand> {
             continue;
         }
         let path = e.path();
-        if usable(ctx, &path).is_none() {
+        if !has_ext(&path, rule.exts) || usable(ctx, &path).is_none() {
             continue;
         }
         let mut c = Cand::new(rule, path.clone());
-        c.name = display_name(rule, &file_name_of(&path), owner.as_ref());
+        c.name = display_name(rule, &path, owner.as_ref());
         c.app = app.clone();
         c.owner = owner.clone();
         c.fold_dir = dir.to_path_buf();
@@ -960,7 +1281,7 @@ fn skipped_line(ctx: &Ctx, root: &Path) -> String {
 /// Looks at the folders directly inside `dir`: a match becomes a candidate and is not entered,
 /// any other folder is walked (unless its name is build output or `.git`).
 fn visit_project_dir(ctx: &Ctx, dir: &Path, top: &Path, depth: usize, out: &mut Vec<Cand>) {
-    if ctx.cancelled() || depth > PROJECT_MAX_DEPTH {
+    if ctx.cancelled() || depth > PROJECT_MAX_DEPTH || ctx.clocks.over(PROJECTS_KEY) {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1016,6 +1337,7 @@ fn project_cand(
         fold_dir: top.to_path_buf(),
         app: project_name,
         project: matches!(rule.age, Age::Project(_)).then(|| parent.to_path_buf()),
+        output_parent: Some(parent.to_path_buf()),
         newest: None,
         project_newest: None,
         dropped: false,
@@ -1171,34 +1493,61 @@ fn glob_fits(pattern: &str, rel: &Path) -> bool {
 
 // ---------- Newest mtime ----------
 
+/// Looks at an entry's name and kind (`true` for a folder) for what the project guard refuses.
+type GuardFn = dyn Fn(&str, bool) -> Option<Guard>;
+
+/// What [`walk_dates`] found.
+struct DateWalk {
+    newest: Option<u64>,
+    /// The first entry the flag refused, if any.
+    guard: Option<Guard>,
+    /// False when `halt` stopped the walk before it saw everything.
+    complete: bool,
+}
+
 /// The newest mtime (Unix seconds) of any regular file inside `path` (or of `path` itself when
 /// it is a file). Symlinks are not followed, other devices and denylisted paths are skipped,
 /// `.DS_Store` is ignored, and folders for which `skip_dir` is true are not entered.
 ///
 /// With `stop_at`, the walk ends as soon as a file with an mtime at or after it is found; the
-/// value returned is then a lower bound that is at least `stop_at`.
-fn newest_mtime(
+/// value returned is then a lower bound that is at least `stop_at`. With `flag`, it also ends
+/// at the first entry whose name and kind (`true` for a folder) `flag` refuses. `halt` is asked
+/// before each folder; when it says stop, the result is marked incomplete.
+fn walk_dates(
     path: &Path,
     ctx: &Ctx,
     stop_at: Option<u64>,
     skip_dir: &dyn Fn(&str) -> bool,
-) -> Option<u64> {
-    let meta = path.symlink_metadata().ok()?;
+    flag: Option<&GuardFn>,
+    halt: &dyn Fn() -> bool,
+) -> DateWalk {
+    let done = |newest, guard| DateWalk {
+        newest,
+        guard,
+        complete: true,
+    };
+    let Ok(meta) = path.symlink_metadata() else {
+        return done(None, None);
+    };
     if !ctx.plain(&meta) {
-        return None;
+        return done(None, None);
     }
     let mtime = |m: &std::fs::Metadata| m.mtime().max(0) as u64;
     if meta.is_file() {
-        return Some(mtime(&meta));
+        return done(Some(mtime(&meta)), None);
     }
     if !meta.is_dir() {
-        return None;
+        return done(None, None);
     }
     let mut best: Option<u64> = None;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if ctx.cancelled() {
-            break;
+        if halt() {
+            return DateWalk {
+                newest: best,
+                guard: None,
+                complete: false,
+            };
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -1210,6 +1559,9 @@ fn newest_mtime(
             }
             let name = e.file_name();
             let name = name.to_string_lossy();
+            if let Some(g) = flag.and_then(|f| f(&name, m.is_dir())) {
+                return done(best, Some(g));
+            }
             let child = e.path();
             if is_denied(&ctx.root, &child) {
                 continue;
@@ -1222,12 +1574,122 @@ fn newest_mtime(
                 let t = mtime(&m);
                 best = best.max(Some(t));
                 if stop_at.is_some_and(|s| t >= s) {
-                    return best;
+                    return done(best, None);
                 }
             }
         }
     }
-    best
+    done(best, None)
+}
+
+// ---------- Project guard ----------
+
+/// Why a build output folder is never offered or moved, even with its markers present: it
+/// holds something a build does not make again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guard {
+    /// A `*-keypair.json` file (a Solana or Anchor deploy key, for example).
+    Keypair,
+    /// A `.git` folder or file: a repository of its own.
+    NestedGit,
+    /// Git tracks files inside it.
+    Tracked,
+    /// The project's Git index could not be read, so Tidy cannot tell.
+    IndexUnreadable,
+}
+
+impl Guard {
+    /// The skip reason at clean time.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Guard::Keypair => "Holds a keypair file, skipped",
+            Guard::NestedGit => "Holds a Git repository, skipped",
+            Guard::Tracked => "Git tracks files inside it, skipped",
+            Guard::IndexUnreadable => "Tidy couldn't read the project's Git index, skipped",
+        }
+    }
+}
+
+/// The names the project guard refuses inside build output.
+fn guard_name(name: &str, _is_dir: bool) -> Option<Guard> {
+    if name == ".git" {
+        Some(Guard::NestedGit)
+    } else if name.to_ascii_lowercase().ends_with("-keypair.json") {
+        Some(Guard::Keypair)
+    } else {
+        None
+    }
+}
+
+/// The paths of a Git index, or why they could not be read.
+type GitIndex = Result<std::sync::Arc<Vec<Vec<u8>>>, ()>;
+
+/// The nearest folder at or above `dir`, inside `root`, that holds `.git`.
+fn find_repo(root: &Path, dir: &Path) -> Option<PathBuf> {
+    let mut at = dir;
+    loop {
+        if !at.starts_with(root) {
+            return None;
+        }
+        if at.join(".git").symlink_metadata().is_ok() {
+            return Some(at.to_path_buf());
+        }
+        at = at.parent()?;
+    }
+}
+
+/// Reads the tracked paths of the repository whose work tree is `repo`. A repository with no
+/// index yet tracks nothing; any other failure is an error.
+fn read_git_index(repo: &Path) -> GitIndex {
+    let file = crate::gitindex::index_of(repo).map_err(|e| {
+        tracing::warn!(repo = %repo.display(), "cannot find the Git index: {e}");
+    })?;
+    match std::fs::read(&file) {
+        Ok(bytes) => crate::gitindex::tracked_paths(&bytes)
+            .map(std::sync::Arc::new)
+            .map_err(|e| tracing::warn!(index = %file.display(), "{e}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(std::sync::Arc::new(Vec::new())),
+        Err(e) => {
+            tracing::warn!(index = %file.display(), "cannot read the Git index: {e}");
+            Err(())
+        }
+    }
+}
+
+fn index_guard(index: &GitIndex, repo: &Path, output: &Path) -> Option<Guard> {
+    let Ok(paths) = index else {
+        return Some(Guard::IndexUnreadable);
+    };
+    let rel = output.strip_prefix(repo).ok()?;
+    let rel: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    crate::gitindex::tracks_inside(paths, &rel.join("/")).then_some(Guard::Tracked)
+}
+
+/// The project guard for one build output folder, read fresh (the clean-time re-check): a
+/// keypair file or a `.git` anywhere inside, or a file Git tracks inside.
+pub fn project_guard(root: &Path, output: &Path) -> Option<Guard> {
+    let mut stack = vec![output.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let name = e.file_name();
+            if let Some(g) = guard_name(&name.to_string_lossy(), ft.is_dir()) {
+                return Some(g);
+            }
+            if ft.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    let parent = output.parent()?;
+    let repo = find_repo(root, parent)?;
+    index_guard(&read_git_index(&repo), &repo, output)
 }
 
 // ---------- Re-check at clean time ----------
@@ -1253,6 +1715,10 @@ impl<'a> Rechecker<'a> {
     pub fn check(&self, item: &Item) -> Result<Vec<PathBuf>, String> {
         if !item.class.selectable() {
             return Err("Tidy won't remove this".to_string());
+        }
+        // An unreadable process list means "unknown", never "nothing is running".
+        if self.running.is_unknown() {
+            return Err(PROCS_UNKNOWN.to_string());
         }
         let paths = item.paths();
         let mut ok = Vec::new();
@@ -1311,6 +1777,9 @@ impl<'a> Rechecker<'a> {
                 || markers_class(rule, parent, path, &name).is_none()
             {
                 return Err("The project files are gone, skipped".to_string());
+            }
+            if let Some(guard) = project_guard(&env.root, path) {
+                return Err(guard.reason().to_string());
             }
             if let rules::Owner::Fixed(info) = rule.owner {
                 self.owner_running(&info.to_owner())?;

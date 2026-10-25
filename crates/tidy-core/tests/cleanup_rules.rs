@@ -296,13 +296,13 @@ fn anything_modified_in_the_last_24_hours_is_not_offered() {
     // One fresh file inside an otherwise old cache keeps the whole folder out.
     h.put("Library/Caches/Cypress/fresh.bin", SMALL, DAY / 2);
     h.put("Library/Caches/pre-commit/x.bin", MIB, DAY - 60);
-    h.put("Library/Caches/pypoetry/x.bin", MIB, DAY + 60);
+    h.put("Library/Caches/go-build/x.bin", MIB, DAY + 60);
     let (env, _) = h.env();
     let plan = scan(&env);
     assert_eq!(
         ids(&plan),
         [
-            "cache.app:Library/Caches/pypoetry",
+            "cache.app:Library/Caches/go-build",
             "cache.app:Library/Caches/yarn"
         ]
     );
@@ -311,7 +311,7 @@ fn anything_modified_in_the_last_24_hours_is_not_offered() {
 #[test]
 fn small_matches_fold_into_one_row_that_cleans_as_a_unit() {
     let h = Home::new();
-    for name in ["yarn", "Cypress", "pypoetry", "pre-commit"] {
+    for name in ["yarn", "Cypress", "go-build", "pre-commit"] {
         h.put(&format!("Library/Caches/{name}/x.bin"), SMALL, 4 * DAY);
     }
     // A fifth tiny cache belongs to a running owner and is left out of the fold.
@@ -345,7 +345,7 @@ fn small_matches_fold_into_one_row_that_cleans_as_a_unit() {
     assert_eq!(plan.items.len(), 2, "{:?}", ids(&plan));
     // A fold under 1 MB in total is not a row at all.
     let h = Home::new();
-    for name in ["yarn", "Cypress", "pypoetry"] {
+    for name in ["yarn", "Cypress", "go-build"] {
         h.put(&format!("Library/Caches/{name}/x.bin"), SMALL, 4 * DAY);
     }
     let (env, _) = h.env();
@@ -457,13 +457,7 @@ fn electron_and_chromium_cache_folders_are_matched_by_name_only() {
     let (env, probe) = h.env();
     let plan = scan(&env);
 
-    for sub in [
-        "Cache",
-        "Code Cache",
-        "GPUCache",
-        "Crashpad/completed",
-        "Service Worker/ScriptCache",
-    ] {
+    for sub in ["Cache", "Code Cache", "GPUCache", "Crashpad/completed"] {
         assert_item(
             &plan,
             &format!("cache.electron:{slack}/{sub}"),
@@ -482,6 +476,18 @@ fn electron_and_chromium_cache_folders_are_matched_by_name_only() {
     assert_eq!(
         sw.reason,
         "Some websites may load slower once or lose offline data."
+    );
+    // Service worker scripts are Review, unticked, with their own reason.
+    let scripts = assert_item(
+        &plan,
+        &format!("cache.electron.scripts:{slack}/Service Worker/ScriptCache"),
+        Class::Review,
+        false,
+        MIB,
+    );
+    assert_eq!(
+        scripts.reason,
+        "Some extensions may stop working until you turn them off and on again."
     );
     assert_item(
         &plan,
@@ -518,8 +524,9 @@ fn electron_and_chromium_cache_folders_are_matched_by_name_only() {
         false,
         MIB,
     );
-    // 5 + 1 + 2 + 4 + 1 (Mystery), and nothing from siblings or the plain folder.
-    assert_eq!(plan.items.len(), 5 + 1 + 2 + 4 + 1, "{:#?}", ids(&plan));
+    // Slack 4 Safe + CacheStorage + ScriptCache, Chrome 2 + 4, Mystery 1, and nothing from
+    // siblings or the plain folder.
+    assert_eq!(plan.items.len(), 4 + 1 + 1 + 2 + 4 + 1, "{:#?}", ids(&plan));
     for item in &plan.items {
         let p = item.path.to_string_lossy();
         for never in [
@@ -1538,7 +1545,7 @@ fn recheck_home() -> (Home, Env, Arc<FixedProbe>, Plan) {
     h.mark("Documents/projects/lib/package.json", 60 * DAY);
     h.put_text("Documents/projects/lib/.gitignore", "dist\n", 60 * DAY);
     h.put("Documents/projects/lib/dist/a.js", MIB, 60 * DAY);
-    for name in ["yarn", "Cypress", "pypoetry", "pre-commit"] {
+    for name in ["yarn", "Cypress", "go-build", "pre-commit"] {
         h.put(&format!("Library/Caches/{name}/x.bin"), SMALL, 4 * DAY);
     }
     let (env, probe) = h.env();
@@ -1825,7 +1832,7 @@ fn a_folded_row_keeps_the_members_that_still_pass() {
     let left = recheck_paths(&env, &fold).unwrap();
     assert_eq!(left.len(), 3);
     assert!(!left.contains(&h.path("Library/Caches/yarn")));
-    for name in ["Cypress", "pypoetry", "pre-commit"] {
+    for name in ["Cypress", "go-build", "pre-commit"] {
         std::fs::remove_dir_all(h.path(&format!("Library/Caches/{name}"))).unwrap();
     }
     assert_eq!(
@@ -1847,4 +1854,491 @@ fn the_fixed_clock_decides_ages() {
     assert!(scan(&early).items.is_empty());
     clock.set(TEST_NOW - 5 * DAY);
     assert_eq!(scan(&early).items.len(), 1);
+}
+
+// ---------- Project guard ----------
+
+/// A version 2 Git index that tracks `paths`, written the way Git writes one (SHA-1 names).
+fn git_index(paths: &[&str]) -> Vec<u8> {
+    let mut b = b"DIRC".to_vec();
+    b.extend_from_slice(&2u32.to_be_bytes());
+    b.extend_from_slice(&(paths.len() as u32).to_be_bytes());
+    for p in paths {
+        let start = b.len();
+        b.extend_from_slice(&[0u8; 40]);
+        b.extend_from_slice(&[0x11u8; 20]);
+        b.extend_from_slice(&(p.len() as u16).to_be_bytes());
+        b.extend_from_slice(p.as_bytes());
+        let total = (b.len() - start + 8) & !7;
+        b.resize(start + total, 0);
+    }
+    b.extend_from_slice(&[0u8; 20]);
+    b
+}
+
+#[test]
+fn build_output_holding_keys_repositories_or_tracked_files_is_never_offered() {
+    let h = Home::new();
+    let p = "Documents/projects";
+    let rust = |name: &str| {
+        h.mark(&format!("{p}/{name}/Cargo.toml"), 60 * DAY);
+        h.put(&format!("{p}/{name}/target/debug/app"), 2 * MIB, 40 * DAY);
+    };
+    // A plain idle project, offered as before.
+    rust("plain");
+    // An Anchor program: its deploy key sits in target/deploy and is not rebuilt.
+    rust("anchor");
+    h.mark(
+        &format!("{p}/anchor/target/deploy/vault-keypair.json"),
+        40 * DAY,
+    );
+    // A repository of its own inside the build output (a folder or a `.git` file).
+    rust("nested");
+    h.mark(&format!("{p}/nested/target/vendor/dep/.git/HEAD"), 40 * DAY);
+    rust("linked");
+    h.mark(&format!("{p}/linked/target/wt/.git"), 40 * DAY);
+    // Git tracks a file inside `dist`, even though .gitignore names it.
+    h.mark(&format!("{p}/site/package.json"), 60 * DAY);
+    h.put_text(&format!("{p}/site/.gitignore"), "dist\n", 60 * DAY);
+    h.put(&format!("{p}/site/dist/app.js"), MIB, 60 * DAY);
+    h.put(&format!("{p}/site/dist/keep.js"), MIB, 60 * DAY);
+    let index = h.path(&format!("{p}/site/.git/index"));
+    std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+    std::fs::write(
+        &index,
+        git_index(&[".gitignore", "dist/keep.js", "package.json"]),
+    )
+    .unwrap();
+    set_age(&index, 60 * DAY);
+    // A repository whose index tracks only the sources: its build output is offered.
+    rust("clean-repo");
+    let index2 = h.path(&format!("{p}/clean-repo/.git/index"));
+    std::fs::create_dir_all(index2.parent().unwrap()).unwrap();
+    std::fs::write(
+        &index2,
+        git_index(&["Cargo.toml", "src/main.rs", "targets.txt"]),
+    )
+    .unwrap();
+    set_age(&index2, 60 * DAY);
+    // An index Tidy cannot read: it cannot tell what Git tracks, so nothing is offered.
+    rust("broken");
+    h.put_text(&format!("{p}/broken/.git/index"), "not an index", 60 * DAY);
+    let (env, _) = h.env();
+    let plan = scan(&env);
+
+    find(&plan, &format!("proj.target:{p}/plain/target"));
+    find(&plan, &format!("proj.target:{p}/clean-repo/target"));
+    for id in [
+        format!("proj.target:{p}/anchor/target"),
+        format!("proj.target:{p}/nested/target"),
+        format!("proj.target:{p}/linked/target"),
+        format!("proj.dist:{p}/site/dist"),
+        format!("proj.target:{p}/broken/target"),
+    ] {
+        absent(&plan, &id);
+    }
+    assert_eq!(plan.items.len(), 2, "{:?}", ids(&plan));
+
+    // Right before the move the guard is read again: a key that shows up after the scan
+    // stops the move.
+    let plain = find(&plan, &format!("proj.target:{p}/plain/target")).clone();
+    assert_eq!(recheck(&env, &plain), Ok(plain.path.clone()));
+    h.mark(
+        &format!("{p}/plain/target/deploy/prog-keypair.json"),
+        40 * DAY,
+    );
+    assert_eq!(
+        recheck(&env, &plain),
+        Err("Holds a keypair file, skipped".to_string())
+    );
+    let repo = find(&plan, &format!("proj.target:{p}/clean-repo/target")).clone();
+    std::fs::write(
+        &index2,
+        git_index(&["Cargo.toml", "target/release/notes.txt"]),
+    )
+    .unwrap();
+    assert_eq!(
+        recheck(&env, &repo),
+        Err("Git tracks files inside it, skipped".to_string())
+    );
+    std::fs::write(&index2, b"DIRC broken").unwrap();
+    assert_eq!(
+        recheck(&env, &repo),
+        Err("Tidy couldn't read the project's Git index, skipped".to_string())
+    );
+    std::fs::remove_file(&index2).unwrap();
+    assert_eq!(recheck(&env, &repo), Ok(repo.path.clone()));
+    h.mark(&format!("{p}/clean-repo/target/sub/.git/HEAD"), 40 * DAY);
+    assert_eq!(
+        recheck(&env, &repo),
+        Err("Holds a Git repository, skipped".to_string())
+    );
+}
+
+// ---------- Unknown process list ----------
+
+#[test]
+fn an_unreadable_process_list_blocks_every_owner_and_every_move() {
+    let (_h, env, probe, plan) = recheck_home();
+    probe.set(RunningSet::unknown());
+    // At scan time an item with an owner is blocked, never treated as idle.
+    let busy = scan(&env);
+    let idle = find(&busy, "cache.app:Library/Caches/com.example.Idle");
+    assert!(!idle.ticked);
+    assert_eq!(
+        idle.blocked.as_deref(),
+        Some("Tidy couldn't check whether Idle is open")
+    );
+    // At clean time every item is skipped, with or without an owner.
+    for item in plan.items.iter().filter(|i| i.class != Class::ReportOnly) {
+        assert_eq!(
+            recheck(&env, item),
+            Err(tidy_core::cleanup::PROCS_UNKNOWN.to_string()),
+            "{}",
+            item.id
+        );
+    }
+}
+
+// ---------- More tool caches (P2) ----------
+
+#[test]
+fn more_tool_caches_follow_their_owners() {
+    let h = Home::new();
+    for name in [
+        "go-build",
+        "gopls",
+        "composer",
+        "typescript",
+        "deno",
+        "golangci-lint",
+    ] {
+        h.put(&format!("Library/Caches/{name}/x.bin"), MIB, 5 * DAY);
+    }
+    // Poetry: downloads are Safe, project environments are Review.
+    h.put(
+        "Library/Caches/pypoetry/cache/repositories/x.bin",
+        MIB,
+        5 * DAY,
+    );
+    h.put("Library/Caches/pypoetry/artifacts/a/b.whl", MIB, 5 * DAY);
+    h.put(
+        "Library/Caches/pypoetry/virtualenvs/app-AbCd-py3.12/lib/x.bin",
+        2 * MIB,
+        40 * DAY,
+    );
+    h.put(
+        "Library/Caches/pypoetry/virtualenvs/fresh-XyZ-py3.12/lib/x.bin",
+        2 * MIB,
+        5 * DAY,
+    );
+    // JetBrains: caches and indexes are Safe; Local History and the rest are never offered.
+    let jb = "Library/Caches/JetBrains/IntelliJIdea2025.2";
+    h.put(&format!("{jb}/caches/content.dat"), 2 * MIB, 5 * DAY);
+    h.put(&format!("{jb}/index/stubs/s.bin"), 3 * MIB, 5 * DAY);
+    h.put(
+        &format!("{jb}/LocalHistory/changes.storageData"),
+        4 * MIB,
+        5 * DAY,
+    );
+    h.put(&format!("{jb}/tmp/t.bin"), MIB, 5 * DAY);
+    // Ruby and Python version managers.
+    h.put(".gem/ruby/3.3.0/cache/rails-8.0.0.gem", MIB, 5 * DAY);
+    h.put(
+        ".gem/ruby/3.3.0/gems/rails-8.0.0/lib/rails.rb",
+        MIB,
+        5 * DAY,
+    );
+    h.put(
+        ".rbenv/versions/3.3.5/lib/ruby/gems/3.3.0/cache/rack-3.1.gem",
+        MIB,
+        5 * DAY,
+    );
+    h.put(".bundle/cache/compact_index/x.bin", MIB, 5 * DAY);
+    h.put(".pyenv/cache/Python-3.12.7.tar.xz", MIB, 5 * DAY);
+    h.put(".rbenv/cache/ruby-3.3.5.tar.gz", MIB, 5 * DAY);
+    h.put(".pyenv/versions/3.12.7/bin/python3.12", MIB, 5 * DAY);
+    // Tool caches in ~/.cache.
+    h.put(".cache/pre-commit/repo1/x.bin", MIB, 5 * DAY);
+    h.put(
+        ".cache/puppeteer/chrome/mac_arm-131/x.bin",
+        2 * MIB,
+        5 * DAY,
+    );
+    h.put(".cache/selenium/chromedriver/x.bin", MIB, 5 * DAY);
+    h.put("Library/Caches/electron/electron-v33.zip", 2 * MIB, 5 * DAY);
+    // Go modules are read-only and removed by Go's own command.
+    h.put("go/pkg/mod/github.com/x/y@v1.0.0/y.go", MIB, 5 * DAY);
+    let (env, probe) = h.env();
+    let plan = scan(&env);
+
+    for (name, owner) in [
+        ("go-build", "Go"),
+        ("gopls", "gopls"),
+        ("composer", "Composer"),
+        ("typescript", "TypeScript"),
+        ("deno", "Deno"),
+        ("golangci-lint", "golangci-lint"),
+    ] {
+        let item = assert_item(
+            &plan,
+            &format!("cache.app:Library/Caches/{name}"),
+            Class::Safe,
+            true,
+            MIB,
+        );
+        assert_eq!(item.name, owner);
+    }
+    assert_item(
+        &plan,
+        "dev.poetry:Library/Caches/pypoetry/cache",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    assert_item(
+        &plan,
+        "dev.poetry:Library/Caches/pypoetry/artifacts",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    let venv = assert_item(
+        &plan,
+        "dev.poetry-venvs:Library/Caches/pypoetry/virtualenvs/app-AbCd-py3.12",
+        Class::Review,
+        false,
+        2 * MIB,
+    );
+    assert_eq!(venv.name, "Poetry environment: app-AbCd-py3.12");
+    // An environment used in the last 30 days is not offered.
+    absent(
+        &plan,
+        "dev.poetry-venvs:Library/Caches/pypoetry/virtualenvs/fresh-XyZ-py3.12",
+    );
+    absent(&plan, "cache.app:Library/Caches/pypoetry");
+    let caches = assert_item(
+        &plan,
+        &format!("dev.jetbrains:{jb}/caches"),
+        Class::Safe,
+        true,
+        2 * MIB,
+    );
+    assert_eq!(caches.name, "IntelliJIdea2025.2: caches");
+    assert_item(
+        &plan,
+        &format!("dev.jetbrains:{jb}/index"),
+        Class::Safe,
+        true,
+        3 * MIB,
+    );
+    for id in [
+        "cache.unknown:Library/Caches/JetBrains",
+        "cache.app:Library/Caches/JetBrains",
+    ] {
+        absent(&plan, id);
+    }
+    assert!(
+        plan.items
+            .iter()
+            .all(|i| !i.path.to_string_lossy().contains("LocalHistory"))
+    );
+    let gem = assert_item(
+        &plan,
+        "dev.gem:.gem/ruby/3.3.0/cache",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    assert_eq!(gem.name, "Gem downloads (cache)");
+    assert_item(
+        &plan,
+        "dev.gem:.rbenv/versions/3.3.5/lib/ruby/gems/3.3.0/cache",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    assert_item(&plan, "dev.bundler:.bundle/cache", Class::Safe, true, MIB);
+    assert_item(
+        &plan,
+        "dev.pyenv-cache:.pyenv/cache",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    assert_item(
+        &plan,
+        "dev.rbenv-cache:.rbenv/cache",
+        Class::Safe,
+        true,
+        MIB,
+    );
+    assert_item(&plan, "dev.cache:.cache/pre-commit", Class::Safe, true, MIB);
+    for (id, bytes) in [
+        ("dev.tool-downloads:.cache/puppeteer", 2 * MIB),
+        ("dev.tool-downloads:.cache/selenium", MIB),
+        ("dev.tool-downloads:Library/Caches/electron", 2 * MIB),
+    ] {
+        assert_item(&plan, id, Class::Review, false, bytes);
+    }
+    let go = assert_item(
+        &plan,
+        "dev.go-modcache:go/pkg/mod",
+        Class::ReportOnly,
+        false,
+        MIB,
+    );
+    assert_eq!(
+        go.reason,
+        "Remove downloaded Go modules with: go clean -modcache"
+    );
+    // Installed gems and Python versions are never offered.
+    for i in &plan.items {
+        let p = i.path.to_string_lossy();
+        assert!(
+            !p.contains("/gems/rails") && !p.contains(".pyenv/versions"),
+            "{p}"
+        );
+    }
+
+    // Each owner blocks its own cache while it runs.
+    probe.set(RunningSet::parse("gem,pyenv,poetry,idea,composer,gopls"));
+    let busy = scan(&env);
+    for (id, quit) in [
+        ("dev.gem:.gem/ruby/3.3.0/cache", "Quit RubyGems first"),
+        ("dev.pyenv-cache:.pyenv/cache", "Quit pyenv first"),
+        (
+            "dev.poetry:Library/Caches/pypoetry/cache",
+            "Quit Poetry first",
+        ),
+        (
+            "dev.jetbrains:Library/Caches/JetBrains/IntelliJIdea2025.2/caches",
+            "Quit your JetBrains IDE first",
+        ),
+        ("cache.app:Library/Caches/composer", "Quit Composer first"),
+        ("cache.app:Library/Caches/gopls", "Quit gopls first"),
+        ("cache.app:Library/Caches/go-build", "Quit Go first"),
+    ] {
+        let item = find(&busy, id);
+        assert_eq!(item.blocked.as_deref(), Some(quit), "{id}");
+        assert!(!item.ticked, "{id}");
+    }
+    // A browser build that a test runs right now is in use and not offered.
+    probe.set(RunningSet::new([h
+        .path(".cache/puppeteer/chrome/mac_arm-131/chrome")
+        .to_string_lossy()
+        .into_owned()]));
+    absent(&scan(&env), "dev.tool-downloads:.cache/puppeteer");
+}
+
+// ---------- Old installers ----------
+
+#[test]
+fn old_installers_in_downloads_are_review_once_downloads_is_allowed() {
+    let h = Home::new();
+    h.put("Downloads/Figma-125.dmg", 2 * MIB, 45 * DAY);
+    h.put("Downloads/Driver.PKG", MIB, 31 * DAY);
+    h.put("Downloads/New.dmg", 2 * MIB, 10 * DAY);
+    h.put("Downloads/photos.zip", 2 * MIB, 90 * DAY);
+    h.put("Downloads/Old/Inside.dmg", 2 * MIB, 90 * DAY);
+    let (env, _) = h.env();
+    // Before a Large files scan has let Tidy into Downloads, the folder is not read.
+    let plan = scan(&env);
+    assert!(
+        plan.items.iter().all(|i| i.group != Group::Installers),
+        "{:?}",
+        ids(&plan)
+    );
+
+    let mut env = env;
+    env.settings.large_scanned_once = true;
+    let plan = scan(&env);
+    let dmg = assert_item(
+        &plan,
+        "downloads.installers:Downloads/Figma-125.dmg",
+        Class::Review,
+        false,
+        2 * MIB,
+    );
+    assert_eq!(dmg.group, Group::Installers);
+    assert_eq!(dmg.name, "Figma-125.dmg");
+    assert_eq!(dmg.reason, "In Downloads, not changed for 45 days");
+    assert_item(
+        &plan,
+        "downloads.installers:Downloads/Driver.PKG",
+        Class::Review,
+        false,
+        MIB,
+    );
+    let installers: Vec<&str> = plan
+        .items
+        .iter()
+        .filter(|i| i.group == Group::Installers)
+        .map(|i| i.id.as_str())
+        .collect();
+    assert_eq!(installers.len(), 2, "{installers:?}");
+    // Never part of the one-click clean.
+    assert!(plan.ticked().all(|i| i.group != Group::Installers));
+    // The re-check holds them to the same pattern.
+    let item = find(&plan, "downloads.installers:Downloads/Figma-125.dmg").clone();
+    assert_eq!(recheck(&env, &item), Ok(item.path.clone()));
+}
+
+// ---------- Time budget ----------
+
+#[test]
+fn a_rule_that_runs_out_of_time_is_skipped_and_the_rest_goes_on() {
+    use std::time::Duration;
+    use tidy_core::cleanup::{ScanBudget, scan_cleanup_within, timed_out_line};
+    let h = Home::new();
+    h.app("Idle.app", "com.example.Idle");
+    h.put("Library/Caches/com.example.Idle/data.bin", MIB, 3 * DAY);
+    h.put(".npm/_cacache/a.bin", MIB, 5 * DAY);
+    h.put("Library/Logs/Foo/old.log", MIB, 20 * DAY);
+    let (env, _) = h.env();
+    let budget = ScanBudget {
+        rules: vec![("dev.npm-cacache", Duration::ZERO)],
+        ..ScanBudget::default()
+    };
+    let plan = scan_cleanup_within(&env, &|_| {}, &Arc::new(AtomicBool::new(false)), &budget);
+    absent(&plan, "dev.npm-cacache:.npm/_cacache");
+    find(&plan, "cache.app:Library/Caches/com.example.Idle");
+    find(&plan, "logs.app:Library/Logs/Foo/old.log");
+    assert_eq!(plan.skipped, [timed_out_line("dev.npm-cacache")]);
+    assert_eq!(
+        plan.skipped[0],
+        "Skipped npm cache because it took too long. Scan again to try it."
+    );
+}
+
+#[test]
+fn a_slow_project_walk_stops_part_way_and_offers_nothing_from_it() {
+    use std::time::Duration;
+    use tidy_core::cleanup::{ScanBudget, scan_cleanup_within};
+    let h = Home::new();
+    let p = "Documents/projects";
+    // Many folders, so the walk takes longer than a millisecond.
+    for i in 0..300 {
+        h.mark(&format!("{p}/big/src/m{i}/mod.rs"), 60 * DAY);
+    }
+    h.mark(&format!("{p}/big/Cargo.toml"), 60 * DAY);
+    h.put(&format!("{p}/big/target/debug/app"), 2 * MIB, 40 * DAY);
+    h.app("Idle.app", "com.example.Idle");
+    h.put("Library/Caches/com.example.Idle/data.bin", MIB, 3 * DAY);
+    let (env, _) = h.env();
+    let budget = ScanBudget {
+        rules: vec![("proj", Duration::from_millis(1))],
+        ..ScanBudget::default()
+    };
+    let plan = scan_cleanup_within(&env, &|_| {}, &Arc::new(AtomicBool::new(false)), &budget);
+    absent(&plan, &format!("proj.target:{p}/big/target"));
+    find(&plan, "cache.app:Library/Caches/com.example.Idle");
+    assert_eq!(
+        plan.skipped,
+        ["Skipped build output in your projects because it took too long. Scan again to try it."]
+    );
+    // With the normal budget the same project is offered.
+    let plan = scan(&env);
+    find(&plan, &format!("proj.target:{p}/big/target"));
+    assert!(plan.skipped.is_empty());
 }

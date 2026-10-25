@@ -181,6 +181,32 @@ impl Settings {
         s
     }
 
+    /// The ignore list as settings.json holds it right now, for the check right before each
+    /// move. A missing file is an empty list. Unlike [`Settings::load_from`], a file that
+    /// cannot be read or parsed, or an `ignored_paths` that is not a list of paths, is an
+    /// error: the caller then moves nothing, rather than moving something the user asked
+    /// Tidy to leave alone.
+    pub fn read_ignore_list(file: &Path) -> io::Result<Vec<PathBuf>> {
+        let bytes = match std::fs::read(file) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let serde_json::Value::Object(map) = value else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "settings.json is not an object",
+            ));
+        };
+        match map.get("ignored_paths") {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(v) => serde_json::from_value::<Vec<PathBuf>>(v.clone())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        }
+    }
+
     pub fn save(&self, paths: &AppPaths) -> io::Result<()> {
         self.save_to(&paths.settings_file())
     }
@@ -392,6 +418,41 @@ mod tests {
             s.project_root_paths(root),
             [root.join("Documents/projects"), root.join("work")]
         );
+    }
+
+    #[test]
+    fn the_ignore_list_is_read_fresh_and_fails_closed() {
+        let (_t, p) = paths();
+        let file = p.settings_file();
+        assert_eq!(
+            Settings::read_ignore_list(&file).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        let s = Settings {
+            ignored_paths: vec!["/h/Library/Caches/keep".into()],
+            ..Settings::default()
+        };
+        s.save(&p).unwrap();
+        assert_eq!(
+            Settings::read_ignore_list(&file).unwrap(),
+            [PathBuf::from("/h/Library/Caches/keep")]
+        );
+        std::fs::write(&file, br#"{"version":2}"#).unwrap();
+        assert!(Settings::read_ignore_list(&file).unwrap().is_empty());
+        // Where `load` falls back to defaults, the ignore list read is an error.
+        for raw in [
+            &b"{ not json"[..],
+            b"[1,2]",
+            br#"{"ignored_paths":"/h/x"}"#,
+            br#"{"ignored_paths":[1]}"#,
+        ] {
+            std::fs::write(&file, raw).unwrap();
+            assert!(Settings::read_ignore_list(&file).is_err(), "{raw:?}");
+        }
+        // A folder where the file should be cannot be read.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(Settings::read_ignore_list(&file).is_err());
     }
 
     #[test]

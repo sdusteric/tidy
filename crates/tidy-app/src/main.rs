@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tidy_core::env::{SystemRunner, SystemSeams};
 use tidy_core::lastused::Spotlight;
 use tidy_core::memory::LibcMemory;
-use tidy_core::procs::LibcProbe;
+use tidy_core::procs::{LibcOpenFiles, LibcProbe};
 use tidy_core::walk::{WalkOpts, measure, measure_reference};
 use tidy_core::{AppPaths, Env, InstanceLock, LargeScan, LockError, Settings};
 use tracing_subscriber::EnvFilter;
@@ -227,6 +227,8 @@ fn run_app() {
         // commands of the Security checks (never softwareupdate unless asked for).
         memory: Arc::new(LibcMemory),
         runner: Arc::new(SystemRunner),
+        // Read right before each move: a file a process holds open is skipped.
+        open_files: Arc::new(LibcOpenFiles),
     });
     // The app holds the instance lock for its whole life. macOS normally routes a second
     // launch to the running instance, so this is a second guard.

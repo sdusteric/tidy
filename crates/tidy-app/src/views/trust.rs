@@ -20,6 +20,7 @@ use crate::app::{TidyModel, now_unix, send};
 use crate::format;
 use crate::theme::{MONO_FONT, Theme, figure, motion as m, tnum};
 use crate::views::main_window::TidyView;
+use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::{glyph_tile, hairline, icon_button, tag, text_button};
 
 // ---------- item details (17.1) ----------
@@ -324,6 +325,7 @@ impl TidyView {
         &mut self,
         t: &Theme,
         at: &DetailsAt,
+        phase: Phase,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let detail = {
@@ -335,6 +337,7 @@ impl TidyView {
         let Some(d) = detail else {
             return div().into_any_element();
         };
+        let leaving = matches!(phase, Phase::Leave(_));
         let view = cx.entity().downgrade();
         let close = view.clone();
         let on_pop = t.on(t.pop_bg);
@@ -451,7 +454,9 @@ impl TidyView {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(!leaving, |d| {
+                d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(head)
             .child(
                 div()
@@ -465,35 +470,47 @@ impl TidyView {
             .child(div().flex().flex_col().gap(px(8.)).children(fields))
             .children(command);
 
+        // The leaving copy only fades: it has no scrim and takes no clicks.
+        let scrim = (!leaving).then(|| {
+            div()
+                .id("details-scrim")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    let _ = close.update(cx, |v, cx| {
+                        v.details = None;
+                        cx.notify();
+                    });
+                })
+        });
         div()
             .absolute()
             .inset_0()
-            .child(
-                div()
-                    .id("details-scrim")
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        let _ = close.update(cx, |v, cx| {
-                            v.details = None;
-                            cx.notify();
-                        });
-                    }),
-            )
+            .children(scrim)
             .child(deferred(
                 anchored()
                     .anchor(Anchor::TopRight)
                     .position(at.at)
                     .offset(point(px(0.), px(14.)))
                     .snap_to_window_with_margin(px(8.))
-                    .child(card),
+                    .child(overlay::present_popover(card, phase)),
             ))
             .into_any_element()
     }
 
     /// The System Data sheet: History's chrome, the measured rows, the report-only rows with
     /// their commands, and the row about everything else.
-    pub(crate) fn render_system_data(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_system_data(
+        &mut self,
+        t: &Theme,
+        phase: Phase,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The first report of this opening fades in over "Measuring"; a re-measure over a
+        // report does not (its figures stay readable, only dimmed while measuring).
+        let first_report = overlay::phase_for(self.overlays.report_arrived, cx.reduce_motion());
+        // A leaving copy only fades: it takes no clicks.
+        let leaving = matches!(phase, Phase::Leave(_));
         let now = now_unix(cx);
         let model = self.model.clone();
         let close_model = model.clone();
@@ -711,10 +728,21 @@ impl TidyView {
                     .text_color(t.text)
                     .child(sysdata::LEAD),
             )
-            .child(figure_row)
-            .child(body)
+            .child(overlay::fade_in(
+                "sysdata-figure-in",
+                figure_row,
+                first_report,
+                m::CARD_IN,
+            ))
+            .child(overlay::fade_in(
+                "sysdata-rows-in",
+                body,
+                first_report,
+                m::CARD_IN,
+            ))
             .when(report.is_some(), |d| {
-                d.child(
+                d.child(overlay::fade_in(
+                    "sysdata-footer-in",
                     div()
                         .debug_selector(|| "sysdata-footer".to_string())
                         .pt(px(10.))
@@ -731,7 +759,9 @@ impl TidyView {
                         .line_height(px(16.))
                         .text_color(t.text_2)
                         .child(sysdata::FOOTER),
-                )
+                    first_report,
+                    m::CARD_IN,
+                ))
             });
 
         let card = div()
@@ -747,7 +777,9 @@ impl TidyView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(!leaving, |d| {
+                d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(
                 div()
                     .flex_none()
@@ -777,7 +809,7 @@ impl TidyView {
             .child(hairline(t))
             .child(content);
 
-        div()
+        let scrim = div()
             .id("sysdata-scrim")
             .absolute()
             .inset_0()
@@ -785,11 +817,12 @@ impl TidyView {
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                scrim_model.update(cx, |m, cx| m.close_system_data(cx));
-            })
-            .child(card)
-            .into_any_element()
+            .when(!leaving, |d| {
+                d.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    scrim_model.update(cx, |m, cx| m.close_system_data(cx));
+                })
+            });
+        overlay::present(Sheet::SystemData, scrim, card, phase)
     }
 
     /// The Check up row that opens the sheet: a settings row with a chevron.

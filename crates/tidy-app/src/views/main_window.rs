@@ -21,6 +21,7 @@ use crate::theme::{Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
 use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
 use crate::views::memory::MemoryMenu;
+use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::trust::DetailsAt;
 use crate::views::{hairline, icon_button, large_button, text_button};
 
@@ -61,6 +62,8 @@ pub struct TidyView {
     pub(crate) switch_flipped: Option<(std::time::Instant, usize)>,
     /// The same for the automatic update switch.
     pub(crate) updates_flipped: Option<(std::time::Instant, usize)>,
+    /// The overlays' enter and exit motion (dialogs, History, System Data, the popover).
+    pub(crate) overlays: crate::views::overlay::OverlayState,
     /// Set on a mouse-down on empty toolbar space; the first move then drags the window.
     should_move: bool,
     /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
@@ -175,6 +178,7 @@ impl TidyView {
             card_generation: 0,
             switch_flipped: None,
             updates_flipped: None,
+            overlays: Default::default(),
             should_move: false,
             window_visible: window.is_visible(),
             _subs: vec![observed, appearance, activation, visibility],
@@ -623,8 +627,11 @@ impl TidyView {
             )
     }
 
-    /// The menu and dialog layers, drawn over everything.
+    /// The menu and dialog layers, drawn over everything. A sheet or popover that just closed
+    /// is drawn once more as a leaving copy while it fades (see `overlay`).
     fn render_overlays(&mut self, t: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.track_overlays(cx);
+        let reduce_motion = cx.reduce_motion();
         let mut layers = Vec::new();
         if let Some(menu) = self.menu.clone() {
             layers.push(self.render_row_menu(t, &menu, cx));
@@ -635,34 +642,52 @@ impl TidyView {
         if let Some(menu) = self.memory_menu.clone() {
             layers.push(self.render_memory_menu(t, &menu, cx));
         }
+        if let Some((at, _, generation)) = self.overlays.details_leaving.clone()
+            && self.details.is_none()
+        {
+            layers.push(self.render_details(t, &at, Phase::Leave(generation), cx));
+        }
         if let Some(at) = self.details.clone() {
-            layers.push(self.render_details(t, &at, cx));
+            let phase = overlay::phase_for(self.overlays.details_entered, reduce_motion);
+            layers.push(self.render_details(t, &at, phase, cx));
+        }
+        if let (Some(phase), Some(spec)) = (
+            self.sheet_leaving(Sheet::Dialog),
+            self.overlays.dialog_leaving.clone(),
+        ) {
+            // The leaving copy takes no action: its buttons and scrim do nothing.
+            layers.push(render_dialog(&spec, t, phase, |_, _| {}, |_, _| {}));
         }
         if let Some(spec) = self.dialog.clone() {
             let view = cx.entity().downgrade();
             let cancel_view = view.clone();
-            layers.push(
-                render_dialog(
-                    &spec,
-                    t,
-                    move |_, cx| {
-                        let _ = cancel_view.update(cx, |v, cx| {
-                            v.dialog = None;
-                            cx.notify();
-                        });
-                    },
-                    move |_, cx| {
-                        let _ = view.update(cx, |v, cx| v.confirm_dialog(cx));
-                    },
-                )
-                .into_any_element(),
-            );
+            let phase = self.sheet_phase(Sheet::Dialog, reduce_motion);
+            layers.push(render_dialog(
+                &spec,
+                t,
+                phase,
+                move |_, cx| {
+                    let _ = cancel_view.update(cx, |v, cx| {
+                        v.dialog = None;
+                        cx.notify();
+                    });
+                },
+                move |_, cx| {
+                    let _ = view.update(cx, |v, cx| v.confirm_dialog(cx));
+                },
+            ));
         }
         if self.history_open {
-            layers.push(self.render_history(t, cx));
+            let phase = self.sheet_phase(Sheet::History, reduce_motion);
+            layers.push(self.render_history(t, phase, cx));
+        } else if let Some(phase) = self.sheet_leaving(Sheet::History) {
+            layers.push(self.render_history(t, phase, cx));
         }
         if self.model.read(cx).system_data.open {
-            layers.push(self.render_system_data(t, cx));
+            let phase = self.sheet_phase(Sheet::SystemData, reduce_motion);
+            layers.push(self.render_system_data(t, phase, cx));
+        } else if let Some(phase) = self.sheet_leaving(Sheet::SystemData) {
+            layers.push(self.render_system_data(t, phase, cx));
         }
         layers
     }

@@ -61,7 +61,7 @@ Sidebar order when complete: Check up, Cleanup, Large files, Memory, Security. S
 
 **Scan.** Runs the rule table in section 6 against the scan root. Progress shows in the toolbar as a spinner and "Scanning, 41,200 files". The list appears when the scan finishes (no streaming rows, C4). A typical scan on this Mac measures about 30 GB across a few hundred thousand files and should finish in under 10 seconds with the bulk walker.
 
-**Result.** Five groups in a fixed order: System and app caches, Logs, Developer, AI models and large app data, Trash. Each group header shows a tri-state checkbox, the group name, the item count and the group total. Groups with zero items are hidden. Groups start expanded except "AI models and large app data", which starts collapsed (C5).
+**Result.** Six groups in a fixed order: System and app caches, Logs, Developer, AI models and large app data, Old installers (C39), Trash. Each group header shows a tri-state checkbox, the group name, the item count and the group total. Groups with zero items are hidden. Groups start expanded except "AI models and large app data", which starts collapsed (C5).
 
 Each item has one of four classes:
 
@@ -126,6 +126,7 @@ Purpose: answer "why is my Mac slow right now" and let the user quit what is hea
 - **Quit** sends `terminate`. The row shows "Quit requested" and then disappears when the app exits. After 10 seconds without exit, the row shows "Still open. The app may be asking to save." and the "..." menu offers Force Quit with a confirm ("Unsaved changes in X will be lost."). Tidy itself, Finder, WindowServer and loginwindow have no Quit button.
 - Refresh every 2 seconds while the screen is visible; nothing runs when it is not.
 - No "Free up RAM" button, because there is no honest user-level way to do it (`purge` needs root and only drops file cache).
+- Relaunch next to Quit, a tip about the browser's own memory setting on Chromium browser rows above 4 GB, and a "What would help" line while pressure is not Normal: section 18.2 (C41 to C43).
 
 ### 5.4 Security (M2)
 
@@ -170,8 +171,9 @@ Paths are relative to the scan root (the home folder in production). "Owner not 
 | `Library/Caches/<name>` where `<name>` maps to a known app or is a bundle id of an installed app | Safe | Owner not running. The folder itself goes to the Trash; the app recreates it. No age filter (C17). |
 | `Library/Caches/<name>` with no known owner | Review | "Tidy couldn't tell which app owns this." |
 | `Library/Caches/Google/Chrome/<profile>`, `Library/Caches/Google/Chrome-headless`, `Library/Caches/Google/Chrome for Testing-headless` | Safe | Chrome (or `chrome-headless-shell`) not running. |
-| `Library/Application Support/<App>/{Cache, Code Cache, GPUCache, DawnGraphiteCache, DawnWebGPUCache, GrShaderCache, ShaderCache, Crashpad/completed, Service Worker/ScriptCache}` for Electron and Chromium apps, including each Chrome profile | Safe | Owner not running. Only these subfolder names, never their siblings. |
+| `Library/Application Support/<App>/{Cache, Code Cache, GPUCache, DawnGraphiteCache, DawnWebGPUCache, GrShaderCache, ShaderCache, Crashpad/completed}` for Electron and Chromium apps, including each Chrome profile | Safe | Owner not running. Only these subfolder names, never their siblings. |
 | `.../Service Worker/CacheStorage` (same apps) | Review | "Some websites may load slower once or lose offline data." |
+| `.../Service Worker/ScriptCache` (same apps) | Review | `cache.electron.scripts`, "Some extensions may stop working until you turn them off and on again." Moved out of Safe on 2026-10-25 (C32). |
 | `Library/Application Support/Google/Chrome/{component_crx_cache, extensions_crx_cache, GraphiteDawnCache, GrShaderCache, ShaderCache}` | Safe | Chrome not running. |
 | `Library/Application Support/Caches/<name>` | same as `Library/Caches/<name>` | |
 | `Library/Caches/Tidy` and every Tidy folder | Excluded | |
@@ -212,8 +214,18 @@ Paths are relative to the scan root (the home folder in production). "Owner not 
 | `.local/share/claude/versions/*`, `.local/share/cursor-agent/versions/*` | Review | Never the newest version or the one a running process uses. |
 | `Library/Application Support/Zed/{languages, node}` | Review | Zed not running. |
 | `Library/Application Support/Google/AndroidStudio*` | Review | Never the newest version folder. |
-| `.cache/<tool>` for firebase, gh, vscode-ripgrep, yt-dlp | Safe | Owner tool not running. Unknown `.cache/<name>` folders are not offered. |
-| `.cargo/bin`, `.rustup`, `.cursor/extensions`, `.docker`, `.claude/projects` | Excluded | Installed software or user history. |
+| `.cache/<tool>` for firebase, gh, vscode-ripgrep, yt-dlp, pre-commit | Safe | Owner tool not running. Unknown `.cache/<name>` folders are not offered. |
+| `Library/Caches/{go-build, gopls, golangci-lint, composer, typescript, deno, black}` | Safe | Through `cache.app`: the static owner table names Go, gopls, golangci-lint, Composer, TypeScript, Deno and Black (C38). |
+| `Library/Caches/pypoetry/{cache, artifacts}` | Safe | `dev.poetry`, Poetry not running. |
+| `Library/Caches/pypoetry/virtualenvs/<env>` | Review | `dev.poetry-venvs`, older than 30 days, Poetry not running. "A project's Python environment. poetry install makes it again." |
+| `Library/Caches/JetBrains/<product>/{caches, index}` | Safe | `dev.jetbrains`, no JetBrains IDE running. Local History and the rest of the product folder are never offered. |
+| `.gem/ruby/<v>/cache`, `.rbenv/versions/<v>/lib/ruby/gems/<abi>/cache` | Safe | `dev.gem`, no `gem` or `bundle` running. Installed gems stay. |
+| `.bundle/cache` | Safe | `dev.bundler`, no `gem` or `bundle` running. |
+| `.pyenv/cache`, `.rbenv/cache` | Safe | `dev.pyenv-cache`, `dev.rbenv-cache`, pyenv (or python-build) and rbenv (or ruby-build) not running. Source downloads only; installed versions stay. |
+| `.cache/puppeteer`, `.cache/selenium`, `Library/Caches/electron` | Review | `dev.tool-downloads`, never a build a running process uses. Large to download again. |
+| `go/pkg/mod` | Report only | `dev.go-modcache`, "Remove downloaded Go modules with: go clean -modcache" (the files are read-only). |
+| `.cargo/bin`, `.rustup`, `.docker` | Excluded | Installed software. |
+| `.claude`, `.claude.json`, `.codex`, `.cursor`, `Library/Application Support/Cursor/User` | Excluded | AI coding tools' conversations, sessions, transcripts and memory (Claude Code `projects` and `sessions`, Codex `sessions` and `history.jsonl`, Cursor `chats`, `projects` and workspace history). Nothing rebuilds them (C37). |
 
 **AI models and large app data** (always Review, unticked, never included in the one-click clean, one row per model where the layout allows)
 
@@ -229,6 +241,12 @@ Paths are relative to the scan root (the home folder in production). "Owner not 
 | `Library/Application Support/Google/Chrome/{OptGuideOnDeviceModel, SODALanguagePacks, Snapshots}` | Review | Chrome not running. "Chrome downloads it again when needed." |
 | `.colima`, `Library/Application Support/Claude/vm_bundles`, other VM disks | Report only | "Virtual machine disk. Remove it from the app that made it." |
 
+**Old installers** (C39; always Review, unticked, never part of the one-click clean)
+
+| Target | Class | Rule |
+|---|---|---|
+| `Downloads/*.dmg`, `Downloads/*.pkg` (files directly in Downloads) | Review | `downloads.installers`, older than 30 days. "In Downloads, not changed for 45 days". Downloads is read only after the first Large files scan, whose click is when macOS asks for it. |
+
 **Trash**
 
 | Target | Class | Rule |
@@ -242,10 +260,11 @@ Paths are relative to the scan root (the home folder in production). "Owner not 
 2. Skip anything modified in the last 24 hours, in every group (age rules above are stricter where they exist).
 3. Minimum size per row is 1 MB. Smaller matches of the same rule fold into one row, "38 small items, 12 MB", that cleans as a unit.
 4. Never follow symlinks and never cross a volume boundary (compare the device id with the scan root's).
-5. Right before each move, re-check: the path still exists, `realpath` is strictly inside the scan root, it is not on the denylist or the user's ignore list, its markers are still present (table 6.3), and the owner is not running. A failed check skips the item with a reason.
+5. Right before each move, re-check: the path still exists, `realpath` is strictly inside the scan root, it is not on the denylist or the user's ignore list, its markers are still present (table 6.3), the project guard still passes (6.3), the owner is not running, and no process of the user holds a file open inside it (C34). A failed check skips the item with a reason. The ignore list is read from settings.json again for every move, on every path to the Trash (Clean, Large files, project output), and a read error stops the run (C36). A process list that cannot be read skips every move (C35).
 6. On EPERM or "Operation not permitted", skip the item with "macOS didn't allow access" and never retry in a loop.
 7. Only targets in the rule table are offered. There is no "scan everything" mode and no free-form delete in Cleanup.
 8. Owner resolution: a static table maps folder names to bundle ids and process names (Google to Chrome, `company.thebrowser.dia` to Dia, and so on). A folder name that looks like a bundle id is checked against installed apps in `/Applications` and `~/Applications` by reading each `Info.plist`. Running processes come from `proc_listpids` plus `proc_pidpath`; the bundle id of a process is read from the `Info.plist` of the `.app` that contains its executable (C20: plain libc, works the same in the app and in tidyctl).
+9. Each rule has a time budget of 30 seconds per scan (gathering, dates and sizes together). A rule that runs out is stopped, offers nothing, and the scan says "Skipped <rule> because it took too long. Scan again to try it."; the other rules go on (C40).
 
 ### 6.3 Project build output
 
@@ -264,6 +283,8 @@ Project roots: `~/Documents/projects`, `~/Developer`, `~/Projects`, `~/src`, `~/
 | `DerivedData` | an `.xcodeproj` or `.xcworkspace` beside it | Safe after 7 days, Xcode not running |
 | `dist`, `build` | `package.json`, `Cargo.toml`, `build.gradle*` or `CMakeLists.txt` in the parent, and the folder named in the project's `.gitignore` | Review |
 | `vendor` | `composer.json` or `Gemfile` in the parent, plus its lock file | Review |
+
+**Project guard** (C33). Whatever its markers say, build output is never offered, and is skipped at the move, when it holds a `*-keypair.json` file, a `.git` folder or file anywhere inside, or a file Git tracks (read from the repository's `.git/index`, versions 2 to 4, without running `git`). An index that cannot be read counts as tracking something.
 
 "After 30 days" means the newest file mtime anywhere in the project folder (the parent, excluding the build output itself and `.git`) is older than 30 days, so an active project is never offered. On this Mac that means Haul's 35 GB `target` is not offered while Haul is being worked on, which is correct.
 
@@ -435,7 +456,7 @@ Cards and groups (Check up cards, the reminder row, Memory figures and graph) sh
 
 **History sheet**: 560 x 480 pt, rows 44 pt: date 13/500, action and counts 12 `text_2`, size right; expanded items are 32 pt rows with mono paths.
 
-**Motion**: Haul's existing motions, plus two state changes. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. The reminder switch knob slides to its side over 160 ms (`enter` curve) after a click, and a Check up card fades its result in over 200 ms when its part reports; both play only within 400 ms of the change (`CHANGE_GATE`), so a window that opens on a settled state shows it still, and both are instant under Reduce Motion. Nothing counts up, nothing celebrates.
+**Motion**: Haul's existing motions, plus two state changes. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. The reminder switch knob slides to its side over 160 ms (`enter` curve) after a click, and a Check up card fades its result in over 200 ms when its part reports; both play only within 400 ms of the change (`CHANGE_GATE`), so a window that opens on a settled state shows it still, and both are instant under Reduce Motion. Nothing counts up, nothing celebrates. Overlays (dialogs, History, System Data, the details popover) come in and leave as section 18.3 describes (C44).
 
 **Copy rules**: sentence case for text and labels, title case for buttons and menu items ("Open Network Settings", "Check Now", "Scan Home Folder"), plain words, sizes with one decimal above 1 GB ("6.3 GB", "640 MB"), dates as relative phrases ("8 months ago"), no exclamation marks. A button or menu item that opens a confirm ends in an ellipsis character ("Empty Trash…", "Move to Trash…", "Force Quit…"), and middle-truncated paths use it too (`~/Movies/2025/…/trip.mov`).
 
@@ -524,6 +545,20 @@ Made in this document:
 - C29. The sheet never says Tidy will shrink Apple's System Data figure. It names what Tidy can measure, says "Not measured" or "Needs Full Disk Access" where it cannot, and gives the rest one row with no number.
 - C30. Docker and local Time Machine snapshots are Report only rows of that sheet, each with a plain explanation and a Copy button for its command. Tidy runs only the read-only `tmutil listlocalsnapshots /`; `SystemRunner` refuses `docker` always, every other `tmutil` verb always, and `tmutil` entirely under `TIDY_HOME` and in tests.
 - C31. Check up ends with a "What Tidy never does" card of six items (section 17.3).
+- C32. `Service Worker/ScriptCache` of Chromium and Electron apps is Review (`cache.electron.scripts`), not Safe: removing it can leave extensions broken until they are turned off and on again.
+- C33. A project guard keeps build output that holds a `*-keypair.json`, a nested `.git` or a Git-tracked file out of the plan and out of every move; Tidy reads `.git/index` itself and treats an unreadable index as "tracked".
+- C34. Right before each move (Clean and Large files alike) Tidy reads the open files of the user's own processes with libproc, no sudo, leaving its own process out. A path a process holds open, or holds something open inside, is skipped with "Open in <name>, skipped". When the table cannot be read, every move is skipped.
+- C35. A process list that cannot be read means "unknown": scan rows with an owner are blocked with "Tidy couldn't check whether <app> is open", and every move is skipped.
+- C36. The ignore list is read from settings.json before each move, together with the copy in memory, on every path to the Trash. A path that is ignored, inside an ignored path, or holds one is skipped. A file that cannot be read or parsed stops the run, and the history entry says so.
+- C37. The data folders of AI coding tools are Excluded whole: `.claude`, `.claude.json`, `.codex`, `.cursor` and Cursor's `User` folder. Their caches are not worth the risk to conversations and memory.
+- C38. More tool caches, each with its reason and "If removed" line (C27): Go, gopls, golangci-lint, Composer, TypeScript, Deno and Black by owner name; Poetry (downloads Safe, environments Review); JetBrains `caches` and `index` only; gem, Bundler, pyenv and rbenv download caches; puppeteer, selenium and Electron downloads as Review; the Go module cache as Report only. The generic cache rule leaves `pypoetry`, `JetBrains` and `electron` to these rules. Not added: name-based orphan detection, container caches, anything inside a tool's cache, emptying the Trash.
+- C39. "Old installers" is its own group: `.dmg` and `.pkg` files directly in Downloads, older than 30 days, always Review. The rule reads Downloads only after the first Large files scan, so an automatic Cleanup rescan never brings up the Downloads privacy prompt.
+- C40. Each Cleanup rule has a 30 second budget per scan; one that runs out is reported in the plan's `skipped` lines, which the Cleanup screen now shows in its notice band. A walk stopped part way is never used for a date or a size.
+- C41. Relaunch on the Memory screen (18.2).
+- C42. The browser memory tip (18.2).
+- C43. The "What would help" line (18.2).
+- C44. One enter and exit for the overlays, the popover settle and two content fades (18.3).
+- C45. Demo scenarios `memory-relaunch` and `memory-critical`; the Cleanup demo has two old installers.
 
 ## 16. As-built: M2 (Memory, Security, Check up and reminder)
 
@@ -562,7 +597,7 @@ A full run has FAIL 0 and SKIP 0. `ACCEPT_SKIP_GATES=1` and `ACCEPT_SKIP_BUNDLE=
 
 ## 17. Trust surfaces (design note, 2026-10-25)
 
-From the user research (`reddit/tidy.md`, gap rows 3, 5, 6, 11 and 18): people trust a cleaner that says why each item is safe, explains System Data without promising to shrink it, and states what it never does. These three surfaces add no deletion path, need no Full Disk Access, sudo or background agent, and reuse section 11's tokens (`card_bg`, `pop_bg`, `pop_shadow`, `fill`, `text`, `text_2`, `text_3`, `tag_border`, `accent`), type roles and motion. Nothing new animates.
+From the user research (`reddit/tidy.md`, gap rows 3, 5, 6, 11 and 18): people trust a cleaner that says why each item is safe, explains System Data without promising to shrink it, and states what it never does. These three surfaces add no deletion path, need no Full Disk Access, sudo or background agent, and reuse section 11's tokens (`card_bg`, `pop_bg`, `pop_shadow`, `fill`, `text`, `text_2`, `text_3`, `tag_border`, `accent`), type roles and motion. Nothing new animated when they shipped; section 18.3 later added their enter and exit.
 
 ### 17.1 Item details (C27)
 
@@ -591,3 +626,32 @@ From the user research (`reddit/tidy.md`, gap rows 3, 5, 6, 11 and 18): people t
 - The last block on Check up, after the System Data row: the heading "What Tidy never does" 13/600 `text` 20 pt from the row above, then one `card_bg` card (radius 10, padding 14) holding a two-column grid of six items, 12 pt column gap, 10 pt row gap. Each item: a `Ban` icon 14 `text_3`, a title 13/500 `text`, and a note 12 `text_2`.
 - Items: "Ask for Full Disk Access" / "It works with what macOS gives every app."; "Run in the background" / "Nothing starts at login or runs after you quit."; "Use sudo or ask for your password" / "No helper tools and no admin rights."; "Delete outside the Trash" / "Everything it removes can be put back."; "Empty the Trash on its own" / "Emptying it is a separate step you confirm."; "Use scare tactics" / "No red badges, countdowns or alarm words."
 - Demo scenarios `cleanup-why`, `system-data`, `system-data-report` (the sheet scrolled to Docker and the snapshots) and `checkup-trust` (Check up scrolled to the end) cover the three surfaces in the screenshots.
+
+## 18. Mole lessons, more coverage, Relaunch and overlay motion (design note, 2026-10-25)
+
+From the review of Mole, a GPL-3.0 cleaner (`reddit/mole.md`): its worst incidents came from caches deleted while something still used them, a whitelist that one command never read, keys and repositories inside build output, and AI tool histories. Tidy takes the ideas and the well-known paths only; every rule here is written from the tool's own documentation and checked against a fixture home. No code, rule list or wording comes from Mole.
+
+### 18.1 Safety (C32 to C37, C40)
+
+- The last gate before a move (`clean.rs`, `MoveGate`) is shared by Clean and Move to Trash: the ignore list read fresh (fail closed), then the open files of the user's processes (libproc `PROC_PIDLISTFDS` and `PROC_PIDFDVNODEPATHINFO`, fail closed). It runs after the path guard and the rule's re-check.
+- The project guard (`cleanup.rs`, `Guard`) runs in the scan's date walk and again, from scratch, at the move.
+- A new seam, `OpenFilesProbe` (`LibcOpenFiles` in production, `FixedOpenFiles` in tests), joins the others in `env.rs`. The conservative default seams make every move skip.
+- Skip reasons: "On your ignore list", "Tidy couldn't read your ignore list, skipped", "Open in <name>, skipped", "Tidy couldn't check which files are open, skipped", "Tidy couldn't read which apps are open, skipped", "Holds a keypair file, skipped", "Holds a Git repository, skipped", "Git tracks files inside it, skipped", "Tidy couldn't read the project's Git index, skipped".
+- The details popover lists two more checks: "Skipped while a program has a file open inside it" on every item Tidy may move, and "Never when it holds a keypair, a Git repository or files Git tracks" on build output.
+
+### 18.2 Memory screen (C41 to C43)
+
+- **Relaunch.** A secondary text button left of Quit, on rows of real apps that may be quit (an `.app` bundle; never the System row, plain processes, Finder, WindowServer, loginwindow or Tidy). The action column grows from 112 to 168 pt and the "Memory in use" label moves with it. A press reads the app's `bundleURL` from `NSRunningApplication`, sends the polite `terminate`, and looks every 250 ms for up to 10 seconds. Once the app has exited, Tidy opens the same bundle with `NSWorkspace openApplicationAtURL` without bringing it to the front, so the user keeps their place in Tidy. It never force quits. Row lines: "Quitting, then opening again" while it waits; "Opened again" for 4 seconds; "Didn't quit in 10 seconds, so Tidy left it open." (warning color, both buttons back, no Force Quit); "Quit, but macOS didn't open it again. Open it from the Dock." (warning color). Without a bundle URL nothing is sent and the row says "macOS did not pass the request on." Tests use the fake `Terminator` (`bundle_path`, `open_app`); no test quits, relaunches or signals a real app.
+- **Browser tip.** On Chrome, Edge, Brave and Arc rows (by bundle id) above 4 GB, the line under the name names the browser's own setting, after a 12 pt `Lightbulb` in `text_2`, in place of the helper count: Chrome "Memory Saver, in Settings > Performance, frees idle tabs."; Brave "Memory Saver, in Settings > System, frees idle tabs."; Edge "Sleeping tabs, in Settings > System and performance, free memory."; Arc "Archiving idle tabs sooner, in Settings > Profiles, frees memory." (Arc has no Memory Saver; it archives idle tabs on a per-profile timer). A Quit or Relaunch state takes the line's place while it lasts.
+- **What would help.** While pressure is Warning or Critical, one line between the graph and "Top apps by memory": a 13 pt `Lightbulb`, "What would help" in 12/500 `text`, then the two largest rows that may be quit, in `text_2`: "Quit or relaunch Google Chrome (5.6 GB) or Xcode (4.3 GB)." It is plain text, not a card: the verdict and the Pressure figure already carry the color. With no app to name it says "Quit apps you aren't using." Nothing is purged and nothing asks for admin rights.
+
+### 18.3 Overlay motion (C44)
+
+From the animation gate (`motion/tidy.md`), all four rows:
+
+- **Sheets** (confirm dialogs, History, System Data) share `overlay::present`. In: the scrim, which holds the card, fades from clear over `CARD_IN` 200 ms with the `enter` curve while the card settles up from 6 pt below its place. Out: the reverse over `NOTE_OUT` 200 ms with the `exit` curve, drawn from a leaving copy the view keeps (the dialog's spec, or the sheet drawn once more). The leaving copy takes no clicks and goes when its timer ends. Buttons, Return and Escape work from the first frame; reopening while a copy leaves drops the copy.
+- **Why-safe popover.** In: opacity and a 4 pt settle toward the click over `NOTE_IN` 160 ms, `enter`. Out: opacity only over `REMOVE` 140 ms, `exit`, from an inert copy. Opening another row's details shows the new one at once and drops the old one with no exit.
+- **System Data first measure.** When the first report of an opening arrives, the figure, the rows and the footer fade in over `CARD_IN`. A sheet reopened on a cached report, and a re-measure, show still.
+- **History.** An entry that opens fades its item rows in over `NOTE_IN`; rows below move at once; closing is instant.
+- Every motion is keyed by a fresh generation and plays only within `CHANGE_GATE` of the change, so a window that opens on a settled state, or a demo shot, shows it still. Under Reduce Motion nothing plays and nothing leaves through a copy.
+

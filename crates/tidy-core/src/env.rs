@@ -1,5 +1,5 @@
 //! The environment every scan and clean runs in: the scan root, Tidy's folders, settings, the
-//! local time zone, and six seams (traits) that tests replace with fakes.
+//! local time zone, and seven seams (traits) that tests replace with fakes.
 //!
 //! | Seam | Production | Fake |
 //! |---|---|---|
@@ -9,6 +9,7 @@
 //! | [`LastUsed`] | Spotlight in `lastused` | [`FileTimesOnly`] |
 //! | [`MemoryProbe`] (M2) | the libc and mach probe in `memory` | [`FixedMemory`] |
 //! | [`CommandRunner`] (M2) | [`SystemRunner`] | [`ReplayRunner`] |
+//! | [`OpenFilesProbe`] | `LibcOpenFiles` in `procs` | [`FixedOpenFiles`] |
 //!
 //! [`Env::from_env`] builds the production variant, or the `TIDY_HOME` variant when that
 //! variable is set (design section 8.4). The test hooks (`TIDY_SCAN_ROOT`,
@@ -84,6 +85,93 @@ pub const TEST_NOW: u64 = 1_792_764_131;
 /// Which bundle ids and process names are running.
 pub trait ProcessProbe: Send + Sync {
     fn running(&self) -> RunningSet;
+}
+
+/// One file or folder a process holds open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenFile {
+    pub path: PathBuf,
+    pub pid: i32,
+    /// The process name, shown in "Open in <name>, skipped".
+    pub holder: String,
+}
+
+/// The files the user's processes hold open, read once right before a move.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenFiles {
+    files: Vec<OpenFile>,
+}
+
+impl OpenFiles {
+    pub fn new(files: Vec<OpenFile>) -> OpenFiles {
+        OpenFiles { files }
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// The first open file at `path` or inside it. `path` should be the resolved path, the
+    /// way macOS reports open files (`/private/var`, not `/var`).
+    pub fn inside(&self, path: &Path) -> Option<&OpenFile> {
+        self.files.iter().find(|f| f.path.starts_with(path))
+    }
+}
+
+/// Which files the user's processes hold open (design 6.2, rule 5: read again right before
+/// each move). `LibcOpenFiles` in `procs` in production, [`FixedOpenFiles`] in tests. An error
+/// means "unknown", and the move is skipped.
+pub trait OpenFilesProbe: Send + Sync {
+    fn open_files(&self) -> io::Result<OpenFiles>;
+}
+
+/// A fixed list of open files, or an error when it holds `None`. The default has nothing open.
+#[derive(Debug)]
+pub struct FixedOpenFiles(Mutex<Option<Vec<OpenFile>>>);
+
+impl Default for FixedOpenFiles {
+    fn default() -> FixedOpenFiles {
+        FixedOpenFiles(Mutex::new(Some(Vec::new())))
+    }
+}
+
+impl FixedOpenFiles {
+    /// Adds `path`, open in a process called `holder`.
+    pub fn with(self, path: impl Into<PathBuf>, holder: &str) -> FixedOpenFiles {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Vec::new)
+            .push(OpenFile {
+                path: path.into(),
+                pid: 4242,
+                holder: holder.to_string(),
+            });
+        self
+    }
+
+    /// A probe whose every read fails.
+    pub fn unreadable() -> FixedOpenFiles {
+        FixedOpenFiles(Mutex::new(None))
+    }
+
+    /// Replaces the list, or makes every read fail with `None`.
+    pub fn set(&self, files: Option<Vec<OpenFile>>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = files;
+    }
+}
+
+impl OpenFilesProbe for FixedOpenFiles {
+    fn open_files(&self) -> io::Result<OpenFiles> {
+        match &*self.0.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(files) => Ok(OpenFiles::new(files.clone())),
+            None => Err(io::Error::other("the open files cannot be read")),
+        }
+    }
 }
 
 /// The current time.
@@ -598,14 +686,16 @@ fn read_in_thread(pipe: Option<impl Read + Send + 'static>) -> std::sync::mpsc::
 
 /// The production seams that live in their own modules (libc, Spotlight and mach FFI), so
 /// the caller passes them to [`Env::from_env_with`]. The default is the conservative set:
-/// [`UnknownProbe`], [`FileTimesOnly`], [`NoMemory`] and an empty [`ReplayRunner`] (every
-/// command fails, so every Security check is gray). The app and tidyctl pass the real ones.
+/// [`UnknownProbe`], [`FileTimesOnly`], [`NoMemory`], an empty [`ReplayRunner`] (every
+/// command fails, so every Security check is gray) and an unreadable open-file probe (every
+/// move is skipped). The app and tidyctl pass the real ones.
 #[derive(Clone)]
 pub struct SystemSeams {
     pub procs: Arc<dyn ProcessProbe>,
     pub last_used: Arc<dyn LastUsed>,
     pub memory: Arc<dyn MemoryProbe>,
     pub runner: Arc<dyn CommandRunner>,
+    pub open_files: Arc<dyn OpenFilesProbe>,
 }
 
 impl Default for SystemSeams {
@@ -615,6 +705,7 @@ impl Default for SystemSeams {
             last_used: Arc::new(FileTimesOnly),
             memory: Arc::new(NoMemory),
             runner: Arc::new(ReplayRunner::new()),
+            open_files: Arc::new(FixedOpenFiles::unreadable()),
         }
     }
 }
@@ -712,6 +803,8 @@ pub struct Env {
     pub memory: Arc<dyn MemoryProbe>,
     /// Runs the Security checks' status commands (M2).
     pub runner: Arc<dyn CommandRunner>,
+    /// The files the user's processes hold open, read right before each move.
+    pub open_files: Arc<dyn OpenFilesProbe>,
     /// The local time zone, for the reminder date: the system's, or `TIDY_TEST_TZ`, or UTC
     /// in [`Env::for_tests`].
     pub tz: TimeZone,
@@ -815,6 +908,7 @@ impl Env {
             last_used,
             memory,
             runner,
+            open_files: system.open_files,
             tz,
             settings,
         }
@@ -835,6 +929,7 @@ impl Env {
             last_used: Arc::new(FileTimesOnly),
             memory: Arc::new(FixedMemory::default()),
             runner: Arc::new(ReplayRunner::new()),
+            open_files: Arc::new(FixedOpenFiles::default()),
             tz: TimeZone::UTC,
             settings: Settings::default(),
             overridden: true,
@@ -868,6 +963,11 @@ impl Env {
 
     pub fn with_runner(mut self, runner: Arc<dyn CommandRunner>) -> Env {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_open_files(mut self, open_files: Arc<dyn OpenFilesProbe>) -> Env {
+        self.open_files = open_files;
         self
     }
 

@@ -116,6 +116,7 @@ pub fn group_icon(group: Group) -> IconName {
         Group::Logs => IconName::FileText,
         Group::Developer => IconName::SquareTerminal,
         Group::AiModels => IconName::Cpu,
+        Group::Installers => IconName::Disc,
         Group::Trash => IconName::Trash,
     }
 }

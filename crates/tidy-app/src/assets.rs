@@ -24,7 +24,8 @@ icon_assets!(
         Smartphone,
         TabletSmartphone,
         Container,
-        Layers
+        Layers,
+        Lightbulb
     ]
 );
 
@@ -76,6 +77,7 @@ mod tests {
             IconName::TabletSmartphone,
             IconName::Container,
             IconName::Layers,
+            IconName::Lightbulb,
             // From gpui-kit's default set.
             IconName::Info,
             IconName::Ban,

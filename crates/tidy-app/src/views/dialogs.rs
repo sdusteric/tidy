@@ -6,12 +6,14 @@
 //! state and the tests can see what it says. What a dialog asks for is plain data
 //! ([`DialogSpec`]); the view turns a confirm into a `Command`.
 
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use tidy_core::model::{Class, Item as CleanItem, TrashSummary};
 
 use crate::app::LargeEntry;
 use crate::format;
 use crate::theme::{Theme, metrics, tnum};
+use crate::views::overlay::{Phase, Sheet, present};
 
 /// Shown when any selected item lives under `~/Library` (C10).
 pub const APP_DATA_NOTE: &str =
@@ -211,10 +213,13 @@ fn dialog_button(
 pub fn render_dialog(
     spec: &DialogSpec,
     t: &Theme,
+    phase: Phase,
     on_cancel: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_confirm: impl Fn(&mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
+) -> AnyElement {
     let cancel_scrim = on_cancel.clone();
+    // A leaving copy only fades: it takes no clicks.
+    let leaving = matches!(phase, Phase::Leave(_));
     let list = (!spec.rows.is_empty()).then(|| {
         div()
             .id("dialog-list")
@@ -261,7 +266,9 @@ pub fn render_dialog(
         .flex_col()
         .gap(px(12.))
         // A click inside the card is not a click on the scrim.
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .when(!leaving, |d| {
+            d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        })
         .child(
             div()
                 .debug_selector(|| "dialog-title".to_string())
@@ -310,7 +317,7 @@ pub fn render_dialog(
                     on_confirm,
                 )),
         );
-    div()
+    let scrim = div()
         .id("dialog-scrim")
         .absolute()
         .inset_0()
@@ -318,10 +325,12 @@ pub fn render_dialog(
         .flex()
         .items_center()
         .justify_center()
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cancel_scrim(window, cx)
-        })
-        .child(card)
+        .when(!leaving, |d| {
+            d.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cancel_scrim(window, cx)
+            })
+        });
+    present(Sheet::Dialog, scrim, card, phase)
 }
 
 #[cfg(test)]

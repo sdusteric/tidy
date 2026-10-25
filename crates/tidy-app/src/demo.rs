@@ -82,6 +82,10 @@ pub enum Scenario {
     Memory,
     /// Memory with tight pressure and a row that is still open after Quit.
     MemoryTight,
+    /// Memory with tight pressure while one app relaunches and another was just opened again.
+    MemoryRelaunch,
+    /// Memory with very tight pressure and an app that did not quit in time for Relaunch.
+    MemoryCritical,
     /// Security after a second check: marks, amber buttons and a gray row.
     Security,
     /// Security on the first run: the first-check line and no marks.
@@ -99,7 +103,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 17] = [
+    pub const ALL: [Scenario; 19] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -110,6 +114,8 @@ impl Scenario {
         Scenario::Checkup,
         Scenario::Memory,
         Scenario::MemoryTight,
+        Scenario::MemoryRelaunch,
+        Scenario::MemoryCritical,
         Scenario::Security,
         Scenario::SecurityFirst,
         Scenario::SecurityItems,
@@ -137,6 +143,8 @@ impl Scenario {
             Scenario::Checkup => "checkup",
             Scenario::Memory => "memory",
             Scenario::MemoryTight => "memory-tight",
+            Scenario::MemoryRelaunch => "memory-relaunch",
+            Scenario::MemoryCritical => "memory-critical",
             Scenario::Security => "security",
             Scenario::SecurityFirst => "security-first",
             Scenario::SecurityItems => "security-items",
@@ -157,7 +165,10 @@ impl Scenario {
             | Scenario::SystemData
             | Scenario::SystemDataReport
             | Scenario::CheckupTrust => Screen::Checkup,
-            Scenario::Memory | Scenario::MemoryTight => Screen::Memory,
+            Scenario::Memory
+            | Scenario::MemoryTight
+            | Scenario::MemoryRelaunch
+            | Scenario::MemoryCritical => Screen::Memory,
             Scenario::Security | Scenario::SecurityFirst | Scenario::SecurityItems => {
                 Screen::Security
             }
@@ -497,6 +508,24 @@ pub fn cleanup_plan() -> Plan {
             None,
             24_100 * MB,
         ),
+        clean_item(
+            "downloads.installers:Downloads/Docker.dmg",
+            Installers,
+            Review,
+            "Docker.dmg",
+            "In Downloads, not changed for 74 days",
+            None,
+            640 * MB,
+        ),
+        clean_item(
+            "downloads.installers:Downloads/Zoom.pkg",
+            Installers,
+            Review,
+            "Zoom.pkg",
+            "In Downloads, not changed for 41 days",
+            None,
+            96 * MB,
+        ),
     ];
     plan.sort();
     plan
@@ -737,8 +766,23 @@ pub fn memory_snapshot(pressure: Pressure) -> MemorySnapshot {
     } else {
         (2_048 * MB, 320 * MB, 3_400 * MB)
     };
+    let tighter = pressure == Pressure::Critical;
+    let mut chrome = mem_row(
+        "Google Chrome",
+        if tighter {
+            7_400
+        } else if tight {
+            5_600
+        } else {
+            4_200
+        },
+        14,
+        true,
+    );
+    // Above 4 GB, so its row shows Chrome's own Memory Saver setting.
+    chrome.bundle_id = Some("com.google.Chrome".to_string());
     let mut apps = vec![
-        mem_row("Google Chrome", if tight { 5_600 } else { 4_200 }, 14, true),
+        chrome,
         mem_row("Xcode", if tight { 4_300 } else { 3_100 }, 6, true),
         mem_row("Slack", 1_400, 5, true),
         mem_row("Spotify", 920, 4, true),
@@ -1182,29 +1226,46 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
             m.security.report = Some(security_report(false));
             m.memory.snapshot = Some(memory_snapshot(Pressure::Normal));
         }
-        Scenario::Memory | Scenario::MemoryTight => {
-            let tight = scenario == Scenario::MemoryTight;
-            m.memory.snapshot = Some(memory_snapshot(if tight {
-                Pressure::Warning
-            } else {
-                Pressure::Normal
-            }));
-            m.memory.history = pressure_history(tight);
-            // One row shows each state of a Quit.
-            let (name, state) = if tight {
-                ("Spotify", crate::views::memory::QuitState::StillOpen)
-            } else {
-                ("Slack", crate::views::memory::QuitState::Requested)
+        Scenario::Memory
+        | Scenario::MemoryTight
+        | Scenario::MemoryRelaunch
+        | Scenario::MemoryCritical => {
+            use crate::views::memory::QuitState;
+            let pressure = match scenario {
+                Scenario::Memory => Pressure::Normal,
+                Scenario::MemoryCritical => Pressure::Critical,
+                _ => Pressure::Warning,
             };
-            let pid = m
-                .memory
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.app(&mem_id(name)))
-                .map_or(0, |a| a.pid);
-            m.memory
-                .quits
-                .insert(mem_id(name), crate::views::memory::Quit { state, pid });
+            m.memory.snapshot = Some(memory_snapshot(pressure));
+            m.memory.history = pressure_history(pressure != Pressure::Normal);
+            if pressure == Pressure::Critical {
+                // The last 16 seconds went very tight.
+                for p in m.memory.history.iter_mut().skip(52) {
+                    *p = Pressure::Critical;
+                }
+            }
+            // Rows show the states of Quit and Relaunch.
+            let states: &[(&str, QuitState)] = match scenario {
+                Scenario::Memory => &[("Slack", QuitState::Requested)],
+                Scenario::MemoryTight => &[("Spotify", QuitState::StillOpen)],
+                Scenario::MemoryRelaunch => &[
+                    ("Xcode", QuitState::Relaunching),
+                    ("Slack", QuitState::Reopened),
+                ],
+                _ => &[("Spotify", QuitState::RelaunchStillOpen)],
+            };
+            for (name, state) in states {
+                let pid = m
+                    .memory
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.app(&mem_id(name)))
+                    .map_or(0, |a| a.pid);
+                m.memory.quits.insert(
+                    mem_id(name),
+                    crate::views::memory::Quit { state: *state, pid },
+                );
+            }
         }
         Scenario::Security | Scenario::SecurityItems => {
             m.security.report = Some(security_report(false));
@@ -1274,7 +1335,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 17);
+        assert_eq!(Scenario::ALL.len(), 19);
     }
 
     #[test]
@@ -1282,14 +1343,19 @@ mod tests {
         let plan = cleanup_plan();
         assert_eq!(plan.safe_bytes(), 6_344 * MB);
         assert_eq!(crate::format::size(plan.safe_bytes()), "6.3 GB");
-        // One blocked row, two Review rows in Caches and Developer plus Hugging Face.
+        // One blocked row, two Review rows in Caches and Developer plus Hugging Face, and two
+        // old installers (Review, never ticked).
         assert_eq!(plan.items.iter().filter(|i| i.blocked.is_some()).count(), 1);
         assert_eq!(
             plan.items
                 .iter()
                 .filter(|i| i.class == Class::Review)
                 .count(),
-            3
+            5
+        );
+        assert!(
+            plan.group(Group::Installers)
+                .all(|i| i.class == Class::Review && !i.ticked)
         );
         assert_eq!(
             plan.items
@@ -1298,7 +1364,7 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(plan.groups().len(), 4);
+        assert_eq!(plan.groups().len(), 5);
         // The blocked Chrome item is Safe by class but not ticked.
         let chrome = plan.items.iter().find(|i| i.blocked.is_some()).unwrap();
         assert!(!chrome.ticked && chrome.class == Class::Safe);
@@ -1402,6 +1468,13 @@ mod tests {
                 .app(&mem_id("Spotify"))
                 .is_some()
         );
+        // Chrome is above 4 GB at every pressure, so it shows its Memory Saver tip.
+        for p in [Pressure::Normal, Pressure::Warning, Pressure::Critical] {
+            let s = memory_snapshot(p);
+            let chrome = s.app(&mem_id("Google Chrome")).unwrap();
+            assert!(crate::views::memory::browser_tip(chrome).is_some());
+            assert!(s.app(&mem_id("Xcode")).is_some());
+        }
     }
 
     #[test]

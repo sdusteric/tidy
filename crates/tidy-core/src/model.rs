@@ -65,6 +65,9 @@ pub enum Group {
     Developer,
     /// AI models and large app data. Every item is Review or Report only.
     AiModels,
+    /// Old installers (`.dmg`, `.pkg`) in Downloads. Every item is Review: never ticked,
+    /// never part of the one-click clean.
+    Installers,
     /// Items Tidy moved to the Trash earlier. Emptied by its own confirmed action, never by
     /// Clean.
     Trash,
@@ -72,11 +75,12 @@ pub enum Group {
 
 impl Group {
     /// Every group in display order.
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Group::Caches,
         Group::Logs,
         Group::Developer,
         Group::AiModels,
+        Group::Installers,
         Group::Trash,
     ];
 
@@ -87,6 +91,7 @@ impl Group {
             Group::Logs => "Logs",
             Group::Developer => "Developer",
             Group::AiModels => "AI models and large app data",
+            Group::Installers => "Old installers",
             Group::Trash => "Trash",
         }
     }

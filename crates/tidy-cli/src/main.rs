@@ -44,7 +44,7 @@ use tidy_core::model::{
     LargeKind, LargeScan, MB, TrasherKind,
 };
 use tidy_core::paths::{AppPaths, HOME_ENV};
-use tidy_core::procs::LibcProbe;
+use tidy_core::procs::{LibcOpenFiles, LibcProbe};
 use tidy_core::reminder::ReminderDate;
 use tidy_core::{Env, InstanceLock, LockError, history};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -381,6 +381,8 @@ fn with_core(cmd: Cmd) -> u8 {
         // Under TIDY_HOME, TIDY_TEST_MEMORY and TIDY_TEST_COMMANDS replace these two.
         memory: Arc::new(LibcMemory::new()),
         runner: Arc::new(SystemRunner),
+        // Read right before each move: a file a process holds open is skipped.
+        open_files: Arc::new(LibcOpenFiles),
     });
     let _lock = if cmd.real().is_some() {
         match InstanceLock::acquire(&env.paths.lock_file()) {

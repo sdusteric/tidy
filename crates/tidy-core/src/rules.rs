@@ -17,6 +17,7 @@
 //! | `cache.chrome.crx` | Chrome's crx and shader caches in Application Support (Safe) |
 //! | `cache.electron` | Cache, Code Cache, GPUCache and similar folders of Electron and Chromium apps (Safe) |
 //! | `cache.electron.sw` | `Service Worker/CacheStorage` (Review) |
+//! | `cache.electron.scripts` | `Service Worker/ScriptCache` (Review: extensions may need turning off and on) |
 //! | `logs.app` | files in `Library/Logs/<app>` older than 14 days (Safe) |
 //! | `logs.diag` | files in `Library/Logs/DiagnosticReports` older than 30 days (Safe) |
 //! | `dev.deriveddata`, `dev.previews`, `dev.coresim-caches` | Xcode build data (Safe) |
@@ -30,6 +31,10 @@
 //! | `proj.<kind>` | project build output, see [`PROJECT_RULES`] |
 //! | `ai.huggingface`, `ai.lmstudio`, `ai.ollama`, `ai.whisper`, `ai.fluidaudio`, `ai.hyperframes`, `ai.ltx`, `ai.anythingllm`, `ai.chrome-models` | models (Review) |
 //! | `ai.anythingllm-data`, `ai.vm` | Report only |
+//! | `dev.poetry`, `dev.jetbrains`, `dev.gem`, `dev.bundler`, `dev.pyenv-cache`, `dev.rbenv-cache` | package and IDE caches (Safe) |
+//! | `dev.tool-downloads`, `dev.poetry-venvs` | browser builds and project environments (Review) |
+//! | `dev.go-modcache` | Report only |
+//! | `downloads.installers` | `.dmg` and `.pkg` files in Downloads older than 30 days (Review, group Old installers) |
 
 use crate::model::{Class, Group, MB};
 use crate::owners::{self, OwnerInfo};
@@ -108,6 +113,9 @@ pub enum Name {
     LabelParen,
     /// A Hugging Face model folder `models--org--name` shown as `org/name`.
     HuggingFace,
+    /// `<parent folder>: <entry>`, for entries that share a name across products
+    /// (`IntelliJIdea2025.2: caches`).
+    ParentEntry,
 }
 
 /// Where a rule looks. Patterns are relative to the scan root and split on `/`. A segment is a
@@ -151,6 +159,13 @@ pub struct Rule {
     pub rebuild: &'static str,
     /// The command Tidy suggests and never runs, for a Report only row (design section 4).
     pub command: Option<&'static str>,
+    /// For [`Target::Files`]: only files with one of these extensions (case-insensitive). Empty
+    /// means every file.
+    pub exts: &'static [&'static str],
+    /// The rule reads a folder macOS protects (Downloads). It runs only once the user has let
+    /// Tidy in, which the first Large files scan asks for after a click (design 7), so a
+    /// Cleanup scan that starts on its own never brings up a privacy prompt.
+    pub protected: bool,
 }
 
 const D: Rule = Rule {
@@ -168,6 +183,8 @@ const D: Rule = Rule {
     skip: &[],
     rebuild: "",
     command: None,
+    exts: &[],
+    protected: false,
 };
 
 /// The subfolders that are safe to remove in Electron and Chromium apps (table 6.1).
@@ -180,10 +197,12 @@ pub const CHROMIUM_SAFE: &[&str] = &[
     "GrShaderCache",
     "ShaderCache",
     "Crashpad/completed",
-    "Service Worker/ScriptCache",
 ];
-/// The subfolder that goes to Review.
+/// The subfolder that goes to Review because websites keep offline data in it.
 pub const CHROMIUM_REVIEW: &[&str] = &["Service Worker/CacheStorage"];
+/// The compiled scripts of service workers. Review, never Safe: extensions that run as service
+/// workers can stop working once it is gone, until they are turned off and on again.
+pub const CHROMIUM_SCRIPTS: &[&str] = &["Service Worker/ScriptCache"];
 
 /// `Library/Caches` names that other rules claim, or that are excluded. The generic cache rule
 /// never offers them.
@@ -196,16 +215,32 @@ pub const CACHE_SKIP: &[&str] = &[
     "pip",
     "pnpm",
     "ms-playwright",
+    // Claimed by their own rules below: Poetry keeps project environments in its cache
+    // folder, a JetBrains system folder holds Local History beside its caches, and Electron
+    // downloads are large to fetch again.
+    "pypoetry",
+    "JetBrains",
+    "electron",
 ];
 
 /// Targets that are never offered (table 6.1, Excluded rows): installed software, user history
 /// and Tidy's own folders. Relative to the scan root, without regard to case.
+///
+/// AI coding tools keep conversations and memory next to their caches, and none of it comes
+/// back once gone, so their whole data folders are excluded: Claude Code (`.claude`, which
+/// holds `projects` with transcripts and memory, `sessions` and `history.jsonl`, and
+/// `.claude.json`), Codex (`.codex`, which holds `sessions`, `history.jsonl` and `memories`),
+/// and Cursor (`.cursor`, which holds `chats`, `projects` with agent transcripts and
+/// `extensions`, and `Cursor/User`, which holds chat and workspace history).
 pub const EXCLUDED: &[&str] = &[
     ".cargo/bin",
     ".rustup",
-    ".cursor/extensions",
     ".docker",
-    ".claude/projects",
+    ".claude",
+    ".claude.json",
+    ".codex",
+    ".cursor",
+    "Library/Application Support/Cursor/User",
     "Library/Caches/Tidy",
     "Library/Logs/Tidy",
     "Library/Application Support/Tidy",
@@ -273,6 +308,17 @@ pub static RULES: &[Rule] = &[
         owner: Owner::Folder,
         name: Name::LabelEntry,
         reason: "Some websites may load slower once or lose offline data.",
+        ..D
+    },
+    Rule {
+        id: "cache.electron.scripts",
+        rebuild: "Websites send their scripts again on the next visit. A browser extension that runs in the background can stay broken until you turn it off and on again.",
+        group: Group::Caches,
+        class: Class::Review,
+        targets: &[Target::Chromium(CHROMIUM_SCRIPTS)],
+        owner: Owner::Folder,
+        name: Name::LabelEntry,
+        reason: "Some extensions may stop working until you turn them off and on again.",
         ..D
     },
     Rule {
@@ -579,10 +625,107 @@ pub static RULES: &[Rule] = &[
             Target::Glob(".cache/gh"),
             Target::Glob(".cache/vscode-ripgrep"),
             Target::Glob(".cache/yt-dlp"),
+            Target::Glob(".cache/pre-commit"),
         ],
         owner: Owner::Folder,
         name: Name::Label,
         reason: "Cache, rebuilt by the tool",
+        ..D
+    },
+    Rule {
+        id: "dev.tool-downloads",
+        rebuild: "The tool downloads the browser or app build again the next time a project needs it, which can take a while.",
+        class: Class::Review,
+        targets: &[
+            Target::Glob(".cache/puppeteer"),
+            Target::Glob(".cache/selenium"),
+            Target::Glob("Library/Caches/electron"),
+        ],
+        owner: Owner::Folder,
+        in_use: true,
+        name: Name::Label,
+        reason: "Browser and app builds a test tool downloaded. It downloads them again when needed.",
+        ..D
+    },
+    Rule {
+        id: "dev.poetry",
+        rebuild: "Poetry downloads the packages again on the next install.",
+        targets: &[Target::Glob("Library/Caches/pypoetry/cache|artifacts")],
+        owner: Owner::Fixed(&owners::POETRY),
+        name: Name::LabelEntry,
+        label: "Poetry",
+        reason: "Package cache, Poetry downloads it again",
+        ..D
+    },
+    Rule {
+        id: "dev.poetry-venvs",
+        rebuild: "poetry install in the project makes the environment again.",
+        class: Class::Review,
+        targets: &[Target::Glob("Library/Caches/pypoetry/virtualenvs/*")],
+        age: Age::Target(30),
+        owner: Owner::Fixed(&owners::POETRY),
+        name: Name::LabelEntry,
+        label: "Poetry environment",
+        reason: "A project's Python environment. poetry install makes it again.",
+        ..D
+    },
+    Rule {
+        id: "dev.jetbrains",
+        rebuild: "The IDE indexes the project again when you open it, which takes a few minutes. Local History and settings stay.",
+        targets: &[Target::Glob("Library/Caches/JetBrains/*/caches|index")],
+        owner: Owner::Fixed(&owners::JETBRAINS),
+        name: Name::ParentEntry,
+        reason: "IDE caches and indexes, rebuilt by the IDE",
+        ..D
+    },
+    Rule {
+        id: "dev.gem",
+        rebuild: "RubyGems downloads a gem again if it needs the archive. Installed gems keep working.",
+        targets: &[
+            Target::Glob(".gem/ruby/*/cache"),
+            Target::Glob(".rbenv/versions/*/lib/ruby/gems/*/cache"),
+        ],
+        owner: Owner::Fixed(&owners::RUBYGEMS),
+        name: Name::LabelParen,
+        label: "Gem downloads",
+        reason: "Downloaded gem archives, installed gems keep working",
+        ..D
+    },
+    Rule {
+        id: "dev.bundler",
+        rebuild: "Bundler downloads the index and gems again on the next bundle install.",
+        targets: &[Target::Glob(".bundle/cache")],
+        owner: Owner::Fixed(&owners::RUBYGEMS),
+        label: "Bundler cache",
+        reason: "Package cache, Bundler downloads it again",
+        ..D
+    },
+    Rule {
+        id: "dev.pyenv-cache",
+        rebuild: "pyenv downloads the Python source again the next time you install that version.",
+        targets: &[Target::Glob(".pyenv/cache")],
+        owner: Owner::Fixed(&owners::PYENV),
+        label: "pyenv downloads",
+        reason: "Python source downloads, pyenv fetches them again",
+        ..D
+    },
+    Rule {
+        id: "dev.rbenv-cache",
+        rebuild: "ruby-build downloads the Ruby source again the next time you install that version.",
+        targets: &[Target::Glob(".rbenv/cache")],
+        owner: Owner::Fixed(&owners::RBENV),
+        label: "rbenv downloads",
+        reason: "Ruby source downloads, ruby-build fetches them again",
+        ..D
+    },
+    Rule {
+        id: "dev.go-modcache",
+        rebuild: "Go downloads modules again on the next build. Its files are read-only, so Go's own command removes them.",
+        command: Some("go clean -modcache"),
+        class: Class::ReportOnly,
+        targets: &[Target::Glob("go/pkg/mod")],
+        label: "Go module cache",
+        reason: "Remove downloaded Go modules with: go clean -modcache",
         ..D
     },
     // ---------- AI models and large app data ----------
@@ -728,6 +871,21 @@ pub static RULES: &[Rule] = &[
         label: "Virtual machine disk",
         name: Name::Entry,
         reason: "Virtual machine disk. Remove it from the app that made it.",
+        ..D
+    },
+    // ---------- Old installers ----------
+    Rule {
+        id: "downloads.installers",
+        rebuild: "Nothing rebuilds an installer. If you need it again, download it from the maker's website.",
+        group: Group::Installers,
+        class: Class::Review,
+        targets: &[Target::Files("Downloads")],
+        exts: &["dmg", "pkg"],
+        age: Age::Target(30),
+        name: Name::Entry,
+        label: "Old installer",
+        reason: "In Downloads, not changed for {days} days",
+        protected: true,
         ..D
     },
 ];
@@ -1031,6 +1189,9 @@ mod tests {
         assert_eq!(class("dev.cargo-registry"), Class::Review);
         assert_eq!(class("dev.gradle-wrapper"), Class::Review);
         assert_eq!(class("cache.electron.sw"), Class::Review);
+        // Removing it broke extensions in another cleaner, so it is never Safe.
+        assert_eq!(class("cache.electron.scripts"), Class::Review);
+        assert!(!CHROMIUM_SAFE.contains(&"Service Worker/ScriptCache"));
         assert_eq!(class("cache.app"), Class::Safe);
         assert_eq!(class("dev.deriveddata"), Class::Safe);
         assert_eq!(rule("dev.deriveddata").unwrap().age, Age::Target(7));
@@ -1038,6 +1199,46 @@ mod tests {
         assert_eq!(rule("logs.diag").unwrap().age, Age::Target(30));
         assert_eq!(rule("dev.archives").unwrap().age, Age::Target(90));
         assert_eq!(rule("dev.brew-downloads").unwrap().age, Age::Target(30));
+    }
+
+    #[test]
+    fn installers_are_review_only_and_read_downloads_only_when_allowed() {
+        let r = rule("downloads.installers").unwrap();
+        assert_eq!(r.class, Class::Review);
+        assert_eq!(r.group, Group::Installers);
+        assert_eq!(r.age, Age::Target(30));
+        assert_eq!(r.exts, ["dmg", "pkg"]);
+        assert!(r.protected);
+        // No other rule reads a protected folder.
+        assert_eq!(RULES.iter().filter(|r| r.protected).count(), 1);
+        for r in RULES.iter().filter(|r| r.group == Group::Installers) {
+            assert_ne!(r.class, Class::Safe, "{}", r.id);
+        }
+    }
+
+    #[test]
+    fn new_tool_rules_say_what_rebuilds_them() {
+        for id in [
+            "dev.poetry",
+            "dev.poetry-venvs",
+            "dev.jetbrains",
+            "dev.gem",
+            "dev.bundler",
+            "dev.pyenv-cache",
+            "dev.rbenv-cache",
+            "dev.tool-downloads",
+            "dev.go-modcache",
+        ] {
+            let r = rule(id).unwrap_or_else(|| panic!("{id}"));
+            assert!(!r.rebuild.is_empty() && !r.reason.is_empty(), "{id}");
+        }
+        assert_eq!(rule("dev.poetry-venvs").unwrap().class, Class::Review);
+        assert_eq!(rule("dev.tool-downloads").unwrap().class, Class::Review);
+        assert_eq!(rule("dev.go-modcache").unwrap().class, Class::ReportOnly);
+        // The generic cache rule leaves these folders to their own rules.
+        for name in ["pypoetry", "JetBrains", "electron"] {
+            assert!(skipped(CACHE_SKIP, name), "{name}");
+        }
     }
 
     #[test]
@@ -1074,6 +1275,18 @@ mod tests {
             ".cursor/extensions/x",
             ".docker/config.json",
             ".claude/projects/a",
+            // Claude Code, Codex and Cursor data, conversations first.
+            ".claude/projects/-Users-x-app/memory/MEMORY.md",
+            ".claude/sessions",
+            ".claude/settings.json",
+            ".claude.json",
+            ".codex/sessions/2026/10/24/rollout.jsonl",
+            ".codex/history.jsonl",
+            ".codex/cache",
+            ".cursor/chats/abc",
+            ".cursor/projects/app/agent-transcripts/a.txt",
+            "Library/Application Support/Cursor/User/workspaceStorage/x/state.vscdb",
+            "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
             "Library/Caches/com.apple.Safari",
             "Library/Caches/Tidy/last-large.json",
         ] {
@@ -1083,7 +1296,10 @@ mod tests {
             ".cargo/registry",
             "Library/Caches/com.example.Idle",
             "Library/Application Support/com.apple.foo",
-            ".claude/settings.json",
+            // Cursor's own caches sit beside User and stay offered.
+            "Library/Application Support/Cursor/Cache",
+            ".local/share/claude/versions/2.1.4",
+            ".claudette",
         ] {
             assert!(!is_excluded_rel(Path::new(rel)), "{rel}");
         }

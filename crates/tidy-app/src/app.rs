@@ -935,7 +935,9 @@ impl TidyModel {
         c.skipped.clear();
         c.leaving.clear();
         c.gone.clear();
-        c.notice = None;
+        // What the scan could not do (a folder macOS kept closed, a rule that ran out of
+        // time) is said once, in the band.
+        c.notice = (!plan.skipped.is_empty()).then(|| Notice::Error(plan.skipped.join(" ")));
         c.notice_leaving = None;
         c.trash = plan.trash;
         c.scanning = None;

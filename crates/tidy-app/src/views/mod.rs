@@ -7,6 +7,7 @@ pub mod history;
 pub mod large;
 pub mod main_window;
 pub mod memory;
+pub mod overlay;
 pub mod security;
 pub mod sidebar;
 pub mod trust;

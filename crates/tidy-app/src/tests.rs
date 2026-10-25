@@ -2131,6 +2131,164 @@ fn an_exit_seen_by_the_timer_removes_the_row_too(cx: &mut TestAppContext) {
 }
 
 #[::gpui::test]
+fn relaunch_quits_politely_then_opens_the_same_bundle_once_it_has_exited(cx: &mut TestAppContext) {
+    use crate::views::memory::{RELAUNCH_POLL, RELAUNCHING, REOPENED, REOPENED_NOTE};
+    let (h, _view, cx) = on_memory(cx);
+    let id = id_of("Slack");
+    let bundle = PathBuf::from("/Applications/Slack.app");
+    h.terminator
+        .bundles
+        .borrow_mut()
+        .insert(101, bundle.clone());
+    assert!(has(cx, &format!("memory-relaunch:{id}")));
+    click(cx, &format!("memory-relaunch:{id}"));
+    // One polite request, nothing forced, nothing opened yet.
+    assert_eq!(*h.terminator.polite.borrow(), [101]);
+    assert!(h.terminator.forced.borrow().is_empty());
+    assert!(h.terminator.opened.borrow().is_empty());
+    let meta = |cx: &mut VisualTestContext| {
+        model(cx).read_with(cx, |m, _| {
+            crate::views::memory::memory_rows(&m.memory)
+                .into_iter()
+                .find(|r| r.name == "Slack")
+                .map(|r| r.meta())
+        })
+    };
+    assert_eq!(meta(cx), Some((RELAUNCHING.to_string(), false)));
+    assert!(!has(cx, &format!("memory-quit:{id}")));
+    assert!(!has(cx, &format!("memory-relaunch:{id}")));
+    // A second press while it waits sends nothing.
+    model(cx).update(cx, |m, cx| m.relaunch_app(&id, cx));
+    model(cx).update(cx, |m, cx| m.quit_app(&id, cx));
+    assert_eq!(*h.terminator.polite.borrow(), [101]);
+    // A snapshot while it waits keeps the row (Relaunch never hides it).
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Normal))],
+    );
+    assert!(has(cx, &format!("memory-row:{id}")));
+    // The app exits: at the next look the bundle opens again.
+    h.terminator.exited.borrow_mut().insert(101);
+    advance(cx, RELAUNCH_POLL.as_millis() as u64);
+    assert_eq!(*h.terminator.opened.borrow(), [bundle]);
+    assert_eq!(meta(cx), Some((REOPENED.to_string(), false)));
+    // The note goes after a few seconds; nothing else is signalled or opened.
+    advance(cx, REOPENED_NOTE.as_millis() as u64);
+    assert_eq!(meta(cx), Some(("3 helpers".to_string(), false)));
+    assert_eq!(h.terminator.opened.borrow().len(), 1);
+    assert_eq!(*h.terminator.polite.borrow(), [101]);
+}
+
+#[::gpui::test]
+fn an_app_that_does_not_quit_in_time_is_left_open_and_never_forced(cx: &mut TestAppContext) {
+    use crate::views::memory::RELAUNCH_STILL_OPEN;
+    let (h, _view, cx) = on_memory(cx);
+    let id = id_of("Chrome");
+    h.terminator
+        .bundles
+        .borrow_mut()
+        .insert(100, PathBuf::from("/Applications/Chrome.app"));
+    click(cx, &format!("memory-relaunch:{id}"));
+    advance(cx, QUIT_WAIT.as_millis() as u64 - 300);
+    let rows = model(cx).read_with(cx, |m, _| crate::views::memory::memory_rows(&m.memory));
+    assert_eq!(rows[0].meta().0, crate::views::memory::RELAUNCHING);
+    advance(cx, 300);
+    let rows = model(cx).read_with(cx, |m, _| crate::views::memory::memory_rows(&m.memory));
+    assert_eq!(rows[0].meta(), (RELAUNCH_STILL_OPEN.to_string(), true));
+    // No Force Quit, no open, and the buttons are back to try again.
+    assert!(h.terminator.forced.borrow().is_empty());
+    assert!(h.terminator.opened.borrow().is_empty());
+    assert!(!has(cx, &format!("memory-more:{id}")));
+    assert!(has(cx, &format!("memory-relaunch:{id}")));
+    assert!(has(cx, &format!("memory-quit:{id}")));
+    // Even if it quits later, Tidy does not open it on its own any more.
+    h.terminator.exited.borrow_mut().insert(100);
+    advance(cx, 20_000);
+    assert!(h.terminator.opened.borrow().is_empty());
+}
+
+#[::gpui::test]
+fn relaunch_needs_a_bundle_and_says_when_macos_does_not_open_it(cx: &mut TestAppContext) {
+    use crate::views::memory::{QUIT_REFUSED, REOPEN_FAILED};
+    let (h, _view, cx) = on_memory(cx);
+    // No bundle from the running app: nothing is sent.
+    let id = id_of("Slack");
+    click(cx, &format!("memory-relaunch:{id}"));
+    assert!(h.terminator.polite.borrow().is_empty());
+    let meta = |cx: &mut VisualTestContext, name: &str| {
+        model(cx).read_with(cx, |m, _| {
+            crate::views::memory::memory_rows(&m.memory)
+                .into_iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .meta()
+        })
+    };
+    assert_eq!(meta(cx, "Slack"), (QUIT_REFUSED.to_string(), true));
+    // The app quits but the open fails.
+    h.terminator
+        .bundles
+        .borrow_mut()
+        .insert(100, PathBuf::from("/Applications/Chrome.app"));
+    h.terminator.open_fails.set(true);
+    click(cx, &format!("memory-relaunch:{}", id_of("Chrome")));
+    h.terminator.exited.borrow_mut().insert(100);
+    advance(cx, 300);
+    assert_eq!(meta(cx, "Chrome"), (REOPEN_FAILED.to_string(), true));
+}
+
+#[::gpui::test]
+fn relaunch_is_never_offered_for_finder_tidy_or_system_rows(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    let mut snapshot = mem_snapshot(Pressure::Normal);
+    let mut tidy = mem_app("Tidy", std::process::id() as i32, 80, 0);
+    tidy.bundle_id = Some("dev.sdusteric.tidy".into());
+    let mut ws = mem_app("WindowServer", 400, 300, 0);
+    ws.kind = MemoryKind::Process;
+    ws.id = "pid:400".into();
+    snapshot.apps.extend([tidy, ws]);
+    push(&h, cx, vec![Event::MemorySnapshot(snapshot)]);
+    for id in [
+        id_of("Finder"),
+        id_of("Tidy"),
+        "pid:400".to_string(),
+        "system".to_string(),
+    ] {
+        assert!(!has(cx, &format!("memory-relaunch:{id}")), "{id}");
+        model(cx).update(cx, |m, cx| m.relaunch_app(&id, cx));
+    }
+    assert!(h.terminator.polite.borrow().is_empty());
+    assert!(h.terminator.opened.borrow().is_empty());
+}
+
+#[::gpui::test]
+fn what_would_help_shows_only_when_pressure_is_not_normal(cx: &mut TestAppContext) {
+    let (h, _view, cx) = on_memory(cx);
+    assert!(!has(cx, "memory-help"));
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Warning))],
+    );
+    assert!(has(cx, "memory-help"));
+    let line = model(cx).read_with(cx, |m, _| {
+        let rows = crate::views::memory::memory_rows(&m.memory);
+        crate::views::memory::help_line(m.memory.snapshot.as_ref().unwrap(), &rows).unwrap()
+    });
+    assert!(
+        line.starts_with("Quit or relaunch Chrome (4.2 GB) or Slack"),
+        "{line}"
+    );
+    push(
+        &h,
+        cx,
+        vec![Event::MemorySnapshot(mem_snapshot(Pressure::Normal))],
+    );
+    assert!(!has(cx, "memory-help"));
+}
+
+#[::gpui::test]
 fn tidy_finder_and_system_can_never_be_quit(cx: &mut TestAppContext) {
     let (h, _view, cx) = on_memory(cx);
     // Even straight through the model, these rows are refused.
@@ -3174,4 +3332,153 @@ fn the_test_harness_has_only_fakes_for_quitting_and_notifying(cx: &mut TestAppCo
     assert_eq!(h.notifier.requests.get(), 0);
     assert!(h.notifier.scheduled.borrow().is_empty());
     assert!(h.settings_opened.borrow().is_empty());
+}
+
+// ---------- Overlay motion (C36 to C39) ----------
+
+#[::gpui::test]
+fn a_sheet_takes_input_from_its_first_frame_and_leaves_through_a_fading_copy(
+    cx: &mut TestAppContext,
+) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    view.update(cx, |v, cx| {
+        v.open_dialog(
+            crate::views::dialogs::DialogSpec::empty_trash(TrashSummary {
+                items: 2,
+                bytes: GB,
+            }),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    // The enter is under way, and the confirm button already works.
+    assert!(view.read_with(cx, |v, _| v.overlays.entered[0].is_some()));
+    click(cx, "dialog-confirm");
+    let sent = h.drain();
+    assert!(
+        sent.iter().any(|c| matches!(c, Command::EmptyTidyTrash)),
+        "{sent:?}"
+    );
+    // The closed dialog is drawn once more while it fades, and takes no action.
+    assert!(view.read_with(cx, |v, _| v.dialog.is_none()));
+    assert!(has(cx, "dialog"), "the leaving copy is drawn");
+    click(cx, "dialog-confirm");
+    assert!(h.drain().is_empty(), "the leaving copy does nothing");
+    advance(cx, crate::theme::motion::NOTE_OUT.as_millis() as u64 + 40);
+    assert!(!has(cx, "dialog"));
+    assert!(view.read_with(cx, |v, _| v.overlays.dialog_leaving.is_none()));
+
+    // History: Escape closes it at once in the model; the copy fades and goes.
+    click(cx, "history-button");
+    h.drain();
+    assert!(has(cx, "history"));
+    keys(cx, "escape");
+    assert!(!view.read_with(cx, |v, _| v.history_open));
+    assert!(has(cx, "history"));
+    advance(cx, crate::theme::motion::NOTE_OUT.as_millis() as u64 + 40);
+    assert!(!has(cx, "history"));
+}
+
+#[::gpui::test]
+fn sheets_close_at_once_under_reduce_motion(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    click(cx, "history-button");
+    h.drain();
+    assert!(has(cx, "history"));
+    keys(cx, "escape");
+    assert!(!has(cx, "history"), "no leaving copy");
+    assert!(view.read_with(cx, |v, _| v.overlays.leaving.iter().all(Option::is_none)));
+}
+
+#[::gpui::test]
+fn the_details_popover_settles_in_and_fades_out_without_taking_clicks(cx: &mut TestAppContext) {
+    let (_h, view, cx) = open_with_plan(cx);
+    hover(cx, "clean-row:r:a");
+    click(cx, "clean-details:r:a");
+    assert!(view.read_with(cx, |v, _| v.overlays.details_entered.is_some()));
+    // Another row's details replace it at once, with no exit for the old one.
+    view.update(cx, |v, cx| {
+        v.open_details("r:b".into(), point(px(400.), px(200.)), cx)
+    });
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.overlays.details_leaving.is_none()));
+    keys(cx, "escape");
+    assert!(view.read_with(cx, |v, _| v.details.is_none()
+        && v.overlays.details_leaving.is_some()));
+    advance(cx, crate::theme::motion::NOTE_OUT.as_millis() as u64 + 40);
+    assert!(view.read_with(cx, |v, _| v.overlays.details_leaving.is_none()));
+    assert!(!has(cx, "details"));
+}
+
+#[::gpui::test]
+fn system_data_fades_in_its_first_report_only(cx: &mut TestAppContext) {
+    use tidy_core::sysdata::{SysKind, SysRow, SysSize, SystemDataReport};
+    let mut h = setup(cx);
+    let (view, cx) = open_main(cx);
+    keys(cx, "cmd-1");
+    h.drain();
+    let report = || SystemDataReport {
+        at: NOW,
+        rows: vec![SysRow {
+            kind: SysKind::Caches,
+            title: "Caches".into(),
+            note: "n".into(),
+            size: SysSize::Measured(3 * GB),
+            report_only: false,
+            commands: vec![],
+        }],
+    };
+    let reply_of = |h: &mut Harness| match h.drain().into_iter().next() {
+        Some(Command::MeasureSystemData { reply }) => reply,
+        other => panic!("{other:?}"),
+    };
+    click(cx, "sysdata-open");
+    assert!(view.read_with(cx, |v, _| v.overlays.report_arrived.is_none()));
+    reply_of(&mut h).send(report()).unwrap();
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.overlays.report_arrived.is_some()));
+    assert!(has(cx, "sysdata-row:caches"));
+    // Reopened with the report from before: it shows still, also while it measures again.
+    keys(cx, "escape");
+    advance(cx, 300);
+    click(cx, "sysdata-open");
+    assert!(view.read_with(cx, |v, _| v.overlays.report_arrived.is_none()));
+    reply_of(&mut h).send(report()).unwrap();
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.overlays.report_arrived.is_none()));
+}
+
+#[::gpui::test]
+fn an_opened_history_entry_fades_its_items_in_and_closes_at_once(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    click(cx, "history-button");
+    let reply = match h.drain().into_iter().next() {
+        Some(Command::LoadHistory { reply }) => reply,
+        other => panic!("{other:?}"),
+    };
+    let e = entry(
+        Source::Cleanup,
+        Action::Clean,
+        vec![history_item("/fake/a", ItemResult::Trashed, None)],
+        GB,
+    );
+    let id = e.id.clone();
+    reply.send(vec![e]).unwrap();
+    cx.run_until_parked();
+    click(cx, "history-entry-0");
+    assert!(
+        has(cx, "history-item-0-0"),
+        "the items are there from the first frame"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v
+            .overlays
+            .history_opened
+            .as_ref()
+            .map(|o| o.0.clone())),
+        Some(id)
+    );
+    click(cx, "history-entry-0");
+    assert!(!has(cx, "history-item-0-0"), "closing is instant");
 }

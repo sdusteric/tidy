@@ -103,9 +103,17 @@ pub fn outer_app(exe: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Whether a process with this executable name runs a script named in its arguments.
+/// Whether a process with this executable name runs a script named in its arguments: Node and
+/// Bun (npm, npx, tsserver), PHP (Composer), Ruby (gem, bundle), Python (Poetry, pip) and the
+/// shells (pyenv, rbenv and their build plugins are shell scripts).
 fn is_script_host(file: &str) -> bool {
-    matches!(file, "node" | "bun")
+    matches!(
+        file,
+        "node" | "bun" | "php" | "ruby" | "bash" | "sh" | "zsh"
+    ) || file
+        .strip_prefix("python")
+        .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        || file == "Python"
 }
 
 /// The base name of the script a `node` process runs, without its extension: the first
@@ -129,6 +137,201 @@ pub fn uses_path(running: &RunningSet, path: &Path) -> bool {
     running
         .ids()
         .any(|id| id.starts_with('/') && (id == p || id.starts_with(&inside)))
+}
+
+// ---------- Open files ----------
+
+/// Reads which files the user's own processes hold open, with libproc and no extra rights:
+/// `proc_listpids` for the processes of this user, `PROC_PIDLISTFDS` for each one's file
+/// descriptors, and `PROC_PIDFDVNODEPATHINFO` for the path behind each file or folder
+/// descriptor. Tidy's own process is left out, so a scan that is walking a folder does not
+/// block its own clean.
+///
+/// It fails closed: when the process list cannot be read, or the descriptors of one of the
+/// user's processes cannot be read for any reason other than that process having exited, the
+/// whole read is an error and the caller skips the move.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LibcOpenFiles;
+
+impl crate::env::OpenFilesProbe for LibcOpenFiles {
+    fn open_files(&self) -> std::io::Result<crate::env::OpenFiles> {
+        read_open_files()
+    }
+}
+
+/// `PROC_UID_ONLY` in `sys/proc_info.h`: the processes whose effective user is `arg`.
+const PROC_UID_ONLY: u32 = 4;
+/// `PROC_PIDFDVNODEPATHINFO` in `sys/proc_info.h`.
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+/// `struct proc_fileinfo` in `sys/proc_info.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcFileInfo {
+    fi_openflags: u32,
+    fi_status: u32,
+    fi_offset: i64,
+    fi_type: i32,
+    fi_guardflags: u32,
+}
+
+/// `struct vnode_fdinfowithpath` in `sys/proc_info.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VnodeFdInfoWithPath {
+    pfi: ProcFileInfo,
+    pvip: libc::vnode_info_path,
+}
+
+fn read_open_files() -> std::io::Result<crate::env::OpenFiles> {
+    use std::io;
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let pids =
+        list_pids_of_user(uid).ok_or_else(|| io::Error::other("cannot read the process list"))?;
+    let me = std::process::id() as i32;
+    let mut files = Vec::new();
+    for pid in pids {
+        if pid == me {
+            continue;
+        }
+        let fds = match pid_fds(pid) {
+            Ok(fds) => fds,
+            // The process ended between the two calls.
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(e) => {
+                let name = pid_name(pid).unwrap_or_else(|| pid.to_string());
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("cannot read the open files of {name}: {e}"),
+                ));
+            }
+        };
+        let mut name: Option<String> = None;
+        for fd in fds {
+            if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+                continue;
+            }
+            let Some(path) = fd_path(pid, fd.proc_fd) else {
+                // A descriptor closed between the calls, or one without a path.
+                continue;
+            };
+            let holder = name
+                .get_or_insert_with(|| pid_name(pid).unwrap_or_else(|| pid.to_string()))
+                .clone();
+            files.push(crate::env::OpenFile { path, pid, holder });
+        }
+    }
+    Ok(crate::env::OpenFiles::new(files))
+}
+
+fn list_pids_of_user(uid: u32) -> Option<Vec<i32>> {
+    // SAFETY: as in `list_pids`, with the user filter.
+    unsafe {
+        let need = libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0);
+        if need <= 0 {
+            return None;
+        }
+        let cap = need as usize / size_of::<i32>() + 64;
+        let mut pids = vec![0i32; cap];
+        let got = libc::proc_listpids(
+            PROC_UID_ONLY,
+            uid,
+            pids.as_mut_ptr().cast(),
+            (cap * size_of::<i32>()) as libc::c_int,
+        );
+        if got <= 0 {
+            return None;
+        }
+        pids.truncate(got as usize / size_of::<i32>());
+        pids.retain(|p| *p > 0);
+        Some(pids)
+    }
+}
+
+/// The file descriptors of a process. ESRCH means it has exited.
+fn pid_fds(pid: i32) -> std::io::Result<Vec<libc::proc_fdinfo>> {
+    let entry = size_of::<libc::proc_fdinfo>();
+    // SAFETY: a null buffer asks for the size; the second call writes at most `bytes` bytes
+    // of `proc_fdinfo` entries and returns how many bytes it wrote.
+    unsafe {
+        let need = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
+        if need <= 0 {
+            return Err(last_error_or_gone(pid));
+        }
+        // Room for descriptors opened between the two calls.
+        let cap = need as usize / entry + 32;
+        let mut fds = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            cap
+        ];
+        let got = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            (cap * entry) as libc::c_int,
+        );
+        if got <= 0 {
+            return Err(last_error_or_gone(pid));
+        }
+        fds.truncate(got as usize / entry);
+        Ok(fds)
+    }
+}
+
+/// The error of the last libproc call, or ESRCH when the process is no longer there (libproc
+/// does not always set errno for that).
+fn last_error_or_gone(pid: i32) -> std::io::Error {
+    let e = std::io::Error::last_os_error();
+    // SAFETY: kill with signal 0 only checks that the process exists; nothing is sent.
+    let alive = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !alive {
+        return std::io::Error::from_raw_os_error(libc::ESRCH);
+    }
+    match e.raw_os_error() {
+        Some(0) | None => std::io::Error::from_raw_os_error(libc::EPERM),
+        _ => e,
+    }
+}
+
+/// The path of a file or folder descriptor, or None when it has none.
+fn fd_path(pid: i32, fd: i32) -> Option<PathBuf> {
+    let mut info = std::mem::MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
+    let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes of a zeroed `vnode_fdinfowithpath`; the call writes
+    // at most that many bytes and returns how many.
+    let got = unsafe {
+        libc::proc_pidfdinfo(
+            pid,
+            fd,
+            PROC_PIDFDVNODEPATHINFO,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if got != size {
+        return None;
+    }
+    // SAFETY: the call filled the whole struct.
+    let info = unsafe { info.assume_init() };
+    let raw: Vec<u8> = info
+        .pvip
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|c| *c as u8)
+        .take_while(|b| *b != 0)
+        .collect();
+    if raw.is_empty() {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&raw)))
 }
 
 // ---------- libproc ----------
@@ -275,6 +478,40 @@ mod tests {
     }
 
     #[test]
+    fn script_hosts_cover_the_package_tools() {
+        for host in [
+            "node",
+            "bun",
+            "php",
+            "ruby",
+            "bash",
+            "sh",
+            "zsh",
+            "python",
+            "python3",
+            "python3.12",
+            "Python",
+        ] {
+            assert!(is_script_host(host), "{host}");
+        }
+        for other in ["pythonw-ish", "rustc", "Google Chrome", "pythonista"] {
+            assert!(!is_script_host(other), "{other}");
+        }
+        // The tool a host runs is its first argument that is not a flag.
+        let gem = ["ruby", "/opt/homebrew/bin/gem", "install", "rails"].map(String::from);
+        assert_eq!(script_name(&gem).as_deref(), Some("gem"));
+        let pyenv = [
+            "bash",
+            "/opt/homebrew/Cellar/pyenv/2.4/libexec/pyenv",
+            "install",
+        ]
+        .map(String::from);
+        assert_eq!(script_name(&pyenv).as_deref(), Some("pyenv"));
+        let composer = ["php", "/opt/homebrew/bin/composer", "install"].map(String::from);
+        assert_eq!(script_name(&composer).as_deref(), Some("composer"));
+    }
+
+    #[test]
     fn uses_path_matches_the_path_and_what_is_inside_it() {
         let set = RunningSet::new([
             "node",
@@ -336,5 +573,57 @@ mod tests {
         assert!(uses_path(&inside, &exe));
         let elsewhere = LibcProbe::with_home("/nonexistent-home").running();
         assert!(!uses_path(&elsewhere, &exe));
+    }
+    /// Reads the open files of this user's processes (read-only, no signal) and finds a file
+    /// this test holds open in a child process it starts and stops itself.
+    #[test]
+    fn the_open_file_probe_sees_a_file_a_child_holds_open() {
+        use crate::env::OpenFilesProbe;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("held.bin");
+        std::fs::write(&file, b"x").unwrap();
+        // `tail -f` keeps the file open until it is killed.
+        let mut child = std::process::Command::new("/usr/bin/tail")
+            .arg("-f")
+            .arg(&file)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Give it a moment to open the file.
+        let mut seen = None;
+        for _ in 0..50 {
+            match LibcOpenFiles.open_files() {
+                Ok(open) => {
+                    if let Some(f) = open.inside(&dir) {
+                        seen = Some((f.pid, f.holder.clone()));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the probe failed: {e}");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = child.id() as i32;
+        let _ = child.kill();
+        let _ = child.wait();
+        let (holder_pid, holder) = seen.expect("the held file is listed");
+        assert_eq!(holder_pid, pid);
+        assert_eq!(holder, "tail");
+        // Once the child is gone, nothing holds it.
+        let after = LibcOpenFiles.open_files().unwrap();
+        assert!(after.inside(&dir).is_none());
+        assert!(!after.is_empty(), "other processes hold files too");
+    }
+
+    #[test]
+    fn the_vnode_path_struct_has_the_kernel_size() {
+        // sizeof(struct vnode_fdinfowithpath) in sys/proc_info.h.
+        assert_eq!(size_of::<VnodeFdInfoWithPath>(), 1200);
     }
 }

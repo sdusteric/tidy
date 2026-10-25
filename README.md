@@ -9,12 +9,16 @@ The sidebar has five screens, in this order, reachable with Cmd-1 to Cmd-5:
 | Screen | Key | What it does |
 |---|---|---|
 | Check up | Cmd-1 | One button runs the cleanup scan, the Security checks and a memory snapshot, and shows three cards that link to their screens. Holds the opt-in weekly reminder, the "What is System Data on this Mac?" sheet and the "What Tidy never does" list. |
-| Cleanup | Cmd-2 | Space you can get back, in five groups. Safe items are ticked, Review items are not. Every row's Details button (or Show Details in its "..." menu) says why it is offered, what rebuilds it, which checks guard the move, and the rule and path pattern that matched. |
+| Cleanup | Cmd-2 | Space you can get back, in six groups (the last one, Old installers, lists `.dmg` and `.pkg` files in Downloads older than 30 days, always unticked, once a Large files scan has let Tidy into Downloads). Safe items are ticked, Review items are not. Every row's Details button (or Show Details in its "..." menu) says why it is offered, what rebuilds it, which checks guard the move, and the rule and path pattern that matched. |
 | Large files | Cmd-3 | The biggest files and folders, or the ones not opened lately, with Reveal and Move to Trash. |
-| Memory | Cmd-4 | A verdict from memory pressure, three figures (Pressure, Swap used, Compressed), a pressure graph and the top apps by memory with a polite Quit. The only screen that polls: every 2 seconds, and only while it is visible. |
+| Memory | Cmd-4 | A verdict from memory pressure, three figures (Pressure, Swap used, Compressed), a pressure graph, a "What would help" line while pressure is not Normal, and the top apps by memory with Relaunch and a polite Quit. Chrome, Edge, Brave and Arc rows above 4 GB name the browser's own memory setting. The only screen that polls: every 2 seconds, and only while it is visible. |
 | Security | Cmd-5 | FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against your last check. It never asks for a permission. |
 
 Cmd-R runs the current screen again.
+
+**Relaunch.** Relaunch sends the same polite terminate, waits up to 10 seconds for the app to exit, then opens the same app bundle again without bringing it to the front. It never force quits: an app still open after 10 seconds stays open and its row says so. Only real apps have it (never the System row, plain processes, Finder or Tidy).
+
+**Before each move.** Right before anything goes to the Trash (Cleanup and Large files alike), Tidy reads the ignore list from settings.json again (a read error stops the run), checks with libproc that no process of yours holds a file open inside the path, and for build output checks that it holds no `*-keypair.json`, no `.git` and no file Git tracks. A process list it cannot read skips every move.
 
 **Quit.** Quit sends the app a polite terminate. The row says Quit requested; after 10 seconds without an exit it says Still open, and Force Quit appears in the more menu behind a confirm. Tidy, Finder, WindowServer and loginwindow have no Quit button.
 
@@ -32,7 +36,7 @@ It is a Rust + GPUI app built on the same stack and look as Haul. The design doc
 
 | Crate | Kind | Contents |
 |---|---|---|
-| `crates/tidy-core` | library, no UI | The model, the command and event API, the environment and its test seams (including `MemoryProbe` and `CommandRunner`), paths, settings, history storage, the instance lock, the Trash guard, the walker, the memory engine, the Security checks and their diff against the last check, the check up log, the reminder date math and the core actor |
+| `crates/tidy-core` | library, no UI | The model, the command and event API, the environment and its test seams (including `MemoryProbe`, `CommandRunner` and `OpenFilesProbe`), the Git index reader of the project guard, paths, settings, history storage, the instance lock, the Trash guard, the walker, the memory engine, the Security checks and their diff against the last check, the check up log, the reminder date math and the core actor |
 | `crates/tidy-app` | library + `tidy` binary | The GPUI app: sidebar, the five screens, History sheet, dialogs, the Quit and notification wrappers (`Terminator`, `Notifier`), demo scenarios |
 | `crates/tidy-cli` | `tidyctl` binary | A headless driver of tidy-core that prints one JSON object per line |
 | `crates/tidy-fixtures` | library + `tidy-fixture-home` binary | Fake home folders with exact sizes and dates, the results the scans must produce, and fake Security command outputs and a fake process table |
@@ -125,7 +129,7 @@ Tidy updates itself with Sparkle 2.10.0, following the shared contract in `../ap
 | `TIDY_NO_UPDATES=1` | Sparkle does not start: no update checks in this run. |
 | `SPARKLE_FRAMEWORK=<path>` | The Sparkle.framework that the build links and `scripts/bundle.sh` embeds (default `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`). |
 | `APP_UPDATES_PUBLISH=<path>` | The publish.sh that `scripts/release.sh` calls (default `../app-updates/tools/publish.sh`). |
-| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`. No core, no lock, no disk access. |
+| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `memory-relaunch`, `memory-critical`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`. No core, no lock, no disk access. |
 | `TIDY_DEMO_SHOT=<file.png>` | With the `shot-export` feature, renders the first frame offscreen at 2x and writes the PNG. |
 | `TIDY_DEMO_EXIT_SECS` | Demo self-quit, default 30. |
 | `TIDY_APPEARANCE=<light or dark>` | Forces the appearance. |

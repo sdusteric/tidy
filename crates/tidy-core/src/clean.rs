@@ -43,6 +43,16 @@ pub const NOT_IN_TRASH: &str = "Not in the Trash, left alone";
 /// The skip reason for a recorded Trash path that now holds a different item (the Trash
 /// reused the name after Tidy's item left).
 pub const NOT_TIDYS: &str = "Not the item Tidy moved, left alone";
+/// The skip reason for a path on the user's ignore list, inside one, or holding one.
+pub const ON_IGNORE_LIST: &str = "On your ignore list";
+/// The skip reason when the ignore list cannot be read. The run stops there: every item left
+/// is skipped with it.
+pub const IGNORE_LIST_UNREADABLE: &str = "Tidy couldn't read your ignore list, skipped";
+/// The history message of a run that stopped because the ignore list could not be read.
+pub const IGNORE_LIST_STOPPED: &str =
+    "Tidy couldn't read your ignore list, so it stopped before moving anything else.";
+/// The skip reason when the open files cannot be read.
+pub const OPEN_FILES_UNKNOWN: &str = "Tidy couldn't check which files are open, skipped";
 /// The rule recorded for Large files items.
 pub const LARGE_RULE: &str = "large";
 /// The rule recorded for Empty Trash items.
@@ -69,12 +79,19 @@ pub fn clean_until(
     let rechecker = Rechecker::new(env);
     let total = items.len();
     let mut out: Vec<HistoryItem> = Vec::new();
+    let mut halted = false;
     for (n, item) in items.iter().enumerate() {
         let rule = item.rule_id().to_string();
+        // Read right before this item's move: the ignore list and the open files.
+        let gate = if halted {
+            Err(IGNORE_LIST_UNREADABLE.to_string())
+        } else {
+            MoveGate::read(env).inspect_err(|_| halted = true)
+        };
         let checked = if stopped(stop) {
             Err(STOPPED.to_string())
         } else {
-            rechecker.check(item)
+            gate.and_then(|gate| rechecker.check(item).map(|paths| (gate, paths)))
         };
         match checked {
             Err(reason) => {
@@ -92,7 +109,7 @@ pub fn clean_until(
                     reason,
                 });
             }
-            Ok(paths) => {
+            Ok((gate, paths)) => {
                 let folded = !item.members.is_empty();
                 let mut moved: Vec<Option<PathBuf>> = Vec::new();
                 let mut first_err: Option<String> = None;
@@ -102,7 +119,10 @@ pub fn clean_until(
                     } else {
                         item.bytes_alloc
                     };
-                    match guarded(env, &path).and_then(|at| move_checked(env, &at)) {
+                    match guarded(env, &path)
+                        .and_then(|at| gate.allows(&path, at))
+                        .and_then(|at| move_checked(env, &at))
+                    {
                         Ok((dest, moved_id)) => {
                             out.push(record(
                                 &path,
@@ -146,7 +166,8 @@ pub fn clean_until(
         }
         events(Event::CleanProgress { done: n + 1, total });
     }
-    finish(env, Action::Clean, Source::Cleanup, out, None)
+    let message = halted.then(|| IGNORE_LIST_STOPPED.to_string());
+    finish(env, Action::Clean, Source::Cleanup, out, message)
 }
 
 /// Moves Large files paths to the Trash. See [`trash_paths_until`].
@@ -166,12 +187,21 @@ pub fn trash_paths_until(
 ) -> HistoryEntry {
     let total = paths.len();
     let mut out = Vec::new();
+    let mut halted = false;
     for (n, path) in paths.iter().enumerate() {
         let id = path.to_string_lossy().into_owned();
         let at = if stopped(stop) {
             Err((ItemResult::Skipped, STOPPED.to_string()))
+        } else if halted {
+            Err((ItemResult::Skipped, IGNORE_LIST_UNREADABLE.to_string()))
         } else {
-            guarded(env, path)
+            match MoveGate::read(env) {
+                Ok(gate) => guarded(env, path).and_then(|at| gate.allows(path, at)),
+                Err(reason) => {
+                    halted = true;
+                    Err((ItemResult::Skipped, reason))
+                }
+            }
         };
         let bytes = match &at {
             Ok(at) => measure(at, &WalkOpts::for_root(&env.root)).alloc,
@@ -205,7 +235,8 @@ pub fn trash_paths_until(
         }
         events(Event::CleanProgress { done: n + 1, total });
     }
-    finish(env, Action::Trash, Source::Large, out, None)
+    let message = halted.then(|| IGNORE_LIST_STOPPED.to_string());
+    finish(env, Action::Trash, Source::Large, out, message)
 }
 
 /// Deletes for good the items Tidy moved to the Trash. See [`empty_tidy_trash_until`].
@@ -313,6 +344,65 @@ fn record(
         result,
         reason,
         trash_id,
+    }
+}
+
+/// The last checks before a move, read fresh for each item (design 6.2, rule 5), for every
+/// path to the Trash: a Cleanup clean, a Large files move and project build output alike.
+///
+/// - The ignore list is read from settings.json, together with the one in memory. When the
+///   file cannot be read the run stops: Tidy never moves a path it may have been told to
+///   leave alone.
+/// - The open files of the user's processes are read with libproc. A path that a process
+///   holds open, or holds something open inside, is skipped; when they cannot be read, every
+///   path is skipped.
+struct MoveGate {
+    ignored: Vec<PathBuf>,
+    open: Result<crate::env::OpenFiles, String>,
+}
+
+impl MoveGate {
+    /// Reads the ignore list and the open files. The error is the ignore list's.
+    fn read(env: &Env) -> Result<MoveGate, String> {
+        let mut ignored = crate::settings::Settings::read_ignore_list(&env.paths.settings_file())
+            .map_err(|e| {
+            tracing::warn!("cannot read the ignore list: {e}");
+            IGNORE_LIST_UNREADABLE.to_string()
+        })?;
+        ignored.extend(env.settings.ignored_paths.iter().cloned());
+        // Both spellings of each entry: as saved, and resolved (`/var` is `/private/var`).
+        let resolved: Vec<PathBuf> = ignored
+            .iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .collect();
+        ignored.extend(resolved);
+        let open = env.open_files.open_files().map_err(|e| {
+            tracing::warn!("cannot read the open files: {e}");
+            OPEN_FILES_UNKNOWN.to_string()
+        });
+        Ok(MoveGate { ignored, open })
+    }
+
+    /// Passes `at` (the resolved form of `path`) on when neither check refuses it.
+    fn allows(&self, path: &Path, at: PathBuf) -> Result<PathBuf, (ItemResult, String)> {
+        let touches = |p: &Path| {
+            self.ignored
+                .iter()
+                .any(|i| p.starts_with(i) || i.starts_with(p))
+        };
+        if touches(path) || touches(&at) {
+            return Err((ItemResult::Skipped, ON_IGNORE_LIST.to_string()));
+        }
+        match &self.open {
+            Err(reason) => Err((ItemResult::Skipped, reason.clone())),
+            Ok(open) => match open.inside(&at) {
+                Some(f) => Err((
+                    ItemResult::Skipped,
+                    format!("Open in {}, skipped", f.holder),
+                )),
+                None => Ok(at),
+            },
+        }
     }
 }
 
@@ -619,6 +709,8 @@ mod tests {
         put(&env.at("Library/Containers/x/big.bin"), 4096);
         put(&f.base.join("outside/secret.bin"), 4096);
         put(&env.paths.data.join("settings.json"), 10);
+        // A settings file that reads, so the ignore list does not stop the run.
+        std::fs::write(env.paths.data.join("settings.json"), "{}").unwrap();
         let paths = vec![
             env.at("Movies/trip.mov"),
             env.at("Library/Containers/x/big.bin"),
@@ -945,6 +1037,160 @@ mod tests {
     }
 
     #[test]
+    fn a_file_a_process_holds_open_stops_its_move() {
+        use crate::env::FixedOpenFiles;
+        let f = fx();
+        let item = npm_item(&f.env);
+        put(&f.env.at("Movies/trip.mov"), 4096);
+        // macOS reports open files by their resolved path.
+        let held = item.path.canonicalize().unwrap().join("a.bin");
+        let env = f
+            .env
+            .clone()
+            .with_open_files(Arc::new(FixedOpenFiles::default().with(held, "node")));
+        let mut sink = |_: Event| {};
+        let entry = clean(&env, std::slice::from_ref(&item), &mut sink);
+        assert_eq!(entry.items[0].result, ItemResult::Skipped);
+        assert_eq!(
+            entry.items[0].reason.as_deref(),
+            Some("Open in node, skipped")
+        );
+        assert!(item.path.join("a.bin").is_file());
+        // A Large files move goes through the same check.
+        let movie = f.env.at("Movies/trip.mov").canonicalize().unwrap();
+        let env = f.env.clone().with_open_files(Arc::new(
+            FixedOpenFiles::default().with(&movie, "QuickTime Player"),
+        ));
+        let entry = trash_paths(&env, &[f.env.at("Movies/trip.mov")], &mut sink);
+        assert_eq!(
+            entry.items[0].reason.as_deref(),
+            Some("Open in QuickTime Player, skipped")
+        );
+        assert!(movie.is_file());
+        // A file open somewhere else does not matter.
+        let env = f.env.clone().with_open_files(Arc::new(
+            FixedOpenFiles::default().with(f.base.join("elsewhere.txt"), "vim"),
+        ));
+        let entry = clean(&env, std::slice::from_ref(&item), &mut sink);
+        assert_eq!(entry.items[0].result, ItemResult::Trashed);
+    }
+
+    #[test]
+    fn unreadable_open_files_skip_every_move() {
+        use crate::env::FixedOpenFiles;
+        let f = fx();
+        let item = npm_item(&f.env);
+        put(&f.env.at("Movies/trip.mov"), 4096);
+        let env = f
+            .env
+            .clone()
+            .with_open_files(Arc::new(FixedOpenFiles::unreadable()));
+        let mut sink = |_: Event| {};
+        let entry = clean(&env, std::slice::from_ref(&item), &mut sink);
+        assert_eq!(entry.items[0].reason.as_deref(), Some(OPEN_FILES_UNKNOWN));
+        let entry = trash_paths(&env, &[f.env.at("Movies/trip.mov")], &mut sink);
+        assert_eq!(entry.items[0].reason.as_deref(), Some(OPEN_FILES_UNKNOWN));
+        assert!(item.path.is_dir() && f.env.at("Movies/trip.mov").is_file());
+        assert!(!f.env.paths.dir_trash().exists());
+    }
+
+    #[test]
+    fn an_unreadable_process_list_skips_the_clean() {
+        let f = fx();
+        let item = npm_item(&f.env);
+        let env = f.env.clone().with_procs(Arc::new(crate::env::UnknownProbe));
+        let mut sink = |_: Event| {};
+        let entry = clean(&env, std::slice::from_ref(&item), &mut sink);
+        assert_eq!(
+            entry.items[0].reason.as_deref(),
+            Some(crate::cleanup::PROCS_UNKNOWN)
+        );
+        assert!(item.path.is_dir());
+    }
+
+    #[test]
+    fn the_ignore_list_on_disk_is_read_for_every_move() {
+        let f = fx();
+        let item = npm_item(&f.env);
+        put(&f.env.at("Movies/keep/trip.mov"), 4096);
+        put(&f.env.at("Movies/other.mov"), 4096);
+        // Saved by an earlier run (or by the app after this scan); the Env in memory has an
+        // empty list.
+        let saved = crate::settings::Settings {
+            ignored_paths: vec![item.path.clone(), f.env.at("Movies/keep")],
+            ..Default::default()
+        };
+        saved.save(&f.env.paths).unwrap();
+        assert!(f.env.settings.ignored_paths.is_empty());
+        let mut sink = |_: Event| {};
+        let entry = clean(&f.env, std::slice::from_ref(&item), &mut sink);
+        assert_eq!(entry.items[0].reason.as_deref(), Some(ON_IGNORE_LIST));
+        assert!(item.path.is_dir());
+        // Large files: the ignored folder, a path inside it, and a folder holding it.
+        let entry = trash_paths(
+            &f.env,
+            &[
+                f.env.at("Movies/keep"),
+                f.env.at("Movies/keep/trip.mov"),
+                f.env.at("Movies"),
+                f.env.at(".npm"),
+            ],
+            &mut sink,
+        );
+        assert!(
+            entry
+                .items
+                .iter()
+                .all(|i| i.reason.as_deref() == Some(ON_IGNORE_LIST)),
+            "{:?}",
+            entry.items
+        );
+        assert!(f.env.at("Movies/keep/trip.mov").is_file());
+        // A path that is not on the list still moves.
+        let entry = trash_paths(&f.env, &[f.env.at("Movies/other.mov")], &mut sink);
+        assert_eq!(entry.items[0].result, ItemResult::Trashed);
+    }
+
+    #[test]
+    fn an_unreadable_ignore_list_stops_the_run() {
+        let f = fx();
+        let item = npm_item(&f.env);
+        put(&f.env.at("Movies/trip.mov"), 4096);
+        std::fs::create_dir_all(&f.env.paths.data).unwrap();
+        std::fs::write(f.env.paths.settings_file(), b"{ broken").unwrap();
+        let mut events = Vec::new();
+        let entry = clean(&f.env, &[item.clone(), item.clone()], &mut |e| {
+            events.push(e)
+        });
+        assert!(
+            entry
+                .items
+                .iter()
+                .all(|i| i.reason.as_deref() == Some(IGNORE_LIST_UNREADABLE))
+        );
+        assert_eq!(entry.message.as_deref(), Some(IGNORE_LIST_STOPPED));
+        assert_eq!(entry.trashed_bytes, 0);
+        assert!(item.path.is_dir());
+        let entry = trash_paths(&f.env, &[f.env.at("Movies/trip.mov")], &mut |_| {});
+        assert_eq!(
+            entry.items[0].reason.as_deref(),
+            Some(IGNORE_LIST_UNREADABLE)
+        );
+        assert_eq!(entry.message.as_deref(), Some(IGNORE_LIST_STOPPED));
+        assert!(f.env.at("Movies/trip.mov").is_file());
+        assert!(!f.env.paths.dir_trash().exists());
+        // The history says why.
+        assert_eq!(
+            history::read(&f.env.paths)
+                .last()
+                .unwrap()
+                .message
+                .as_deref(),
+            Some(IGNORE_LIST_STOPPED)
+        );
+    }
+
+    #[test]
     fn copy_has_no_em_dashes() {
         for s in [
             EMPTY_TRASH_REFUSED,
@@ -953,8 +1199,12 @@ mod tests {
             GONE,
             NOT_IN_TRASH,
             NOT_TIDYS,
+            ON_IGNORE_LIST,
+            IGNORE_LIST_UNREADABLE,
+            IGNORE_LIST_STOPPED,
+            OPEN_FILES_UNKNOWN,
         ] {
-            assert!(!s.contains('\u{2014}'));
+            assert!(!s.contains('\u{2014}') && !s.contains('\u{2013}'));
         }
     }
 }

@@ -9,8 +9,10 @@ use tidy_core::model::{Action, HistoryEntry, HistoryItem, ItemResult};
 
 use crate::app::{OpenKind, open_path};
 use crate::format;
+use crate::theme::motion as m;
 use crate::theme::{MONO_FONT, Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
+use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::{hairline, icon_button};
 
 /// "Cleanup", "Large files" or "Emptied the Trash".
@@ -55,11 +57,27 @@ impl TidyView {
     pub fn toggle_history_entry(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.history_expanded.remove(id) {
             self.history_expanded.insert(id.to_string());
+            // Its items fade in; closing it again is instant.
+            self.card_generation += 1;
+            self.overlays.history_opened = Some((
+                id.to_string(),
+                std::time::Instant::now(),
+                self.card_generation,
+            ));
         }
         cx.notify();
     }
 
-    pub(crate) fn render_history(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_history(
+        &mut self,
+        t: &Theme,
+        phase: Phase,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let reduce_motion = cx.reduce_motion();
+        let opened = self.overlays.history_opened.clone();
+        // A leaving copy only fades: it takes no clicks.
+        let leaving = matches!(phase, Phase::Leave(_));
         let view = cx.entity().downgrade();
         let close_view = view.clone();
         let scrim_view = view.clone();
@@ -139,9 +157,20 @@ impl TidyView {
                             .into_any_element(),
                     );
                     if open {
-                        for (k, item) in e.items.iter().enumerate() {
-                            rows.push(history_item(t, n, k, item, &root, &present));
-                        }
+                        let items = div().flex().flex_col().children(
+                            e.items
+                                .iter()
+                                .enumerate()
+                                .map(|(k, item)| history_item(t, n, k, item, &root, &present)),
+                        );
+                        // The entry just opened: its rows fade in; the rows below move at once.
+                        let fade = match &opened {
+                            Some((id, at, generation)) if *id == e.id => {
+                                overlay::phase_for(Some((*at, *generation)), reduce_motion)
+                            }
+                            _ => Phase::Still,
+                        };
+                        rows.push(overlay::fade_in("history-items", items, fade, m::NOTE_IN));
                     }
                 }
                 div()
@@ -171,7 +200,9 @@ impl TidyView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(!leaving, |d| {
+                d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(
                 div()
                     .flex_none()
@@ -204,7 +235,7 @@ impl TidyView {
             .child(hairline(t))
             .child(body);
 
-        div()
+        let scrim = div()
             .id("history-scrim")
             .absolute()
             .inset_0()
@@ -212,14 +243,15 @@ impl TidyView {
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                let _ = scrim_view.update(cx, |v, cx| {
-                    v.history_open = false;
-                    cx.notify();
-                });
-            })
-            .child(card)
-            .into_any_element()
+            .when(!leaving, |d| {
+                d.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    let _ = scrim_view.update(cx, |v, cx| {
+                        v.history_open = false;
+                        cx.notify();
+                    });
+                })
+            });
+        overlay::present(Sheet::History, scrim, card, phase)
     }
 }
 

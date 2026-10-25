@@ -39,8 +39,12 @@ pub struct Owner {
 }
 
 impl Owner {
-    /// The warning on a blocked item when this owner is running, or None when it is not.
+    /// The warning on a blocked item when this owner is running, or None when it is not. When
+    /// the process list could not be read the item is blocked too, never treated as idle.
     pub fn blocked_by(&self, running: &crate::model::RunningSet) -> Option<String> {
+        if running.is_unknown() {
+            return Some(format!("Tidy couldn't check whether {} is open", self.name));
+        }
         running
             .any(&self.ids)
             .then(|| format!("Quit {} first", self.name))
@@ -153,6 +157,62 @@ pub const HYPERFRAMES: OwnerInfo = OwnerInfo {
 pub const LTX_DESKTOP: OwnerInfo = OwnerInfo {
     name: "LTX Desktop",
     ids: &["LTX Desktop", "LTXDesktop"],
+};
+/// The JetBrains IDEs, whose system folders sit in `Library/Caches/JetBrains/<product>`. Bundle
+/// ids from each app's Info.plist, and the launcher names in `Contents/MacOS`.
+pub const JETBRAINS: OwnerInfo = OwnerInfo {
+    name: "your JetBrains IDE",
+    ids: &[
+        "com.jetbrains.intellij",
+        "com.jetbrains.intellij.ce",
+        "com.jetbrains.pycharm",
+        "com.jetbrains.pycharm.ce",
+        "com.jetbrains.WebStorm",
+        "com.jetbrains.goland",
+        "com.jetbrains.CLion",
+        "com.jetbrains.rider",
+        "com.jetbrains.PhpStorm",
+        "com.jetbrains.rubymine",
+        "com.jetbrains.datagrip",
+        "com.jetbrains.rustrover",
+        "com.jetbrains.dataspell",
+        "com.jetbrains.toolbox",
+        "idea",
+        "pycharm",
+        "webstorm",
+        "goland",
+        "clion",
+        "rider",
+        "phpstorm",
+        "rubymine",
+        "datagrip",
+        "rustrover",
+        "dataspell",
+    ],
+};
+pub const POETRY: OwnerInfo = OwnerInfo {
+    name: "Poetry",
+    ids: &["poetry"],
+};
+/// RubyGems and Bundler. `gem` and `bundle` are Ruby scripts; the process probe sees them by
+/// the script name.
+pub const RUBYGEMS: OwnerInfo = OwnerInfo {
+    name: "RubyGems",
+    ids: &["gem", "bundle", "bundler"],
+};
+/// pyenv and its python-build plugin (shell scripts).
+pub const PYENV: OwnerInfo = OwnerInfo {
+    name: "pyenv",
+    ids: &["pyenv", "python-build"],
+};
+/// rbenv and its ruby-build plugin (shell scripts).
+pub const RBENV: OwnerInfo = OwnerInfo {
+    name: "rbenv",
+    ids: &["rbenv", "ruby-build"],
+};
+pub const GO: OwnerInfo = OwnerInfo {
+    name: "Go",
+    ids: &["go", "gopls"],
 };
 pub const ANYTHING_LLM: OwnerInfo = OwnerInfo {
     name: "AnythingLLM",
@@ -272,11 +332,24 @@ static FOLDER_OWNERS: &[FolderOwner] = &[
         "Swift Package Manager",
         &["swift-package", "swift-build"],
     ),
-    fo("go-build", "Go", &["go"]),
+    fo("go-build", GO.name, GO.ids),
+    fo("gopls", "gopls", &["gopls"]),
+    fo("golangci-lint", "golangci-lint", &["golangci-lint"]),
+    fo("composer", "Composer", &["composer"]),
+    fo(
+        "typescript",
+        "TypeScript",
+        &["tsserver", "typescript-language-server"],
+    ),
+    fo("deno", "Deno", &["deno"]),
+    fo("black", "Black", &["black"]),
+    fo("puppeteer", "Puppeteer", &["puppeteer"]),
+    fo("selenium", "Selenium", &["selenium-manager"]),
+    fo("electron", "Electron", &["electron", "Electron"]),
     fo("yarn", "Yarn", &["yarn"]),
     fo("Yarn", "Yarn", &["yarn"]),
     fo("Cypress", "Cypress", &["Cypress", "cypress"]),
-    fo("pypoetry", "Poetry", &["poetry"]),
+    fo("pypoetry", POETRY.name, POETRY.ids),
     fo("pre-commit", "pre-commit", &["pre-commit"]),
     fo("firebase", FIREBASE.name, FIREBASE.ids),
     fo("gh", GH.name, GH.ids),
@@ -812,6 +885,10 @@ mod tests {
             o.blocked_by(&crate::model::RunningSet::parse("com.google.chrome")),
             Some("Quit Google Chrome first".to_string())
         );
-        assert!(o.blocked_by(&crate::model::RunningSet::unknown()).is_some());
+        assert_eq!(
+            o.blocked_by(&crate::model::RunningSet::unknown())
+                .as_deref(),
+            Some("Tidy couldn't check whether Google Chrome is open")
+        );
     }
 }

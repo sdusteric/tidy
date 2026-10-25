@@ -13,7 +13,7 @@
 //! table or the notification center. Call these only from the view's setup or from explicit user
 //! actions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tidy_core::reminder::ReminderDate;
@@ -180,6 +180,12 @@ pub trait Terminator {
     fn force_terminate(&self, pid: i32) -> bool;
     /// True when the app has exited, or when no app with this pid is running any more.
     fn is_terminated(&self, pid: i32) -> bool;
+    /// `NSRunningApplication.bundleURL` of the app with this pid, as a path: what Relaunch
+    /// opens again once the app has quit. None for a plain process or Tidy itself.
+    fn bundle_path(&self, pid: i32) -> Option<PathBuf>;
+    /// Opens the app bundle at `bundle` (`NSWorkspace openApplicationAtURL`), without bringing
+    /// it to the front. True when the request was made.
+    fn open_app(&self, bundle: &Path) -> bool;
     /// The app's icon as a PNG image for the row, or None.
     fn icon(&self, app_path: &Path) -> Option<Arc<gpui_kit::Image>>;
 }
@@ -225,6 +231,32 @@ impl Terminator for SystemTerminator {
         }
     }
 
+    fn bundle_path(&self, pid: i32) -> Option<PathBuf> {
+        #[cfg(not(test))]
+        {
+            let url = imp_apps::running(pid)?.bundleURL()?;
+            let path = url.path()?.to_string();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        }
+        #[cfg(test)]
+        {
+            let _ = pid;
+            None
+        }
+    }
+
+    fn open_app(&self, bundle: &Path) -> bool {
+        #[cfg(not(test))]
+        {
+            imp_apps::open(bundle)
+        }
+        #[cfg(test)]
+        {
+            let _ = bundle;
+            false
+        }
+    }
+
     fn icon(&self, app_path: &Path) -> Option<Arc<gpui_kit::Image>> {
         #[cfg(not(test))]
         {
@@ -258,6 +290,27 @@ mod imp_apps {
             return None;
         }
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+    }
+
+    /// Opens an app bundle again after Relaunch saw it quit. It asks Launch Services, the way
+    /// a Dock click does, and leaves Tidy in front. Only a folder that ends in `.app` is
+    /// opened.
+    pub fn open(bundle: &std::path::Path) -> bool {
+        use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
+        use objc2_foundation::{NSString, NSURL};
+        let is_app = bundle
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+            && bundle.is_dir();
+        if !is_app {
+            return false;
+        }
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+        let config = NSWorkspaceOpenConfiguration::configuration();
+        config.setActivates(false);
+        NSWorkspace::sharedWorkspace()
+            .openApplicationAtURL_configuration_completionHandler(&url, &config, None);
+        true
     }
 }
 
@@ -583,8 +636,8 @@ mod imp_notify {
 #[cfg(test)]
 pub mod fakes {
     use std::cell::{Cell, RefCell};
-    use std::collections::HashSet;
-    use std::path::Path;
+    use std::collections::{HashMap, HashSet};
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use tidy_core::reminder::ReminderDate;
@@ -599,6 +652,12 @@ pub mod fakes {
         pub polite: RefCell<Vec<i32>>,
         pub forced: RefCell<Vec<i32>>,
         pub exited: RefCell<HashSet<i32>>,
+        /// The bundle each pid reports, for Relaunch.
+        pub bundles: RefCell<HashMap<i32, PathBuf>>,
+        /// The bundles Relaunch opened again.
+        pub opened: RefCell<Vec<PathBuf>>,
+        /// What `open_app` answers (true unless a test says otherwise).
+        pub open_fails: Cell<bool>,
     }
 
     impl Terminator for FakeTerminator {
@@ -614,6 +673,18 @@ pub mod fakes {
 
         fn is_terminated(&self, pid: i32) -> bool {
             self.exited.borrow().contains(&pid)
+        }
+
+        fn bundle_path(&self, pid: i32) -> Option<PathBuf> {
+            self.bundles.borrow().get(&pid).cloned()
+        }
+
+        fn open_app(&self, bundle: &Path) -> bool {
+            if self.open_fails.get() {
+                return false;
+            }
+            self.opened.borrow_mut().push(bundle.to_path_buf());
+            true
         }
 
         fn icon(&self, _app_path: &Path) -> Option<Arc<gpui_kit::Image>> {
@@ -687,6 +758,8 @@ mod tests {
         let t = SystemTerminator;
         assert!(!t.terminate(1));
         assert!(!t.force_terminate(1));
+        assert!(t.bundle_path(1).is_none());
+        assert!(!t.open_app(Path::new("/System/Applications/Calculator.app")));
         assert!(t.icon(Path::new("/Applications/Nope.app")).is_none());
         let n = SystemNotifier;
         n.cancel();

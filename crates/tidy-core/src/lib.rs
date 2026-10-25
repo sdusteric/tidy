@@ -14,6 +14,7 @@ pub mod cleanup;
 pub mod core;
 pub mod env;
 pub mod explain;
+pub mod gitindex;
 pub mod history;
 pub mod large;
 pub mod lastused;
@@ -36,8 +37,8 @@ pub mod walk;
 pub use api::{Command, CoreHandle, Event, ScanKind};
 pub use core::{start, start_with_sources};
 pub use env::{
-    Clock, CommandOutput, CommandRunner, Env, LastUsed, MemoryProbe, ProcessProbe, SystemSeams,
-    Trasher,
+    Clock, CommandOutput, CommandRunner, Env, LastUsed, MemoryProbe, OpenFilesProbe, ProcessProbe,
+    SystemSeams, Trasher,
 };
 pub use lock::{InstanceLock, LockError};
 pub use model::{

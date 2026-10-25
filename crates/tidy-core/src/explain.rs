@@ -40,6 +40,11 @@ pub fn verdict_lead(class: Class) -> &'static str {
 
 /// The last check of every item Tidy may move.
 pub const RECHECK: &str = "Checked again right before the move";
+/// The open-file check on every item Tidy may move.
+pub const OPEN_LINE: &str = "Skipped while a program has a file open inside it";
+/// The project guard on every build output item.
+pub const PROJECT_GUARD_LINE: &str =
+    "Never when it holds a keypair, a Git repository or files Git tracks";
 /// The line about the Trash on every item Tidy may move.
 pub const TRASH_LINE: &str = "Goes to the Trash, so you can put it back";
 /// The only check line of a Report only item.
@@ -76,6 +81,7 @@ pub fn explain(item: &Item) -> Explanation {
         e.patterns = r.names.iter().map(|n| format!("<project>/{n}")).collect();
         if item.class != Class::ReportOnly {
             checks.push(marker_check(r.markers));
+            checks.push(PROJECT_GUARD_LINE.to_string());
             checks.extend(owner_check(r.owner));
             checks.push(age_check(r.age));
         }
@@ -83,6 +89,7 @@ pub fn explain(item: &Item) -> Explanation {
     if item.class == Class::ReportOnly {
         checks.push(NEVER_MOVED.to_string());
     } else {
+        checks.push(OPEN_LINE.to_string());
         checks.push(RECHECK.to_string());
         checks.push(TRASH_LINE.to_string());
     }
@@ -242,6 +249,7 @@ mod tests {
             [
                 "Skipped while its app is running",
                 "Nothing inside changed in the last 24 hours",
+                OPEN_LINE,
                 RECHECK,
                 TRASH_LINE
             ]
@@ -325,6 +333,7 @@ mod tests {
             e.checks[0],
             "Cargo.toml sits beside it, or Cargo's tag is inside"
         );
+        assert_eq!(e.checks[1], PROJECT_GUARD_LINE);
         assert!(
             e.checks
                 .contains(&"Skipped while Cargo is running".to_string())
@@ -372,7 +381,7 @@ mod tests {
         let e = explain(&item("demo:Library/Caches/x", Class::Safe, "Cache"));
         assert_eq!(e.verdict, "Safe to clean. Cache.");
         assert!(e.rebuild.is_empty() && e.patterns.is_empty());
-        assert_eq!(e.checks, [RECHECK, TRASH_LINE]);
+        assert_eq!(e.checks, [OPEN_LINE, RECHECK, TRASH_LINE]);
         assert_eq!(e.rel_path, "Library/Caches/x");
     }
 

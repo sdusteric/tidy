@@ -4089,3 +4089,72 @@ fn after_a_clean_skipped_rows_stay_and_trashed_rows_do_not_come_back(cx: &mut Te
     keys(cx, "cmd-2");
     assert!(!has(cx, "clean-row:r:a"));
 }
+
+#[::gpui::test]
+fn tidy_checkup_selects_check_up_and_starts_it(cx: &mut TestAppContext) {
+    let mut h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    keys(cx, "cmd-2");
+    h.drain();
+    let ran = cx.update(|_, cx| crate::handle_open_urls(&["tidy://checkup".to_string()], cx));
+    cx.run_until_parked();
+    assert_eq!(ran, 1);
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Checkup);
+    assert!(model(cx).read_with(cx, |m, _| m.checkup.running));
+    let cmds = h.drain();
+    assert_eq!(
+        count_cmds(&cmds, |c| matches!(c, Command::RunCheckup { .. })),
+        1,
+        "{cmds:?}"
+    );
+    // Read-only: only the check up, the last-check read and the settings note go out.
+    assert!(
+        cmds.iter().all(|c| matches!(
+            c,
+            Command::RunCheckup { .. } | Command::LastCheckup { .. } | Command::UpdateSettings(_)
+        )),
+        "{cmds:?}"
+    );
+
+    // A second link while it runs starts nothing more.
+    cx.update(|_, cx| crate::handle_open_urls(&["tidy://checkup".to_string()], cx));
+    cx.run_until_parked();
+    assert_eq!(
+        count_cmds(&h.drain(), |c| matches!(c, Command::RunCheckup { .. })),
+        0
+    );
+}
+
+#[::gpui::test]
+fn tidy_check_for_updates_takes_the_menu_items_path(cx: &mut TestAppContext) {
+    use crate::updates::{FakeUpdates, install};
+
+    let fake = Rc::new(FakeUpdates::new(true, true));
+    let mut h = setup(cx);
+    cx.update(|cx| install(fake.clone(), cx));
+    let (_view, cx) = open_main(cx);
+    h.drain();
+    let ran =
+        cx.update(|_, cx| crate::handle_open_urls(&["tidy://check-for-updates".to_string()], cx));
+    cx.run_until_parked();
+    assert_eq!(ran, 1);
+    assert_eq!(fake.checks.get(), 1);
+    assert!(h.drain().is_empty());
+
+    // Unknown hosts, extra paths and queries do nothing at all.
+    let ran = cx.update(|_, cx| {
+        crate::handle_open_urls(
+            &[
+                "tidy://check-for-updates?now=1".to_string(),
+                "tidy://checkup/extra".to_string(),
+                "tidy://clean".to_string(),
+                "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string(),
+            ],
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(ran, 0);
+    assert_eq!(fake.checks.get(), 1);
+    assert!(h.drain().is_empty());
+}

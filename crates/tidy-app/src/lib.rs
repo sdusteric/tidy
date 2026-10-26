@@ -8,6 +8,7 @@ pub mod demo;
 pub mod format;
 pub mod macos;
 pub mod motion;
+pub mod open_urls;
 pub mod theme;
 pub mod updates;
 pub mod views;
@@ -26,4 +27,25 @@ pub use views::main_window::{TidyView, open_main_window};
 /// `gpui_kit::init(cx)`.
 pub fn init(cx: &mut gpui_kit::App) {
     app::init(cx);
+}
+
+/// Runs the quick actions in URLs macOS handed the app. `tidy://checkup` brings the main window
+/// back (like a Dock click), selects Check up and starts it; the check up only reads and never
+/// cleans. `tidy://check-for-updates` takes the menu item's path. Returns how many ran.
+pub fn handle_open_urls(urls: &[String], cx: &mut gpui_kit::App) -> usize {
+    let actions = open_urls::actions_for_open_urls(urls);
+    for action in &actions {
+        match action {
+            open_urls::Action::Checkup => {
+                open_main_window(cx);
+                let model = app::model(cx);
+                model.update(cx, |m, cx| {
+                    m.select_screen(Screen::Checkup, cx);
+                    m.run_checkup(cx);
+                });
+            }
+            open_urls::Action::CheckForUpdates => updates::check_for_updates(cx),
+        }
+    }
+    actions.len()
 }

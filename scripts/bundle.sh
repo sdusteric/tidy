@@ -101,6 +101,11 @@ ditto --norsrc --noextattr "$SPARKLE" "$OUT/Contents/Frameworks/Sparkle.framewor
 # Info.plist
 sed -e "s|@BUNDLE_ID@|$BUNDLE_ID|" -e "s|@VERSION@|$VERSION|" -e "s|@BUILD@|$BUILD|" \
   "$REPO/resources/Info.plist.in" > "$OUT/Contents/Info.plist"
+# The tidy:// scheme belongs to the real app only: a bundle with another id (the screenshot
+# bundle) must never be where macOS sends tidy:// links.
+if [ "$BUNDLE_ID" != "dev.sdusteric.tidy" ]; then
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$OUT/Contents/Info.plist"
+fi
 printf 'APPL????' > "$OUT/Contents/PkgInfo"
 plutil -lint "$OUT/Contents/Info.plist"
 

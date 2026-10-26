@@ -257,6 +257,11 @@ fn run_app() {
         .flatten();
     let (core, events) = tidy_core::start(env, rt.handle().clone());
     let app = gpui_kit::application().with_assets(tidy_app::AppAssets);
+    // Registered before run(). URLs that arrive before the window exists wait in the channel.
+    let (open_tx, mut open_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        let _ = open_tx.send(urls);
+    });
     app.on_reopen(|cx: &mut App| tidy_app::reopen(cx));
 
     app.run(move |cx: &mut App| {
@@ -275,6 +280,14 @@ fn run_app() {
         } else {
             tracing::error!("main window did not open");
         }
+
+        cx.spawn(async move |cx| {
+            while let Some(urls) = open_rx.recv().await {
+                let ran = cx.update(|cx| tidy_app::handle_open_urls(&urls, cx));
+                tracing::info!("open urls: {} of {} ran", ran, urls.len());
+            }
+        })
+        .detach();
 
         if !tidy_app::app::background_mode() {
             cx.activate(true);

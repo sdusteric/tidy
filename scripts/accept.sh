@@ -431,8 +431,8 @@ ac5() {
     bad="$bad [designated requirement lacks dev.sdusteric.tidy or an Apple Development or Developer ID certificate: $dr]"
   fi
 
-  # Info.plist content: executable, id, minimum system, the three folder strings, and none of
-  # the URL scheme or document type keys.
+  # Info.plist content: executable, id, minimum system, the three folder strings, and the tidy URL scheme
+  # and Shelf actions, and no document type keys.
   v=$("$pb" -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null)
   [ "$v" = "tidy" ] || bad="$bad [CFBundleExecutable=$v]"
   v=$("$pb" -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null)
@@ -445,11 +445,15 @@ ac5() {
   for v in NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription; do
     [ -n "$("$pb" -c "Print :$v" "$plist" 2>/dev/null)" ] || bad="$bad [no $v]"
   done
-  for v in CFBundleURLTypes CFBundleDocumentTypes NSLocalNetworkUsageDescription; do
+  for v in CFBundleDocumentTypes NSLocalNetworkUsageDescription; do
     if "$pb" -c "Print :$v" "$plist" >/dev/null 2>&1; then
       bad="$bad [$v is present]"
     fi
   done
+  v=$("$pb" -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$plist" 2>/dev/null)
+  [ "$v" = "tidy" ] || bad="$bad [URL scheme=$v]"
+  v=$("$pb" -c 'Print :SDShelfActions' "$plist" 2>/dev/null | tr -d ' \n')
+  case "$v" in *checkup*check-for-updates*) ;; *) bad="$bad [SDShelfActions=$v]" ;; esac
   local macos
   macos=$(ls "$app/Contents/MacOS")
   [ "$macos" = "tidy" ] || bad="$bad [Contents/MacOS holds: $macos]"

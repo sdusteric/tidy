@@ -339,6 +339,15 @@ impl CleanupState {
             .collect()
     }
 
+    /// What fails a guard of `id` right now: its app is running (blocked), or the last clean
+    /// skipped it at the check before the move.
+    pub fn guard_state(&self, id: &str) -> tidy_core::explain::GuardState {
+        tidy_core::explain::GuardState {
+            owner_running: self.blocked.contains_key(id),
+            recheck_failed: self.skipped.contains_key(id),
+        }
+    }
+
     pub fn blocked_reason(&self, item: &CleanItem) -> Option<&str> {
         self.blocked.get(&item.id).map(String::as_str)
     }

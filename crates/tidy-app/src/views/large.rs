@@ -17,7 +17,7 @@ use crate::app::{
     open_path,
 };
 use crate::format::{self, Glyph};
-use crate::theme::{MONO_FONT, Theme, metrics, motion as m, tnum};
+use crate::theme::{DisplayType, MONO_FONT, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{
@@ -361,7 +361,7 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                                 .min_w_0()
                                 .text_size(px(13.))
                                 .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .display(FontWeight::SEMIBOLD)
                                 .text_color(t.text)
                                 .whitespace_nowrap()
                                 .overflow_hidden()
@@ -390,7 +390,7 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                 .w(px(80.))
                 .text_right()
                 .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
+                .display(FontWeight::SEMIBOLD)
                 .font_features(tnum())
                 .text_color(t.text)
                 .whitespace_nowrap()
@@ -658,7 +658,7 @@ impl TidyView {
                             .flex()
                             .items_center()
                             .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
+                            .display(FontWeight::SEMIBOLD)
                             .font_features(tnum())
                             .text_color(text)
                             .whitespace_nowrap()
@@ -763,7 +763,7 @@ impl TidyView {
                 .child(
                     div()
                         .text_size(px(15.))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .display(FontWeight::BOLD)
                         .text_color(t.text)
                         .child("Nothing to show"),
                 )
@@ -894,7 +894,7 @@ impl TidyView {
                     .px(px(4.))
                     .rounded(px(4.))
                     .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
+                    .display(FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
                     .child(label.clone());
                 parts.push(if i == last {

@@ -12,7 +12,7 @@ use tidy_core::model::{Class, Item as CleanItem, TrashSummary};
 
 use crate::app::LargeEntry;
 use crate::format;
-use crate::theme::{Theme, metrics, tnum};
+use crate::theme::{DisplayType, Theme, metrics, tnum};
 use crate::views::overlay::{Phase, Sheet, present};
 
 /// Shown when any selected item lives under `~/Library` (C10).
@@ -38,6 +38,20 @@ pub enum DialogKind {
     TrashLoginItem { key: String },
 }
 
+/// The line under the receipt's total (Move to Trash dialogs).
+pub const RECEIPT_FOOTER: &str = "Nothing is deleted. Every item goes to the Trash and Tidy writes it in History, so you can put it back.";
+
+/// The Move to Trash confirmation drawn as a receipt: a subtotal per line with a dot leader,
+/// a double rule, a large total.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// "7 items from 3 categories".
+    pub count_line: String,
+    /// (label, size) per line: a category on Cleanup, an item on Large files.
+    pub lines: Vec<(String, String)>,
+    pub total: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DialogSpec {
     pub kind: DialogKind,
@@ -48,6 +62,8 @@ pub struct DialogSpec {
     pub notes: Vec<String>,
     pub confirm: String,
     pub destructive: bool,
+    /// When set, the dialog draws this receipt in place of `rows`.
+    pub receipt: Option<Receipt>,
 }
 
 impl DialogSpec {
@@ -57,6 +73,16 @@ impl DialogSpec {
         let review: Vec<&&CleanItem> = ticked.iter().filter(|i| i.class == Class::Review).collect();
         let safe: Vec<&&CleanItem> = ticked.iter().filter(|i| i.class == Class::Safe).collect();
         let mut notes = Vec::new();
+        if !review.is_empty() {
+            notes.push(format!(
+                "To review: {}.",
+                review
+                    .iter()
+                    .map(|i| format!("{} ({})", i.name, format::size(i.bytes_alloc)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         if !safe.is_empty() {
             let bytes: u64 = safe.iter().map(|i| i.bytes_alloc).sum();
             notes.push(format!(
@@ -65,6 +91,28 @@ impl DialogSpec {
                 format::size(bytes)
             ));
         }
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for group in tidy_core::model::Group::ALL {
+            let in_group: Vec<&&CleanItem> = ticked.iter().filter(|i| i.group == group).collect();
+            if !in_group.is_empty() {
+                let bytes: u64 = in_group.iter().map(|i| i.bytes_alloc).sum();
+                lines.push((group.label().to_string(), format::size(bytes)));
+            }
+        }
+        let total: u64 = ticked.iter().map(|i| i.bytes_alloc).sum();
+        let receipt = Receipt {
+            count_line: format!(
+                "{} from {}",
+                format::items(ticked.len()),
+                if lines.len() == 1 {
+                    "1 category".to_string()
+                } else {
+                    format!("{} categories", lines.len())
+                }
+            ),
+            lines,
+            total: format::size(total),
+        };
         DialogSpec {
             kind: DialogKind::CleanReview,
             title: "Move these to the Trash?".to_string(),
@@ -76,6 +124,7 @@ impl DialogSpec {
             notes,
             confirm: "Move to Trash".to_string(),
             destructive: false,
+            receipt: Some(receipt),
         }
     }
 
@@ -90,6 +139,14 @@ impl DialogSpec {
         if total > CLONE_NOTE_MIN {
             notes.push(CLONE_NOTE.to_string());
         }
+        let receipt = Receipt {
+            count_line: format::items(entries.len()),
+            lines: entries
+                .iter()
+                .map(|e| (e.name.clone(), format::size(e.bytes)))
+                .collect(),
+            total: format::size(total),
+        };
         DialogSpec {
             kind: DialogKind::TrashLarge {
                 rels: entries.iter().map(|e| e.rel.clone()).collect(),
@@ -107,6 +164,7 @@ impl DialogSpec {
             notes,
             confirm: "Move to Trash".to_string(),
             destructive: false,
+            receipt: Some(receipt),
         }
     }
 
@@ -120,6 +178,7 @@ impl DialogSpec {
             notes: Vec::new(),
             confirm: "Force Quit".to_string(),
             destructive: true,
+            receipt: None,
         }
     }
 
@@ -138,6 +197,7 @@ impl DialogSpec {
             notes: Vec::new(),
             confirm: "Move to Trash".to_string(),
             destructive: false,
+            receipt: None,
         }
     }
 
@@ -155,6 +215,7 @@ impl DialogSpec {
             notes: Vec::new(),
             confirm: "Empty Trash".to_string(),
             destructive: true,
+            receipt: None,
         }
     }
 }
@@ -177,14 +238,14 @@ fn dialog_button(
         .id(id)
         .debug_selector(|| id.to_string())
         .flex_none()
-        .h(px(24.))
-        .px(px(12.))
-        .rounded(px(6.))
+        .h(px(32.))
+        .px(px(16.))
+        .rounded(px(8.))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(12.))
-        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(13.))
+        .display(FontWeight::BOLD)
         .whitespace_nowrap()
         .cursor_pointer()
         .child(label)
@@ -199,13 +260,117 @@ fn dialog_button(
             .active(move |s| s.bg(pressed)),
         ButtonKind::Primary => base
             .bg(t.accent)
-            .text_color(gpui_kit::white())
+            .text_color(t.on_accent)
             .active(|s| s.opacity(0.9)),
         ButtonKind::Danger => base
             .bg(t.danger_button)
             .text_color(gpui_kit::white())
             .active(|s| s.opacity(0.9)),
     }
+}
+
+/// One receipt line: the label, a dot leader, the size.
+fn receipt_line(label: &str, size: &str, t: &Theme) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(260.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .display(FontWeight::SEMIBOLD)
+                .text_color(t.text)
+                .child(label.to_string()),
+        )
+        .child(
+            // The leader is decoration: it only joins a label to its size.
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(12.))
+                .text_color(t.dot)
+                .child("\u{b7} ".repeat(120)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .display(FontWeight::BOLD)
+                .font_features(tnum())
+                .text_color(t.text)
+                .child(size.to_string()),
+        )
+}
+
+/// The receipt body of a Move to Trash dialog: count line, lines with leaders, a double rule,
+/// a large total and the footer.
+fn receipt_body(r: &Receipt, t: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(14.))
+        .child(
+            div()
+                .debug_selector(|| "receipt-count".to_string())
+                .text_size(px(13.))
+                .text_color(t.text_2)
+                .child(r.count_line.clone()),
+        )
+        .child(
+            div()
+                .id("dialog-list")
+                .debug_selector(|| "dialog-list".to_string())
+                .max_h(px(168.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .children(
+                    r.lines
+                        .iter()
+                        .map(|(label, size)| receipt_line(label, size, t)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().h(px(1.5)).w_full().bg(t.text))
+                .child(div().h(px(1.5)).w_full().bg(t.text)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .display(FontWeight::SEMIBOLD)
+                        .text_color(t.text_2)
+                        .child("Total"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "receipt-total".to_string())
+                        .text_size(px(34.))
+                        .line_height(px(38.))
+                        .display(FontWeight::EXTRA_BOLD)
+                        .font_features(tnum())
+                        .text_color(t.text)
+                        .child(r.total.clone()),
+                ),
+        )
 }
 
 /// A scrim over the whole window with the dialog card centered on it. A click on the scrim
@@ -220,7 +385,7 @@ pub fn render_dialog(
     let cancel_scrim = on_cancel.clone();
     // A leaving copy only fades: it takes no clicks.
     let leaving = matches!(phase, Phase::Leave(_));
-    let list = (!spec.rows.is_empty()).then(|| {
+    let list = (spec.receipt.is_none() && !spec.rows.is_empty()).then(|| {
         div()
             .id("dialog-list")
             .debug_selector(|| "dialog-list".to_string())
@@ -256,15 +421,19 @@ pub fn render_dialog(
     let card = div()
         .id("dialog-card")
         .debug_selector(|| "dialog".to_string())
-        .w(px(metrics::DIALOG_W))
+        .w(px(if spec.receipt.is_some() {
+            metrics::RECEIPT_W
+        } else {
+            metrics::DIALOG_W
+        }))
         .max_w_full()
-        .p(px(16.))
+        .p(px(24.))
         .rounded(px(12.))
         .bg(t.pop_bg)
         .shadow(t.pop_shadow())
         .flex()
         .flex_col()
-        .gap(px(12.))
+        .gap(px(14.))
         // A click inside the card is not a click on the scrim.
         .when(!leaving, |d| {
             d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -272,26 +441,41 @@ pub fn render_dialog(
         .child(
             div()
                 .debug_selector(|| "dialog-title".to_string())
-                .text_size(px(13.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(20.))
+                .line_height(px(26.))
+                .display(FontWeight::BOLD)
                 .text_color(t.text)
                 .child(spec.title.clone()),
         )
-        .children(spec.body.clone().map(|body| {
-            div()
-                .debug_selector(|| "dialog-body".to_string())
-                .text_size(px(13.))
-                .line_height(px(18.))
-                .text_color(t.text)
-                .child(body)
-        }))
+        .children(spec.receipt.as_ref().map(|r| receipt_body(r, t)))
+        .children(
+            spec.body
+                .clone()
+                .filter(|_| spec.receipt.is_none())
+                .map(|body| {
+                    div()
+                        .debug_selector(|| "dialog-body".to_string())
+                        .text_size(px(13.))
+                        .line_height(px(19.))
+                        .text_color(t.text)
+                        .child(body)
+                }),
+        )
         .children(list)
         .children(spec.notes.iter().map(|note| {
             div()
-                .text_size(px(12.))
-                .line_height(px(16.))
+                .text_size(px(13.))
+                .line_height(px(19.))
                 .text_color(t.text_2)
                 .child(note.clone())
+        }))
+        .children(spec.receipt.as_ref().map(|_| {
+            div()
+                .debug_selector(|| "dialog-body".to_string())
+                .text_size(px(13.))
+                .line_height(px(19.))
+                .text_color(t.text_2)
+                .child(RECEIPT_FOOTER)
         }))
         .child(
             div()
@@ -389,8 +573,57 @@ mod tests {
         );
         assert_eq!(spec.confirm, "Move to Trash");
         assert!(!spec.destructive);
-        assert_eq!(spec.notes.len(), 1);
-        assert!(spec.notes[0].contains("1 item"));
+        assert_eq!(spec.notes.len(), 2);
+        assert_eq!(spec.notes[0], "To review: Hugging Face (2 GB).");
+        assert!(spec.notes[1].contains("1 item"));
+    }
+
+    #[test]
+    fn the_review_dialog_is_a_receipt_with_a_line_per_category() {
+        let mut a = item("Hugging Face", Class::Review, 2_000_000_000);
+        a.group = Group::AiModels;
+        let b = item("Chrome", Class::Safe, 640_000_000);
+        let c = item("Slack", Class::Safe, 360_000_000);
+        let spec = DialogSpec::review(&[&a, &b, &c]);
+        let r = spec.receipt.expect("a receipt");
+        assert_eq!(r.count_line, "3 items from 2 categories");
+        assert_eq!(
+            r.lines,
+            vec![
+                ("System and app caches".to_string(), "1 GB".to_string()),
+                (
+                    "AI models and large app data".to_string(),
+                    "2 GB".to_string()
+                ),
+            ]
+        );
+        assert_eq!(r.total, "3 GB");
+        let one = DialogSpec::review(&[&a]);
+        assert_eq!(one.receipt.unwrap().count_line, "1 item from 1 category");
+    }
+
+    #[test]
+    fn the_large_files_dialog_lists_each_item_on_the_receipt() {
+        let spec = DialogSpec::trash(&[
+            entry("a.mov", 700_000_000, false),
+            entry("b.zip", 300_000_000, false),
+        ]);
+        let r = spec.receipt.expect("a receipt");
+        assert_eq!(r.count_line, "2 items");
+        assert_eq!(r.lines.len(), 2);
+        assert_eq!(r.total, "1 GB");
+        assert!(RECEIPT_FOOTER.starts_with("Nothing is deleted."));
+    }
+
+    #[test]
+    fn only_the_two_move_dialogs_are_receipts() {
+        assert!(DialogSpec::force_quit("1", "X").receipt.is_none());
+        assert!(
+            DialogSpec::empty_trash(TrashSummary { items: 1, bytes: 1 })
+                .receipt
+                .is_none()
+        );
+        assert!(DialogSpec::trash_login_item("k", "L").receipt.is_none());
     }
 
     #[test]
@@ -440,7 +673,7 @@ mod tests {
         ];
         for s in specs {
             let all = format!("{} {:?} {:?} {}", s.title, s.body, s.notes, s.confirm);
-            assert!(!all.contains('\u{2014}'));
+            assert!(!all.contains('\u{2014}') && !all.contains('\u{2013}'));
         }
     }
 }

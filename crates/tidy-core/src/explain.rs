@@ -19,6 +19,10 @@ pub struct Explanation {
     pub rebuild: String,
     /// The checks that guard the move, one short line each.
     pub checks: Vec<String>,
+    /// The same checks with the item's state: which ones pass right now. Empty for a Report
+    /// only item, which has nothing to pass because Tidy never moves it.
+    #[serde(default)]
+    pub guards: Vec<Guard>,
     /// The rule id without a folded row's `.small` suffix.
     pub rule_id: String,
     /// The path patterns of the rule, relative to the home folder.
@@ -27,6 +31,32 @@ pub struct Explanation {
     pub rel_path: String,
     /// The command a Report only row suggests. Tidy never runs it.
     pub command: Option<String>,
+}
+
+/// One check that must pass before an item can move, and whether it passes right now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guard {
+    pub text: String,
+    pub passed: bool,
+}
+
+/// What the app knows about an item beyond its rule: the state that fails a guard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GuardState {
+    /// The item's app or tool is running, so the item is blocked (`Item::blocked`).
+    pub owner_running: bool,
+    /// The last clean skipped the item at its last check before the move.
+    pub recheck_failed: bool,
+}
+
+impl Explanation {
+    /// (checks passed, checks in all). (0, 0) for a Report only item.
+    pub fn passed(&self) -> (usize, usize) {
+        (
+            self.guards.iter().filter(|g| g.passed).count(),
+            self.guards.len(),
+        )
+    }
 }
 
 /// The first words of the verdict for each class.
@@ -50,8 +80,20 @@ pub const TRASH_LINE: &str = "Goes to the Trash, so you can put it back";
 /// The only check line of a Report only item.
 pub const NEVER_MOVED: &str = "Tidy never moves it";
 
-/// The details of `item`.
+/// The details of `item`, with the state its own `blocked` field gives.
 pub fn explain(item: &Item) -> Explanation {
+    explain_with(
+        item,
+        GuardState {
+            owner_running: item.blocked.is_some(),
+            recheck_failed: false,
+        },
+    )
+}
+
+/// The details of `item` in the live `state`: a running owner fails the "Skipped while ... is
+/// running" check, and a skipped move fails the last check before the move.
+pub fn explain_with(item: &Item, state: GuardState) -> Explanation {
     let rule_id = item
         .rule_id()
         .strip_suffix(rules::SMALL_SUFFIX)
@@ -63,37 +105,61 @@ pub fn explain(item: &Item) -> Explanation {
         rel_path: item.rel_path().to_string(),
         ..Explanation::default()
     };
-    let mut checks = Vec::new();
+    let mut checks: Vec<Guard> = Vec::new();
+    let pass = |text: String| Guard { text, passed: true };
+    let owner = |o: Owner| {
+        owner_check(o).map(|text| Guard {
+            text,
+            passed: !state.owner_running,
+        })
+    };
     if let Some(r) = rules::rule(&rule_id) {
         e.rebuild = r.rebuild.to_string();
         e.command = r.command.map(str::to_string);
         e.patterns = r.targets.iter().map(target_pattern).collect();
         if item.class != Class::ReportOnly {
-            checks.extend(owner_check(r.owner));
-            checks.push(age_check(r.age));
-            checks.extend(keep_check(r.keep));
+            checks.extend(owner(r.owner));
+            checks.push(pass(age_check(r.age)));
+            checks.extend(keep_check(r.keep).map(pass));
             if r.in_use {
-                checks.push("Never a version that a running program uses".to_string());
+                checks.push(pass(
+                    "Never a version that a running program uses".to_string(),
+                ));
             }
         }
     } else if let Some(r) = rules::project_rule(&rule_id) {
         e.rebuild = r.rebuild.to_string();
         e.patterns = r.names.iter().map(|n| format!("<project>/{n}")).collect();
         if item.class != Class::ReportOnly {
-            checks.push(marker_check(r.markers));
-            checks.push(PROJECT_GUARD_LINE.to_string());
-            checks.extend(owner_check(r.owner));
-            checks.push(age_check(r.age));
+            checks.push(pass(marker_check(r.markers)));
+            checks.push(pass(PROJECT_GUARD_LINE.to_string()));
+            checks.extend(owner(r.owner));
+            checks.push(pass(age_check(r.age)));
         }
     }
     if item.class == Class::ReportOnly {
-        checks.push(NEVER_MOVED.to_string());
-    } else {
-        checks.push(OPEN_LINE.to_string());
-        checks.push(RECHECK.to_string());
-        checks.push(TRASH_LINE.to_string());
+        e.checks = vec![NEVER_MOVED.to_string()];
+        return e;
     }
-    e.checks = checks;
+    // A blocked item always has a running owner, even when its rule names none (an unknown
+    // cache): the owner check leads, failed.
+    if state.owner_running && !checks.iter().any(|g| !g.passed) {
+        checks.insert(
+            0,
+            Guard {
+                text: "Skipped while its app is running".to_string(),
+                passed: false,
+            },
+        );
+    }
+    checks.push(pass(OPEN_LINE.to_string()));
+    checks.push(Guard {
+        text: RECHECK.to_string(),
+        passed: !state.recheck_failed,
+    });
+    checks.push(pass(TRASH_LINE.to_string()));
+    e.checks = checks.iter().map(|g| g.text.clone()).collect();
+    e.guards = checks;
     e
 }
 
@@ -255,6 +321,85 @@ mod tests {
             ]
         );
         assert_eq!(e.command, None);
+    }
+
+    #[test]
+    fn every_guard_of_a_clean_row_passes_and_counts_come_from_the_rule() {
+        let e = explain(&item(
+            "cache.app:Library/Caches/com.spotify.client",
+            Class::Safe,
+            "Cache",
+        ));
+        assert_eq!(e.passed(), (5, 5));
+        assert_eq!(e.guards.len(), e.checks.len());
+        assert!(e.guards.iter().all(|g| g.passed));
+        // A project rule has more guards than a plain cache: the count is never fixed.
+        let p = explain(&item(
+            "proj.target:Documents/projects/tidy/target",
+            Class::Safe,
+            "Build output",
+        ));
+        assert_eq!(p.passed().0, p.passed().1);
+        assert_ne!(p.passed().1, e.passed().1);
+        // The unknown-rule fallback has only the three move-time checks.
+        let u = explain(&item("demo:Library/Caches/x", Class::Safe, "Cache"));
+        assert_eq!(u.passed(), (3, 3));
+    }
+
+    #[test]
+    fn a_running_owner_fails_only_the_owner_guard() {
+        let mut it = item(
+            "cache.chrome:Library/Caches/Google/Chrome/Default",
+            Class::Safe,
+            "Cache",
+        );
+        it.blocked = Some("Quit Google Chrome first".into());
+        let e = explain(&it);
+        let (ok, all) = e.passed();
+        assert_eq!(ok, all - 1);
+        let failed: Vec<_> = e.guards.iter().filter(|g| !g.passed).collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].text, "Skipped while Google Chrome is running");
+        // The same item with nothing running passes everything.
+        it.blocked = None;
+        assert_eq!(explain(&it).passed().0, all);
+    }
+
+    #[test]
+    fn a_blocked_item_of_an_unknown_rule_still_fails_one_guard() {
+        let mut it = item("demo:Library/Caches/x", Class::Safe, "Cache");
+        it.blocked = Some("Quit X first".into());
+        let e = explain(&it);
+        assert_eq!(e.passed(), (3, 4));
+        assert_eq!(e.guards[0].text, "Skipped while its app is running");
+        assert!(!e.guards[0].passed);
+    }
+
+    #[test]
+    fn a_skipped_move_fails_the_recheck_guard() {
+        let it = item("cache.app:Library/Caches/a", Class::Safe, "Cache");
+        let e = explain_with(
+            &it,
+            GuardState {
+                owner_running: false,
+                recheck_failed: true,
+            },
+        );
+        let failed: Vec<_> = e.guards.iter().filter(|g| !g.passed).collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].text, RECHECK);
+        assert_eq!(e.checks.len(), e.guards.len());
+    }
+
+    #[test]
+    fn report_only_items_have_no_guards_to_pass() {
+        let e = explain(&item(
+            "ai.vm:.colima",
+            Class::ReportOnly,
+            "Virtual machine disk.",
+        ));
+        assert!(e.guards.is_empty());
+        assert_eq!(e.passed(), (0, 0));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::app::{
     TidyModel, TrashSelection, background_mode, model, send,
 };
 use crate::format;
-use crate::theme::{Theme, metrics, motion as m, tnum};
+use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
 use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
 use crate::views::memory::MemoryMenu;
@@ -150,6 +150,11 @@ impl TidyView {
         if let Some(d) = crate::demo::state(cx).filter(|d| d.checkup_scroll_y > 0.) {
             checkup_scroll.set_offset(point(px(0.), px(-d.checkup_scroll_y)));
         }
+        // The Move to Trash demo opens with its receipt showing.
+        let dialog = crate::demo::state(cx).filter(|d| d.confirm).map(|_| {
+            let c = &model.read(cx).cleanup;
+            DialogSpec::review(&c.ticked_items())
+        });
         TidyView {
             model,
             focus,
@@ -170,7 +175,7 @@ impl TidyView {
                 })
             }),
             copied: None,
-            dialog: None,
+            dialog,
             history_open: false,
             history_expanded: HashSet::new(),
             card_figures: Default::default(),
@@ -332,8 +337,8 @@ impl TidyView {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(17.))
+                    .display(FontWeight::BOLD)
                     .text_color(t.text)
                     .whitespace_nowrap()
                     .child(title),
@@ -602,9 +607,9 @@ impl TidyView {
                     .child(
                         div()
                             .mt(px(4.))
-                            .text_size(px(15.))
-                            .line_height(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(20.))
+                            .line_height(px(26.))
+                            .display(FontWeight::BOLD)
                             .text_color(t.text)
                             .child(title),
                     )

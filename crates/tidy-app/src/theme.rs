@@ -1,5 +1,7 @@
-//! Design tokens: Haul v2 (docs/mockup/v2/DESIGN.md in the Haul repo) plus the four tokens and
-//! the Figure type role that Tidy adds (design section 11), in light and dark sets.
+//! Design tokens: the Preflight look (design section 11.x, 2026-10-25), in light and dark sets.
+//! Warm neutral grounds, ink buttons and an ink-filled selected row, one green and one amber,
+//! Avenir Next for the display type. Every text and background pair is held to WCAG AA by the
+//! `documented_contrast_ratios_hold` test.
 //!
 //! Views pick the set from `window.appearance()` on every render and observe appearance
 //! changes, so switching macOS between light and dark re-renders.
@@ -61,6 +63,11 @@ pub struct Theme {
     pub accent: Hsla,
     /// Focus ring outer 3 px: accent at 32% (light) or 42% (dark).
     pub accent_ring: Hsla,
+    /// Text and icons on `accent` and on the selected sidebar row (ink buttons).
+    pub on_accent: Hsla,
+    /// The quiet gray of a check dot that is not a pass in color: every dot of a row whose
+    /// checks all pass, and the empty dots of a row with a failed check.
+    pub dot: Hsla,
     pub track: Hsla,
     pub success: Hsla,
     pub success_badge: Hsla,
@@ -101,87 +108,93 @@ pub struct Theme {
 
 impl Theme {
     pub fn light() -> Theme {
-        let separator_strong = black(0.16);
-        let error_badge = hex(0xe5302a);
+        let separator_strong = hex(0x8c8e87);
+        let error_badge = hex(0xc62d1f);
+        let ink = 0x0d0e0c;
         Theme {
             dark: false,
-            window_bg: hex(0xffffff),
-            bar_bg: hex(0xf7f7f8),
-            raised: hex(0xffffff),
-            fill: black(0.05),
-            fill_2: hex(0xf0f0f2),
-            text: hex(0x1d1d1f),
-            text_2: hex(0x6e6e73),
-            text_3: hex(0x8a8a8f),
-            separator: black(0.08),
+            window_bg: hex(0xfafaf8),
+            bar_bg: hex(0xf0f0ec),
+            raised: hex(0xfafaf8),
+            fill: hex(0xefefeb),
+            fill_2: hex(0xe6e6e0),
+            text: hex(ink),
+            text_2: hex(0x555852),
+            text_3: hex(0x6b6d66),
+            separator: hex(0xdadad4),
             separator_strong,
-            accent: hex(0x007aff),
-            accent_ring: hexa(0x007aff, 0.32),
-            track: black(0.08),
-            success: hex(0x248a3d),
-            success_badge: hex(0x30b350),
-            success_tint: hexa(0x30b350, 0.12),
-            warning: hex(0xb25000),
-            warning_badge: hex(0xf08a00),
-            warning_bg: hexa(0xf08a00, 0.10),
-            error: hex(0xd70015),
+            accent: hex(ink),
+            accent_ring: hexa(ink, 0.35),
+            on_accent: hex(0xfafaf8),
+            dot: hex(0xcfcfc8),
+            track: hex(0xdadad4),
+            success: hex(0x0b7550),
+            success_badge: hex(0x0b7550),
+            success_tint: hexa(0x0b7550, 0.12),
+            warning: hex(0xa64b00),
+            warning_badge: hex(0xa64b00),
+            warning_bg: hexa(0xa64b00, 0.10),
+            error: hex(0xb42318),
             error_badge,
-            error_bg: hexa(0xe5302a, 0.08),
-            gray_badge: hex(0x8e8e93),
-            button_bg: hex(0xffffff),
-            pop_bg: hex(0xffffff),
-            group_bg: hex(0xffffff),
-            row_hover: black(0.04),
-            row_pressed: black(0.075),
-            sidebar_bg: hex(0xf4f4f6),
-            sidebar_selected: black(0.07),
+            error_bg: hexa(0xc62d1f, 0.08),
+            gray_badge: separator_strong,
+            button_bg: hex(0xfafaf8),
+            pop_bg: hex(0xfafaf8),
+            group_bg: hex(0xfafaf8),
+            row_hover: hexa(ink, 0.045),
+            row_pressed: hexa(ink, 0.09),
+            sidebar_bg: hex(0xf0f0ec),
+            sidebar_selected: hex(ink),
             tag_border: separator_strong,
-            checkbox_border: black(0.28),
+            checkbox_border: hex(ink),
             danger_button: error_badge,
-            surface: hex(0xffffff),
+            surface: hex(0xfafaf8),
             scale: 2.,
         }
     }
 
     pub fn dark() -> Theme {
-        let separator_strong = white(0.18);
-        let error_badge = hex(0xff453a);
+        let separator_strong = hex(0x6a6c66);
+        let error_badge = hex(0xff6b5e);
+        let ink = 0xf4f4f0;
         Theme {
             dark: true,
-            window_bg: hex(0x1e1e20),
-            bar_bg: hex(0x232326),
-            raised: hex(0x2a2a2d),
-            fill: white(0.075),
-            fill_2: hex(0x2e2e31),
-            text: hex(0xf2f2f7),
-            text_2: hex(0xa1a1a6),
-            text_3: hex(0x8e8e93),
-            separator: white(0.08),
+            window_bg: hex(0x0b0c0b),
+            bar_bg: hex(0x131412),
+            raised: hex(0x131412),
+            fill: hex(0x1a1b19),
+            fill_2: hex(0x242622),
+            text: hex(ink),
+            text_2: hex(0xa2a49e),
+            text_3: hex(0x8a8c86),
+            separator: hex(0x2a2c28),
             separator_strong,
-            accent: hex(0x0a84ff),
-            accent_ring: hexa(0x0a84ff, 0.42),
-            track: white(0.12),
-            success: hex(0x30d158),
-            success_badge: hex(0x30d158),
-            success_tint: hexa(0x30d158, 0.13),
-            warning: hex(0xff9f0a),
-            warning_badge: hex(0xff9f0a),
-            warning_bg: hexa(0xff9f0a, 0.12),
-            error: hex(0xff6961),
+            accent: hex(ink),
+            accent_ring: hexa(ink, 0.45),
+            on_accent: hex(0x0b0c0b),
+            dot: hex(0x3a3c37),
+            track: hex(0x2a2c28),
+            success: hex(0x46d39a),
+            success_badge: hex(0x46d39a),
+            success_tint: hexa(0x46d39a, 0.13),
+            warning: hex(0xf2a03d),
+            warning_badge: hex(0xf2a03d),
+            warning_bg: hexa(0xf2a03d, 0.12),
+            error: hex(0xff8b7e),
             error_badge,
-            error_bg: hexa(0xff453a, 0.12),
-            gray_badge: hex(0x636366),
-            button_bg: white(0.13),
-            pop_bg: hex(0x2c2c2f),
-            group_bg: hex(0x28282b),
-            row_hover: white(0.05),
-            row_pressed: white(0.09),
-            sidebar_bg: hex(0x232326),
-            sidebar_selected: white(0.09),
+            error_bg: hexa(0xff6b5e, 0.12),
+            gray_badge: separator_strong,
+            button_bg: hex(0x1a1b19),
+            pop_bg: hex(0x131412),
+            group_bg: hex(0x131412),
+            row_hover: hexa(ink, 0.06),
+            row_pressed: hexa(ink, 0.10),
+            sidebar_bg: hex(0x131412),
+            sidebar_selected: hex(ink),
             tag_border: separator_strong,
-            checkbox_border: white(0.30),
-            danger_button: error_badge,
-            surface: hex(0x1e1e20),
+            checkbox_border: hex(ink),
+            danger_button: hex(0xc62d1f),
+            surface: hex(0x0b0c0b),
             scale: 2.,
         }
     }
@@ -213,23 +226,9 @@ impl Theme {
         self.surface.blend(self.button_bg)
     }
 
-    /// Secondary button edge: `0 0 0 .5px black 20%` + `0 1px 1.5px black 8%` in
-    /// light, `0 0 0 .5px white 6%` in dark.
+    /// Secondary button edge: a 1 pt ring in `separator_strong`, flat, no drop.
     pub fn button_shadow(&self) -> Vec<BoxShadow> {
-        if self.dark {
-            vec![self.edge(white(0.06))]
-        } else {
-            vec![
-                self.edge(black(0.20)),
-                BoxShadow {
-                    color: black(0.08),
-                    offset: point(px(0.), px(1.)),
-                    blur_radius: px(1.5),
-                    spread_radius: px(0.),
-                    inset: false,
-                },
-            ]
-        }
+        vec![self.ring(self.separator_strong)]
     }
 
     /// Menus and dialogs: `0 0 0 .5px black 14%` + a soft drop (dark: white 12% edge, black 60%
@@ -284,6 +283,17 @@ impl Theme {
         black(if self.dark { 0.45 } else { 0.25 })
     }
 
+    /// A 1 pt ring with no blur (a 2 pt line at 1x would be too heavy, so it stays 1 pt).
+    pub fn ring(&self, color: Hsla) -> BoxShadow {
+        BoxShadow {
+            color,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(1.),
+            inset: false,
+        }
+    }
+
     /// A 0.5 pt ring with no blur, the mockup's `0 0 0 .5px` hairline. At 2x it is one device
     /// pixel. At 1x gpui draws a 0.5 px spread as a whole pixel at full strength, about twice
     /// as dark as the browser's half-covered pixel, so there it is one pixel at half alpha.
@@ -309,6 +319,12 @@ pub mod metrics {
 
     pub const TOOLBAR_H: f32 = 52.;
     pub const SUMMARY_H: f32 = 64.;
+    /// The line under the Figure on Cleanup.
+    pub const SUMMARY_LINE_H: f32 = 28.;
+    /// The Cleanup header row: the Figure at the left, the Clean button at the right.
+    pub const HERO_H: f32 = 84.;
+    /// The Figure's size on Cleanup, in points.
+    pub const FIGURE_PT: f32 = 56.;
     pub const STATUS_H: f32 = 30.;
     pub const LIST_INSET: f32 = 8.;
     /// Cleanup group headers and item rows share one height, because `uniform_list` needs a
@@ -317,7 +333,7 @@ pub mod metrics {
     pub const LARGE_ROW_H: f32 = 52.;
     pub const BREADCRUMB_H: f32 = 28.;
     pub const SIDEBAR_W: f32 = 200.;
-    pub const SIDEBAR_ROW_H: f32 = 28.;
+    pub const SIDEBAR_ROW_H: f32 = 34.;
     pub const ACTION: f32 = 26.;
     /// The trailing area of a row that holds the hover actions.
     pub const TRAIL_W: f32 = 60.;
@@ -329,6 +345,8 @@ pub mod metrics {
     pub const MAIN_MIN_W: f32 = 760.;
     pub const MAIN_MIN_H: f32 = 480.;
     pub const DIALOG_W: f32 = 420.;
+    /// The Move to Trash receipt.
+    pub const RECEIPT_W: f32 = 460.;
     pub const HISTORY_W: f32 = 560.;
     pub const HISTORY_H: f32 = 480.;
 
@@ -337,7 +355,8 @@ pub mod metrics {
     }
 }
 
-/// The Figure type role: 22 / 28, weight 600, tabular, `text`. The summary number.
+/// The Figure type role: 22 / 28, Avenir Next 800, tabular, `text`. The summary number of the
+/// screens other than Cleanup, whose own Figure is [`metrics::FIGURE_PT`].
 pub mod figure {
     pub const SIZE: f32 = 22.;
     pub const LINE: f32 = 28.;
@@ -423,6 +442,19 @@ fn apply_component_tokens(t: Theme, cx: &mut App) {
     });
 }
 
+/// The display face (Preflight): the big figure at 800, headings, sizes and buttons at 700, the
+/// sidebar at 600. Body text stays in the system font. Avenir Next ships with macOS.
+pub const DISPLAY_FONT: &str = "Avenir Next";
+
+/// `.display(weight)` sets the display face and a weight on any styled element.
+pub trait DisplayType: gpui_kit::Styled + Sized {
+    fn display(self, weight: gpui_kit::FontWeight) -> Self {
+        self.font_family(DISPLAY_FONT).font_weight(weight)
+    }
+}
+
+impl<T: gpui_kit::Styled> DisplayType for T {}
+
 /// Monospaced family for paths: the system monospaced font (SF Mono). CoreText resolves this
 /// family name by collection on every Mac; if a system ever lacked it, gpui falls back to its
 /// default font stack.
@@ -448,27 +480,38 @@ mod tests {
         assert_ne!(l.text, d.text);
         assert_ne!(l.accent, d.accent);
         assert_ne!(l.sidebar_bg, d.sidebar_bg);
-        assert!((l.separator.a - 0.08).abs() < 1e-6);
-        assert!((d.track.a - 0.12).abs() < 1e-6);
-        assert!((l.accent_ring.a - 0.32).abs() < 1e-6);
-        assert!((d.accent_ring.a - 0.42).abs() < 1e-6);
+        assert!((l.accent_ring.a - 0.35).abs() < 1e-6);
+        assert!((d.accent_ring.a - 0.45).abs() < 1e-6);
     }
 
     #[test]
-    fn new_tokens_follow_the_spec() {
+    fn preflight_tokens_match_the_approved_direction() {
         let (l, d) = (Theme::light(), Theme::dark());
-        assert_eq!(l.sidebar_bg, hex(0xf4f4f6));
-        assert_eq!(d.sidebar_bg, hex(0x232326));
-        assert!((l.sidebar_selected.a - 0.07).abs() < 1e-6 && l.sidebar_selected.l == 0.);
-        assert!((d.sidebar_selected.a - 0.09).abs() < 1e-6 && d.sidebar_selected.l == 1.);
-        assert_eq!(l.tag_border, l.separator_strong);
-        assert_eq!(d.tag_border, d.separator_strong);
-        assert_eq!(l.danger_button, l.error_badge);
-        assert_eq!(d.danger_button, d.error_badge);
-        assert!((l.checkbox_border.a - 0.28).abs() < 1e-6 && l.checkbox_border.l == 0.);
-        assert!((d.checkbox_border.a - 0.30).abs() < 1e-6 && d.checkbox_border.l == 1.);
-        assert!((l.card_bg().a - 1.).abs() < 1e-4 && (d.card_hover().a - 1.).abs() < 1e-4);
-        assert_ne!(l.card_bg(), l.card_hover());
+        assert_eq!(l.window_bg, hex(0xfafaf8));
+        assert_eq!(l.sidebar_bg, hex(0xf0f0ec));
+        assert_eq!(l.text, hex(0x0d0e0c));
+        assert_eq!(l.text_2, hex(0x555852));
+        assert_eq!(l.separator, hex(0xdadad4));
+        assert_eq!(l.success, hex(0x0b7550));
+        assert_eq!(l.warning, hex(0xa64b00));
+        assert_eq!(l.fill, hex(0xefefeb));
+        assert_eq!(l.dot, hex(0xcfcfc8));
+        assert_eq!(d.window_bg, hex(0x0b0c0b));
+        assert_eq!(d.sidebar_bg, hex(0x131412));
+        assert_eq!(d.text, hex(0xf4f4f0));
+        assert_eq!(d.text_2, hex(0xa2a49e));
+        assert_eq!(d.separator, hex(0x2a2c28));
+        assert_eq!(d.success, hex(0x46d39a));
+        assert_eq!(d.warning, hex(0xf2a03d));
+        assert_eq!(d.fill, hex(0x1a1b19));
+        assert_eq!(d.dot, hex(0x3a3c37));
+        // Ink buttons and an ink-filled selected row, in both sets.
+        for t in [l, d] {
+            assert_eq!(t.accent, t.text);
+            assert_eq!(t.sidebar_selected, t.text);
+            assert_eq!(t.tag_border, t.separator_strong);
+            assert_eq!(t.card_bg(), t.fill);
+        }
     }
 
     #[test]
@@ -484,7 +527,7 @@ mod tests {
     #[test]
     fn shadows_follow_the_spec() {
         let (l, d) = (Theme::light(), Theme::dark());
-        assert_eq!(l.button_shadow().len(), 2);
+        assert_eq!(l.button_shadow().len(), 1);
         assert_eq!(d.button_shadow().len(), 1);
         assert_eq!(l.pop_shadow().len(), 2);
         assert!(l.pop_shadow().iter().all(|s| !s.inset));
@@ -495,16 +538,12 @@ mod tests {
     fn hairlines_are_half_strength_at_1x() {
         let l2 = Theme::light();
         assert_eq!(l2.scale, 2.);
-        let e2 = &l2.button_shadow()[0];
+        let e2 = l2.edge(black(0.20));
         assert_eq!(e2.spread_radius, px(0.5));
         assert!((e2.color.a - 0.20).abs() < 1e-6);
-        let l1 = Theme::light().at_scale(1.);
-        let e1 = &l1.button_shadow()[0];
+        let e1 = Theme::light().at_scale(1.).edge(black(0.20));
         assert_eq!(e1.spread_radius, px(1.));
         assert!((e1.color.a - 0.10).abs() < 1e-6);
-        assert_eq!(l1.button_shadow()[1], l2.button_shadow()[1]);
-        let d1 = Theme::dark().at_scale(1.).button_shadow();
-        assert!((d1[0].color.a - 0.03).abs() < 1e-6);
     }
 
     #[test]
@@ -513,8 +552,112 @@ mod tests {
         let fill = d.button_fill();
         assert!((fill.a - 1.).abs() < 1e-4);
         let rgb = fill.to_rgb();
-        assert!((rgb.r * 255. - 59.).abs() < 1.5, "{rgb:?}");
+        assert!((rgb.r * 255. - 26.).abs() < 1.5, "{rgb:?}");
         assert_eq!(Theme::light().button_fill(), Theme::light().button_bg);
+    }
+
+    /// WCAG relative luminance of an opaque color.
+    fn luminance(c: Hsla) -> f32 {
+        let rgb = c.to_rgb();
+        let lin = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b)
+    }
+
+    /// The WCAG contrast ratio of `fg` over `bg`; a translucent `fg` is flattened on `bg`.
+    fn ratio(fg: Hsla, bg: Hsla) -> f32 {
+        let (a, b) = (luminance(bg.blend(fg)), luminance(bg));
+        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// (name, foreground, background, minimum ratio). 4.5 for text, 3 for large display text and
+    /// for the outlines and marks that identify a control.
+    fn documented_pairs(t: &Theme) -> Vec<(&'static str, Hsla, Hsla, f32)> {
+        let band = |c: Hsla| t.window_bg.blend(c);
+        let white = Hsla {
+            h: 0.,
+            s: 0.,
+            l: 1.,
+            a: 1.,
+        };
+        vec![
+            ("text on window", t.text, t.window_bg, 4.5),
+            ("text on sidebar", t.text, t.sidebar_bg, 4.5),
+            ("text on band (fill)", t.text, t.fill, 4.5),
+            ("text on dialog", t.text, t.pop_bg, 4.5),
+            ("text on status bar", t.text, t.bar_bg, 4.5),
+            ("text_2 on window", t.text_2, t.window_bg, 4.5),
+            ("text_2 on sidebar", t.text_2, t.sidebar_bg, 4.5),
+            ("text_2 on band (fill)", t.text_2, t.fill, 4.5),
+            ("text_2 on dialog", t.text_2, t.pop_bg, 4.5),
+            ("text_2 on status bar", t.text_2, t.bar_bg, 4.5),
+            ("text_2 on hovered row", t.text_2, band(t.row_hover), 4.5),
+            ("text_3 on window", t.text_3, t.window_bg, 4.5),
+            ("text_3 on band (fill)", t.text_3, t.fill, 4.5),
+            ("ok on window", t.success, t.window_bg, 4.5),
+            ("ok on band (fill)", t.success, t.fill, 4.5),
+            ("ok on sidebar", t.success, t.sidebar_bg, 4.5),
+            ("ok on status bar", t.success, t.bar_bg, 4.5),
+            ("amber on window", t.warning, t.window_bg, 4.5),
+            ("amber on band (fill)", t.warning, t.fill, 4.5),
+            ("amber on sidebar", t.warning, t.sidebar_bg, 4.5),
+            ("amber on amber tint", t.warning, band(t.warning_bg), 4.5),
+            ("error on window", t.error, t.window_bg, 4.5),
+            ("error on band (fill)", t.error, t.fill, 4.5),
+            ("error on error tint", t.error, band(t.error_bg), 4.5),
+            ("on_accent on ink button", t.on_accent, t.accent, 4.5),
+            (
+                "on_accent on selected row",
+                t.on_accent,
+                t.sidebar_selected,
+                4.5,
+            ),
+            ("white on danger button", white, t.danger_button, 4.5),
+            ("figure (text) on window, large", t.text, t.window_bg, 3.0),
+            (
+                "checkbox outline on window",
+                t.checkbox_border,
+                t.window_bg,
+                3.0,
+            ),
+            ("tag outline on window", t.tag_border, t.window_bg, 3.0),
+            (
+                "failed dot outline (text_2) on window",
+                t.text_2,
+                t.window_bg,
+                3.0,
+            ),
+            ("ok dot on window", t.success, t.window_bg, 3.0),
+        ]
+    }
+
+    #[test]
+    fn documented_contrast_ratios_hold() {
+        for t in [Theme::light(), Theme::dark()] {
+            let mode = if t.dark { "dark" } else { "light" };
+            for (name, fg, bg, min) in documented_pairs(&t) {
+                let r = ratio(fg, bg);
+                println!("CONTRAST {mode} | {name}: {r:.2} (min {min})");
+                assert!(r >= min, "{mode}: {name} is {r:.2}, needs {min}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_quiet_dot_is_not_a_text_color() {
+        // The all-passed state draws dots in `dot` and the count in `text_2`: the count, which
+        // carries the meaning, is readable; the dots are decoration and sit near the ground.
+        for t in [Theme::light(), Theme::dark()] {
+            assert!(ratio(t.text_2, t.window_bg) >= 4.5);
+            assert!(ratio(t.dot, t.window_bg) < 3.0);
+            assert!(ratio(t.dot, t.window_bg) > 1.2);
+        }
     }
 
     #[test]

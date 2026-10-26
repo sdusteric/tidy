@@ -1,28 +1,15 @@
 //! The sidebar (design section 11): 200 pt wide, the five screens (Check up, Cleanup, Large
 //! files, Memory, Security), and the free-space figure at the bottom.
 
-use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::app::{Screen, TidyModel};
 use crate::format;
-use crate::theme::{Theme, metrics, tnum};
+use crate::theme::{DisplayType, Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::plain_button;
 use crate::views::trust::SYSDATA_LINK;
-
-/// The sidebar row for a screen: its icon.
-pub fn icon_for(screen: Screen) -> IconName {
-    match screen {
-        Screen::Checkup => IconName::Stethoscope,
-        Screen::Cleanup => IconName::BrushCleaning,
-        Screen::Large => IconName::HardDrive,
-        Screen::Memory => IconName::MemoryStick,
-        Screen::Security => IconName::ShieldCheck,
-    }
-}
 
 /// The selector name of a screen's sidebar row (for tests).
 pub fn selector_for(screen: Screen) -> &'static str {
@@ -85,9 +72,9 @@ impl TidyView {
                 .id(("sidebar-row", screen as usize))
                 .debug_selector(move || selector_for(screen).to_string())
                 .h(px(metrics::SIDEBAR_ROW_H))
-                .px(px(8.))
+                .px(px(12.))
                 .gap(px(8.))
-                .rounded(px(6.))
+                .rounded(px(8.))
                 .flex()
                 .items_center()
                 .cursor_pointer()
@@ -97,16 +84,12 @@ impl TidyView {
                     model.update(cx, |m, cx| m.select_screen(screen, cx));
                 })
                 .child(
-                    Icon::new(icon_for(screen))
-                        .size(px(16.))
-                        .text_color(if selected { t.accent } else { t.text_2 }),
-                )
-                .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.))
-                        .text_color(t.text)
+                        .text_size(px(14.))
+                        .display(FontWeight::SEMIBOLD)
+                        .text_color(if selected { t.on_accent } else { t.text_2 })
                         .whitespace_nowrap()
                         .child(screen.title()),
                 )
@@ -116,8 +99,9 @@ impl TidyView {
                             .debug_selector(move || figure_selector_for(screen).to_string())
                             .flex_none()
                             .text_size(px(12.))
+                            .display(FontWeight::SEMIBOLD)
                             .font_features(tnum())
-                            .text_color(t.text_2)
+                            .text_color(if selected { t.on_accent } else { t.text_2 })
                             .child(figure),
                     )
                 })
@@ -153,8 +137,8 @@ impl TidyView {
                         .gap(px(6.))
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(14.))
+                                .display(FontWeight::BOLD)
                                 .text_color(t.text)
                                 .whitespace_nowrap()
                                 .child(disk.name.clone()),

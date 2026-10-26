@@ -26,7 +26,7 @@ use tidy_core::model::{AppMemory, MemoryKind, MemorySnapshot, Pressure};
 
 use crate::app::{Notice, QUIT_WAIT, Screen, TidyModel, send, terminator};
 use crate::format;
-use crate::theme::{Theme, figure, metrics, tnum};
+use crate::theme::{DisplayType, Theme, figure, metrics, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{glyph_tile, icon_button, scroll_edge, text_button};
@@ -882,7 +882,7 @@ fn verdict_strip(t: &Theme, s: &MemorySnapshot) -> Div {
                 .debug_selector(|| "memory-verdict-first".to_string())
                 .text_size(px(figure::SIZE))
                 .line_height(px(figure::LINE))
-                .font_weight(FontWeight::SEMIBOLD)
+                .display(FontWeight::BOLD)
                 // In `text`, as on the other screens: the Pressure figure and the graph carry
                 // the color.
                 .text_color(t.text)
@@ -962,7 +962,7 @@ fn figure_card(
             div()
                 .text_size(px(12.))
                 .line_height(px(16.))
-                .font_weight(FontWeight::MEDIUM)
+                .display(FontWeight::SEMIBOLD)
                 .text_color(t.text_2)
                 .whitespace_nowrap()
                 .child(label),
@@ -972,7 +972,7 @@ fn figure_card(
                 .debug_selector(move || format!("{selector}-value"))
                 .text_size(px(figure::SIZE))
                 .line_height(px(figure::LINE))
-                .font_weight(FontWeight::SEMIBOLD)
+                .display(FontWeight::BOLD)
                 .font_features(tnum())
                 .text_color(color)
                 .whitespace_nowrap()
@@ -1010,7 +1010,7 @@ fn graph(t: &Theme, history: &[Pressure]) -> Div {
                 .text_size(px(12.))
                 .line_height(px(16.))
                 .text_color(t.text_2)
-                .child(div().font_weight(FontWeight::MEDIUM).child(caption))
+                .child(div().display(FontWeight::SEMIBOLD).child(caption))
                 .child(div().font_features(tnum()).child(span)),
         )
         .child(
@@ -1062,7 +1062,7 @@ fn help(t: &Theme, line: String) -> Div {
         .child(
             div()
                 .flex_none()
-                .font_weight(FontWeight::MEDIUM)
+                .display(FontWeight::SEMIBOLD)
                 .text_color(t.text)
                 .whitespace_nowrap()
                 .child("What would help"),
@@ -1094,7 +1094,7 @@ fn list_header(t: &Theme) -> Div {
         .child(
             div()
                 .text_size(px(13.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .display(FontWeight::BOLD)
                 .text_color(t.text)
                 .child("Top apps by memory"),
         )
@@ -1200,7 +1200,7 @@ fn render_row(
                     div()
                         .text_size(px(13.))
                         .line_height(px(17.))
-                        .font_weight(FontWeight::MEDIUM)
+                        .display(FontWeight::SEMIBOLD)
                         .text_color(t.text)
                         .whitespace_nowrap()
                         .overflow_hidden()
@@ -1241,7 +1241,7 @@ fn render_row(
                 .w(px(76.))
                 .text_right()
                 .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
+                .display(FontWeight::SEMIBOLD)
                 .font_features(tnum())
                 .text_color(t.text)
                 .whitespace_nowrap()

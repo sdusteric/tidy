@@ -129,7 +129,7 @@ Tidy updates itself with Sparkle 2.10.0, following the shared contract in `../ap
 | `TIDY_NO_UPDATES=1` | Sparkle does not start: no update checks in this run. |
 | `SPARKLE_FRAMEWORK=<path>` | The Sparkle.framework that the build links and `scripts/bundle.sh` embeds (default `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`). |
 | `APP_UPDATES_PUBLISH=<path>` | The publish.sh that `scripts/release.sh` calls (default `../app-updates/tools/publish.sh`). |
-| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `memory-relaunch`, `memory-critical`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`. No core, no lock, no disk access. |
+| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `memory-relaunch`, `memory-critical`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`, `cleanup-confirm`. No core, no lock, no disk access. |
 | `TIDY_DEMO_SHOT=<file.png>` | With the `shot-export` feature, renders the first frame offscreen at 2x and writes the PNG. |
 | `TIDY_DEMO_EXIT_SECS` | Demo self-quit, default 30. |
 | `TIDY_APPEARANCE=<light or dark>` | Forces the appearance. |

@@ -10,7 +10,7 @@ use tidy_core::model::{Action, HistoryEntry, HistoryItem, ItemResult};
 use crate::app::{OpenKind, open_path};
 use crate::format;
 use crate::theme::motion as m;
-use crate::theme::{MONO_FONT, Theme, metrics, tnum};
+use crate::theme::{DisplayType, MONO_FONT, Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::{hairline, icon_button};
@@ -132,7 +132,7 @@ impl TidyView {
                                         div()
                                             .text_size(px(13.))
                                             .line_height(px(17.))
-                                            .font_weight(FontWeight::MEDIUM)
+                                            .display(FontWeight::SEMIBOLD)
                                             .text_color(t.text)
                                             .whitespace_nowrap()
                                             .child(format::date_time(e.at)),
@@ -214,8 +214,8 @@ impl TidyView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(17.))
+                            .display(FontWeight::BOLD)
                             .text_color(t.text)
                             .child("History"),
                     )

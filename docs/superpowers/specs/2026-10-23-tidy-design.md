@@ -460,6 +460,16 @@ Cards and groups (Check up cards, the reminder row, Memory figures and graph) sh
 
 **Copy rules**: sentence case for text and labels, title case for buttons and menu items ("Open Network Settings", "Check Now", "Scan Home Folder"), plain words, sizes with one decimal above 1 GB ("6.3 GB", "640 MB"), dates as relative phrases ("8 months ago"), no exclamation marks. A button or menu item that opens a confirm ends in an ellipsis character ("Empty Trash…", "Move to Trash…", "Force Quit…"), and middle-truncated paths use it too (`~/Movies/2025/…/trip.mov`).
 
+### 11.x Preflight look (2026-10-25)
+
+The look replaces Haul v2's grays and blue accent. Tokens (light / dark): ground `#FAFAF8` / `#0B0C0B`, sidebar and status bar `#F0F0EC` / `#131412`, ink `#0D0E0C` / `#F4F4F0`, `text_2` `#555852` / `#A2A49E`, line `#DADAD4` / `#2A2C28`, band fill `#EFEFEB` / `#1A1B19`, ok `#0B7550` / `#46D39A`, amber `#A64B00` / `#F2A03D`, quiet dot `#CFCFC8` / `#3A3C37`. `accent` is the ink, so primary buttons, checked boxes, the segmented selection and the selected sidebar row are ink fills with `on_accent` text. Display type is Avenir Next (800 for the Cleanup Figure, 700 for headings, sizes and buttons, 600 for the sidebar and row names); body text stays in the system font. The sidebar shows labels only.
+
+Cleanup shows the Figure at 56 pt in the header with the Clean button at its right, group headers as gray bands, and a row of check dots before each size. Each dot is one guard from `tidy_core::explain` for that row's rule (`Explanation::guards`), so N differs by rule (5 for a plain cache, more for build output) and is never fixed. A guard fails from real state: a running owner fails "Skipped while ... is running" (`Item::blocked`), a skipped move fails "Checked again right before the move". Report only rows have no guards and no dots. When every guard passes, all dots are the quiet gray and "N of N" is `text_2`; a row with a failed guard draws passed dots green, failed dots as rings, and "k of N" in amber. The count is always text, and the details popover repeats it as "k of N checks passed" next to the guard list (check marks, amber crosses for failures), then If removed, Rule and Path.
+
+The Move to Trash confirmations (Cleanup with a Review item ticked, Large files) are receipts: a line per category (per item on Large files) with a dot leader, a double rule, the total at 34 pt, and "Nothing is deleted. Every item goes to the Trash and Tidy writes it in History, so you can put it back." The zigzag bottom edge of the mockup is left out because gpui has no clean way to clip a div to a path.
+
+Contrast: every text and background pair is at least 4.5:1 and display text at least 3:1 in both sets; `theme::tests::documented_contrast_ratios_hold` computes them and fails below the bar. gpui exposes no accessibility label for a div, so the row's meaning is carried by the "k of N" text, never by the dots. Controls are drawn as clickable divs and are not keyboard focusable today, so there is no focus ring to restyle.
+
 ## 12. Packaging
 
 Copy Haul's scripts and rename:

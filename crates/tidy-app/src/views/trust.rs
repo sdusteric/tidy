@@ -12,13 +12,13 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use tidy_core::api::Command;
-use tidy_core::explain::explain;
-use tidy_core::model::Item;
+use tidy_core::explain::{Guard, GuardState, explain_with};
+use tidy_core::model::{Class, Item};
 use tidy_core::sysdata::{self, CopyCommand, SysKind, SystemDataReport};
 
 use crate::app::{TidyModel, now_unix, send};
 use crate::format;
-use crate::theme::{MONO_FONT, Theme, figure, motion as m, tnum};
+use crate::theme::{DisplayType, MONO_FONT, Theme, figure, motion as m, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::{glyph_tile, hairline, icon_button, tag, text_button};
@@ -29,6 +29,12 @@ use crate::views::{glyph_tile, hairline, icon_button, tag, text_button};
 pub const DETAILS_W: f32 = 420.;
 /// The label column of the popover's field list.
 const DETAILS_LABEL_W: f32 = 80.;
+/// "3 of 4 checks passed": the words that go with the dots of a Cleanup row and with the marks of
+/// the details popover, so a check never reads by color or shape alone.
+pub fn guard_count(passed: usize, total: usize) -> String {
+    format!("{passed} of {total} checks passed")
+}
+
 /// The longest path the popover shows before it truncates the middle.
 const DETAILS_PATH_MAX: usize = 60;
 
@@ -55,14 +61,18 @@ pub struct DetailView {
     pub tag: Option<&'static str>,
     pub size: String,
     pub verdict: String,
+    pub class: Class,
+    /// The checks that guard the move, each with whether it passes now. Empty for a Report
+    /// only item.
+    pub guards: Vec<Guard>,
     pub fields: Vec<DetailField>,
     /// The command a Report only row suggests, with a Copy button.
     pub command: Option<String>,
 }
 
 /// The popover's content for `item`, with paths shown under `root` as `~`.
-pub fn detail_view(item: &Item, root: &Path) -> DetailView {
-    let e = explain(item);
+pub fn detail_view(item: &Item, root: &Path, state: GuardState) -> DetailView {
+    let e = explain_with(item, state);
     let mut fields = Vec::new();
     if !e.rebuild.is_empty() {
         fields.push(DetailField {
@@ -76,6 +86,7 @@ pub fn detail_view(item: &Item, root: &Path) -> DetailView {
         lines: e.checks.clone(),
         mono: false,
     });
+    let guards = e.guards.clone();
     let mut rule = vec![e.rule_id.clone()];
     rule.extend(e.patterns.iter().cloned());
     fields.push(DetailField {
@@ -96,6 +107,8 @@ pub fn detail_view(item: &Item, root: &Path) -> DetailView {
         tag: item.class.tag(),
         size: format::size(item.bytes_alloc),
         verdict: e.verdict,
+        class: item.class,
+        guards,
         fields,
         command: e.command,
     }
@@ -330,9 +343,10 @@ impl TidyView {
     ) -> AnyElement {
         let detail = {
             let c = &self.model.read(cx).cleanup;
-            c.plan
-                .as_ref()
-                .and_then(|p| p.item(&at.id).map(|item| detail_view(item, &p.root)))
+            c.plan.as_ref().and_then(|p| {
+                p.item(&at.id)
+                    .map(|item| detail_view(item, &p.root, c.guard_state(&item.id)))
+            })
         };
         let Some(d) = detail else {
             return div().into_any_element();
@@ -353,9 +367,9 @@ impl TidyView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(15.))
+                    .line_height(px(20.))
+                    .display(FontWeight::BOLD)
                     .text_color(t.text)
                     .child(d.name.clone()),
             )
@@ -364,13 +378,17 @@ impl TidyView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(13.))
+                    .text_size(px(15.))
+                    .display(FontWeight::BOLD)
                     .font_features(tnum())
-                    .text_color(t.text_2)
+                    .text_color(t.text)
                     .whitespace_nowrap()
                     .child(d.size.clone()),
             );
 
+        let guards = d.guards.clone();
+        let passed = guards.iter().filter(|g| g.passed).count();
+        let total = guards.len();
         let fields = d.fields.iter().map(|f| {
             div()
                 .flex()
@@ -380,10 +398,22 @@ impl TidyView {
                     div()
                         .flex_none()
                         .w(px(DETAILS_LABEL_W))
+                        .flex()
+                        .flex_col()
                         .text_size(px(12.))
                         .line_height(px(17.))
                         .text_color(t.text_2)
-                        .child(f.label),
+                        .child(f.label)
+                        .when(f.label == "Checks" && !guards.is_empty(), |d| {
+                            // The count in words, so the marks never carry it alone.
+                            d.child(
+                                div()
+                                    .debug_selector(|| "details-checks-count".to_string())
+                                    .text_color(if passed == total { t.text_2 } else { t.warning })
+                                    .font_features(tnum())
+                                    .child(guard_count(passed, total)),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -398,19 +428,30 @@ impl TidyView {
                                 .line_height(px(17.))
                                 .child(line.clone());
                             if f.label == "Checks" {
-                                // Each guard on its own line behind a quiet check mark.
+                                // Each guard on its own line behind a mark: a check when it
+                                // passes, a cross in amber when it does not. The count under
+                                // "Checks" says it in words, so a mark never carries it alone.
+                                let ok = guards.get(i).is_none_or(|g| g.passed);
                                 return div()
                                     .flex()
                                     .items_start()
                                     .gap(px(6.))
                                     .child(
                                         div().flex_none().pt(px(3.)).child(
-                                            Icon::new(IconName::Check)
-                                                .size(px(11.))
-                                                .text_color(t.text_3),
+                                            Icon::new(if ok {
+                                                IconName::Check
+                                            } else {
+                                                IconName::X
+                                            })
+                                            .size(px(11.))
+                                            .text_color(if ok { t.success } else { t.warning }),
                                         ),
                                     )
-                                    .child(el.flex_1().min_w_0().text_color(t.text));
+                                    .child(el.flex_1().min_w_0().text_color(if ok {
+                                        t.text
+                                    } else {
+                                        t.warning
+                                    }));
                             }
                             if f.mono {
                                 // The rule id in `text`, its patterns and the path in `text_2`.
@@ -460,11 +501,34 @@ impl TidyView {
             .child(head)
             .child(
                 div()
-                    .debug_selector(|| "details-verdict".to_string())
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .text_color(t.text)
-                    .child(d.verdict.clone()),
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        div().flex_none().pt(px(1.)).child(
+                            Icon::new(match d.class {
+                                Class::Safe => IconName::CircleCheck,
+                                Class::Review => IconName::Info,
+                                Class::ReportOnly => IconName::Lock,
+                            })
+                            .size(px(16.))
+                            .text_color(match d.class {
+                                Class::Safe => t.success,
+                                _ => t.text_2,
+                            }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "details-verdict".to_string())
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .display(FontWeight::BOLD)
+                            .text_color(t.text)
+                            .child(d.verdict.clone()),
+                    ),
             )
             .child(hairline(t))
             .child(div().flex().flex_col().gap(px(8.)).children(fields))
@@ -535,7 +599,7 @@ impl TidyView {
                         div()
                             .text_size(px(figure::SIZE))
                             .line_height(px(figure::LINE))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .display(FontWeight::BOLD)
                             .font_features(tnum())
                             .text_color(t.text)
                             .whitespace_nowrap()
@@ -575,7 +639,9 @@ impl TidyView {
             let size = size.children((!row.size.is_empty()).then(|| {
                 let el = div().text_right().whitespace_nowrap().text_color(t.text_2);
                 if row.measured {
-                    el.text_size(px(13.))
+                    el.text_size(px(14.))
+                        .display(FontWeight::BOLD)
+                        .text_color(t.text)
                         .font_features(tnum())
                         .child(row.size.clone())
                 } else {
@@ -646,7 +712,7 @@ impl TidyView {
                                     div()
                                         .text_size(px(13.))
                                         .line_height(px(18.))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .display(FontWeight::SEMIBOLD)
                                         .text_color(t.text)
                                         .whitespace_nowrap()
                                         .child(row.title.clone()),
@@ -791,8 +857,8 @@ impl TidyView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(17.))
+                            .display(FontWeight::BOLD)
                             .text_color(t.text)
                             .child(SYSDATA_TITLE),
                     )
@@ -862,7 +928,7 @@ impl TidyView {
                         div()
                             .text_size(px(13.))
                             .line_height(px(17.))
-                            .font_weight(FontWeight::MEDIUM)
+                            .display(FontWeight::SEMIBOLD)
                             .text_color(t.text)
                             .child(SYSDATA_ROW_TITLE),
                     )
@@ -906,7 +972,7 @@ impl TidyView {
                             div()
                                 .text_size(px(13.))
                                 .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .display(FontWeight::SEMIBOLD)
                                 .text_color(t.text)
                                 .child(title.to_string()),
                         )
@@ -938,7 +1004,7 @@ impl TidyView {
                 div()
                     .text_size(px(13.))
                     .line_height(px(17.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .display(FontWeight::BOLD)
                     .text_color(t.text)
                     .child(NEVER_TITLE),
             )
@@ -989,6 +1055,7 @@ mod tests {
                 "Cache, rebuilt by the app",
             ),
             Path::new("/Users/demo"),
+            GuardState::default(),
         );
         assert_eq!(d.name, "Spotify");
         assert_eq!(d.tag, None);
@@ -1016,6 +1083,7 @@ mod tests {
                 "Reclaim unused packages with: pnpm store prune",
             ),
             Path::new("/Users/demo"),
+            GuardState::default(),
         );
         assert_eq!(d.tag, Some("Report only"));
         assert!(d.verdict.starts_with("Tidy won't remove this."));
@@ -1033,6 +1101,7 @@ mod tests {
                 "Build output",
             ),
             Path::new("/Users/demo"),
+            GuardState::default(),
         );
         let path = &d.fields.last().unwrap().lines[0];
         assert!(path.chars().count() <= DETAILS_PATH_MAX, "{path}");

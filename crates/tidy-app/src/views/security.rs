@@ -22,7 +22,7 @@ use tidy_core::model::{
 
 use crate::app::{Notice, OpenKind, TidyModel, now_unix, open_path, open_settings, send};
 use crate::format;
-use crate::theme::{MONO_FONT, Theme, figure, metrics, tnum};
+use crate::theme::{DisplayType, MONO_FONT, Theme, figure, metrics, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{glyph_tile, hairline, icon_button, text_button};
@@ -435,7 +435,7 @@ fn mark_badge(mark: Mark, t: &Theme) -> Div {
         .items_center()
         .text_size(px(11.))
         .line_height(px(12.))
-        .font_weight(FontWeight::SEMIBOLD)
+        .display(FontWeight::BOLD)
         .text_color(t.accent)
         .whitespace_nowrap()
         .child(mark.label())
@@ -518,7 +518,7 @@ fn check_row(
                             div()
                                 .text_size(px(13.))
                                 .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .display(FontWeight::SEMIBOLD)
                                 .text_color(t.text)
                                 .whitespace_nowrap()
                                 .child(check.title.clone()),
@@ -619,7 +619,7 @@ fn login_row_view(
                                 .min_w_0()
                                 .text_size(px(13.))
                                 .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .display(FontWeight::SEMIBOLD)
                                 .text_color(t.text)
                                 .whitespace_nowrap()
                                 .overflow_hidden()
@@ -714,7 +714,7 @@ fn extension_row_view(row: &ExtensionRow, ix: usize, t: &Theme) -> AnyElement {
                                 .min_w_0()
                                 .text_size(px(13.))
                                 .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .display(FontWeight::SEMIBOLD)
                                 .text_color(t.text)
                                 .whitespace_nowrap()
                                 .overflow_hidden()
@@ -910,7 +910,7 @@ fn summary_strip(t: &Theme, report: &SecurityReport, now: u64) -> Div {
                 .debug_selector(|| "figure".to_string())
                 .text_size(px(figure::SIZE))
                 .line_height(px(figure::LINE))
-                .font_weight(FontWeight::SEMIBOLD)
+                .display(FontWeight::BOLD)
                 .font_features(tnum())
                 .text_color(t.text)
                 .whitespace_nowrap()

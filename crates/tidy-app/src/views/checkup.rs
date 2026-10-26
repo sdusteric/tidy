@@ -20,7 +20,7 @@ use crate::app::Tri;
 use crate::app::{Notice, Screen, TidyModel, notifier, now_unix, open_settings, send};
 use crate::format;
 use crate::macos::Permission;
-use crate::theme::{Theme, figure, metrics, motion as m, tnum};
+use crate::theme::{DisplayType, Theme, figure, metrics, motion as m, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::{checkbox, large_button, text_button};
 
@@ -435,7 +435,7 @@ pub fn switch(
         .top(px(2.))
         .size(px(16.))
         .rounded_full()
-        .bg(gpui_kit::white())
+        .bg(t.on_accent)
         .shadow(t.knob_shadow());
     let (from, to) = if on { (OFF_X, ON_X) } else { (ON_X, OFF_X) };
     let knob = match slide {
@@ -513,7 +513,7 @@ impl TidyView {
                         div()
                             .flex_1()
                             .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .display(FontWeight::BOLD)
                             .text_color(t.text)
                             .child(title),
                     )
@@ -535,7 +535,7 @@ impl TidyView {
                             .debug_selector(move || format!("{key}-figure"))
                             .text_size(px(figure::SIZE))
                             .line_height(px(figure::LINE))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .display(FontWeight::BOLD)
                             .font_features(tnum())
                             .text_color(t.text)
                             .child(card.figure.clone()),
@@ -641,7 +641,7 @@ impl TidyView {
                     .debug_selector(|| "last-checkup".to_string())
                     .text_size(px(figure::SIZE))
                     .line_height(px(figure::LINE))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .display(FontWeight::BOLD)
                     .font_features(tnum())
                     .text_color(t.text)
                     .whitespace_nowrap()
@@ -836,7 +836,7 @@ impl TidyView {
                                 div()
                                     .text_size(px(13.))
                                     .line_height(px(17.))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .display(FontWeight::SEMIBOLD)
                                     .text_color(t.text)
                                     .child(REMINDER_TITLE),
                             )
@@ -950,7 +950,7 @@ impl TidyView {
                         div()
                             .text_size(px(13.))
                             .line_height(px(17.))
-                            .font_weight(FontWeight::MEDIUM)
+                            .display(FontWeight::SEMIBOLD)
                             .text_color(t.text)
                             .child(AUTO_UPDATE_TITLE),
                     )

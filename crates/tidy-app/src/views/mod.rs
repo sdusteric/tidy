@@ -18,7 +18,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::app::Tri;
-use crate::theme::{Theme, metrics, tnum};
+use crate::theme::{DisplayType, Theme, metrics, tnum};
 
 /// A 26 x 26 icon button (radius 6, 16 px icon). The icon takes its color from this element,
 /// so hover lifts it from `text_2` to `text`.
@@ -52,9 +52,9 @@ pub fn icon_button(
         })
 }
 
-/// A 24 px high text button (radius 6, 12 px weight 500). Primary uses the accent color;
-/// secondary uses `button_bg` with the edge shadow of the current appearance. A disabled button
-/// is dimmed and ignores clicks.
+/// A 26 px high text button (radius 7, 12 px, display 700). Primary is an ink button (`accent`
+/// fill, `on_accent` text); secondary uses `button_bg` with a 1 pt ring. A disabled button is
+/// dimmed and ignores clicks.
 pub fn text_button(
     id: impl Into<ElementId>,
     selector: String,
@@ -69,20 +69,20 @@ pub fn text_button(
         .id(id)
         .debug_selector(|| selector)
         .flex_none()
-        .h(px(24.))
-        .px(px(10.))
-        .rounded(px(6.))
+        .h(px(26.))
+        .px(px(11.))
+        .rounded(px(7.))
         .flex()
         .items_center()
         .justify_center()
         .text_size(px(12.))
-        .font_weight(FontWeight::MEDIUM)
+        .display(FontWeight::BOLD)
         .font_features(tnum())
         .whitespace_nowrap()
         .child(label.into())
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
     let base = if primary {
-        base.bg(t.accent).text_color(gpui_kit::white())
+        base.bg(t.accent).text_color(t.on_accent)
     } else {
         base.bg(t.button_fill())
             .text_color(t.text)
@@ -99,7 +99,7 @@ pub fn text_button(
 }
 
 /// The large primary button of a screen's one main action (Run Check up, the empty states'
-/// Scan): 28 px high, radius 7, 13 px weight 500, accent fill.
+/// Scan): 34 px high, radius 8, 14 px display 700, ink fill.
 pub fn large_button(
     id: impl Into<ElementId>,
     selector: String,
@@ -112,16 +112,16 @@ pub fn large_button(
         .id(id)
         .debug_selector(|| selector)
         .flex_none()
-        .h(px(28.))
-        .px(px(14.))
-        .rounded(px(7.))
+        .h(px(34.))
+        .px(px(16.))
+        .rounded(px(8.))
         .flex()
         .items_center()
         .justify_center()
         .bg(t.accent)
-        .text_color(gpui_kit::white())
-        .text_size(px(13.))
-        .font_weight(FontWeight::MEDIUM)
+        .text_color(t.on_accent)
+        .text_size(px(14.))
+        .display(FontWeight::BOLD)
         .whitespace_nowrap()
         .child(label.into())
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -168,8 +168,8 @@ pub fn plain_button(
     }
 }
 
-/// A 16 px checkbox with three states. Off is a `checkbox_border` outline, On and Mixed are
-/// filled with the accent color and a white check or dash. A disabled one is drawn at 40%
+/// A 16 px checkbox with three states. Off is a 1.5 pt `checkbox_border` (ink) outline, On and
+/// Mixed are filled with ink and an `on_accent` check or dash. A disabled one is drawn at 40%
 /// opacity, and a disabled Off box is filled with `fill` so it does not read as clickable.
 pub fn checkbox(
     id: impl Into<ElementId>,
@@ -192,21 +192,21 @@ pub fn checkbox(
     let base = match state {
         Tri::Off if enabled => base
             .bg(t.window_bg)
-            .border_1()
+            .border(px(1.5))
             .border_color(t.checkbox_border),
         Tri::Off => base
             .bg(t.window_bg.blend(t.fill))
-            .border_1()
+            .border(px(1.5))
             .border_color(t.separator_strong),
         Tri::On => base.bg(t.accent).child(
             Icon::new(IconName::Check)
                 .size(px(12.))
-                .text_color(gpui_kit::white()),
+                .text_color(t.on_accent),
         ),
         Tri::Mixed => base.bg(t.accent).child(
             Icon::new(IconName::Minus)
                 .size(px(12.))
-                .text_color(gpui_kit::white()),
+                .text_color(t.on_accent),
         ),
     };
     if enabled {
@@ -230,24 +230,16 @@ pub struct Segment {
     pub on_click: ClickFn,
 }
 
-/// A two-button group, 24 px high: the selected segment is a raised button, the others are
-/// plain text on a `fill` track. The raised button is flattened on the track, not on the
-/// window, so in dark mode it stands out from the track as much as a button does from the
-/// window.
+/// A two-button group, 26 px high: the selected segment is an ink pill, the others are plain
+/// text on a `fill` track.
 pub fn segmented(id: &'static str, segments: Vec<Segment>, t: &Theme) -> Div {
-    let on_track = t.on(t.window_bg.blend(t.fill));
-    let (selected_fill, shadow, text, text_2) = (
-        on_track.button_fill(),
-        on_track.button_shadow(),
-        t.text,
-        t.text_2,
-    );
+    let (selected_fill, selected_text, text_2) = (t.accent, t.on_accent, t.text_2);
     div()
         .flex_none()
-        .h(px(24.))
+        .h(px(26.))
         .p(px(2.))
         .gap(px(2.))
-        .rounded(px(7.))
+        .rounded(px(8.))
         .bg(t.fill)
         .flex()
         .items_center()
@@ -256,18 +248,18 @@ pub fn segmented(id: &'static str, segments: Vec<Segment>, t: &Theme) -> Div {
             div()
                 .id((id, i))
                 .debug_selector(|| seg.selector)
-                .h(px(20.))
-                .px(px(9.))
-                .rounded(px(5.))
+                .h(px(22.))
+                .px(px(10.))
+                .rounded(px(6.))
                 .flex()
                 .items_center()
                 .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
+                .display(FontWeight::BOLD)
                 .whitespace_nowrap()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .when(seg.selected, |d| {
-                    d.bg(selected_fill).text_color(text).shadow(shadow.clone())
+                    d.bg(selected_fill).text_color(selected_text)
                 })
                 .when(!seg.selected, |d| d.text_color(text_2))
                 .child(seg.label)
@@ -288,7 +280,7 @@ pub fn tag(label: impl Into<SharedString>, t: &Theme) -> Div {
         .items_center()
         .text_size(px(11.))
         .line_height(px(12.))
-        .font_weight(FontWeight::SEMIBOLD)
+        .display(FontWeight::BOLD)
         .text_color(t.text_2)
         .whitespace_nowrap()
         .child(label.into())
@@ -322,4 +314,86 @@ pub fn scroll_edge(t: &Theme, scrolled: bool) -> Div {
     } else {
         gpui_kit::transparent_black()
     })
+}
+
+/// How a row's check dots are colored. When every check passes the dots stay in the quiet `dot`
+/// gray and the count in `text_2`, so a page of safe rows is calm. Only a row with a failed
+/// check uses color: passed dots green, failed dots hollow, the count in amber. The count
+/// ("k of N") is always drawn, so the dots never carry the meaning alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DotTone {
+    Quiet,
+    Failed,
+}
+
+pub fn dot_tone(passed: usize, total: usize) -> DotTone {
+    if passed >= total {
+        DotTone::Quiet
+    } else {
+        DotTone::Failed
+    }
+}
+
+/// "5 of 5", "3 of 5": the text of the count beside the dots.
+pub fn dots_count(passed: usize, total: usize) -> String {
+    format!("{passed} of {total}")
+}
+
+/// The width of the dots and their count, wide enough for the row with the most checks.
+pub const DOTS_W: f32 = 140.;
+
+/// `total` dots for the guards of a row, then "k of N". Passed dots come first.
+pub fn check_dots(passed: usize, total: usize, selector: String, t: &Theme) -> Div {
+    let tone = dot_tone(passed, total);
+    let dots = (0..total).map(move |i| {
+        let pass = i < passed;
+        let d = div().flex_none().size(px(9.)).rounded_full();
+        match (tone, pass) {
+            (DotTone::Quiet, _) => d.bg(t.dot),
+            (DotTone::Failed, true) => d.bg(t.success),
+            // A failed check is a ring, a different shape from a passed one.
+            (DotTone::Failed, false) => d.border(px(1.5)).border_color(t.text_2),
+        }
+    });
+    div()
+        .debug_selector(|| selector)
+        .flex_none()
+        .w(px(DOTS_W))
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(10.))
+        .child(div().flex().items_center().gap(px(5.)).children(dots))
+        .child(
+            div()
+                .flex_none()
+                .w(px(42.))
+                .text_size(px(13.))
+                .font_features(tnum())
+                .text_color(match tone {
+                    DotTone::Quiet => t.text_2,
+                    DotTone::Failed => t.warning,
+                })
+                .whitespace_nowrap()
+                .child(dots_count(passed, total)),
+        )
+}
+
+#[cfg(test)]
+mod dot_tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn all_passed_is_quiet_and_a_failure_uses_color() {
+        assert_eq!(dot_tone(5, 5), DotTone::Quiet);
+        assert_eq!(dot_tone(3, 3), DotTone::Quiet);
+        assert_eq!(dot_tone(4, 5), DotTone::Failed);
+    }
+
+    #[test]
+    fn the_count_is_always_words() {
+        assert_eq!(dots_count(5, 5), "5 of 5");
+        assert_eq!(dots_count(4, 6), "4 of 6");
+    }
 }

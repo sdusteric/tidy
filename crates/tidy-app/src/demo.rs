@@ -100,10 +100,12 @@ pub enum Scenario {
     CheckupTrust,
     /// The System Data sheet scrolled to its report-only rows (Docker, snapshots).
     SystemDataReport,
+    /// Cleanup with a Review row ticked and the Move to Trash receipt open.
+    CleanupConfirm,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 19] = [
+    pub const ALL: [Scenario; 20] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -123,6 +125,7 @@ impl Scenario {
         Scenario::SystemData,
         Scenario::CheckupTrust,
         Scenario::SystemDataReport,
+        Scenario::CleanupConfirm,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -152,6 +155,7 @@ impl Scenario {
             Scenario::SystemData => "system-data",
             Scenario::CheckupTrust => "checkup-trust",
             Scenario::SystemDataReport => "system-data-report",
+            Scenario::CleanupConfirm => "cleanup-confirm",
         }
     }
 
@@ -160,7 +164,8 @@ impl Scenario {
             Scenario::Cleanup
             | Scenario::CleanupDone
             | Scenario::CleanupEmpty
-            | Scenario::CleanupWhy => Screen::Cleanup,
+            | Scenario::CleanupWhy
+            | Scenario::CleanupConfirm => Screen::Cleanup,
             Scenario::Checkup
             | Scenario::SystemData
             | Scenario::SystemDataReport
@@ -276,6 +281,8 @@ pub struct DemoState {
     pub sysdata_scroll_y: f32,
     /// The item whose details popover is open, and where it was asked for (x, y in points).
     pub details: Option<(String, f32, f32)>,
+    /// The Move to Trash receipt starts open.
+    pub confirm: bool,
 }
 
 impl Global for DemoState {}
@@ -309,6 +316,7 @@ impl DemoState {
             },
             // Where the Spotify row's Details button sits: the popover's top right corner
             // hangs under it.
+            confirm: scenario == Scenario::CleanupConfirm,
             details: (scenario == Scenario::CleanupWhy).then(|| {
                 (
                     "cache.app:Library/Caches/com.spotify.client".to_string(),
@@ -1187,6 +1195,7 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
         Scenario::Cleanup
         | Scenario::CleanupDone
         | Scenario::CleanupWhy
+        | Scenario::CleanupConfirm
         | Scenario::Checkup
         | Scenario::SystemData
         | Scenario::SystemDataReport
@@ -1198,6 +1207,12 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
     };
     m.load_demo(scenario.screen(), plan, large, Some(disk()));
     match scenario {
+        Scenario::CleanupConfirm => {
+            // One Review row is ticked, which is what makes Clean ask first.
+            m.cleanup
+                .ticked
+                .insert("cache.unknown:Library/Caches/com.example.updater".to_string());
+        }
         Scenario::CleanupDone => {
             if let Some(plan) = &m.cleanup.plan {
                 for id in safe_ids(plan) {
@@ -1335,7 +1350,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 19);
+        assert_eq!(Scenario::ALL.len(), 20);
     }
 
     #[test]

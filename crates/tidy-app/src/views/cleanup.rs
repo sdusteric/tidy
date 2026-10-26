@@ -9,17 +9,20 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use tidy_core::explain::explain_with;
 use tidy_core::model::{Class, Group};
 
 use crate::app::{CleanupState, OpenKind, TidyModel, Tri, now_unix, open_path};
 use crate::format;
-use crate::theme::{Theme, figure, metrics, motion as m, tnum};
+use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{
-    checkbox, glyph_tile, icon_button, plain_button, scroll_edge, tag, text_button,
+    DOTS_W, check_dots, checkbox, icon_button, large_button, plain_button, scroll_edge, tag,
 };
 
+/// What the dots on a row count, said once under the Figure.
+pub const DOTS_NOTE: &str = "Dots count the checks passed before an item can move";
 pub const EMPTY_FIRST_TITLE: &str = "Find space you can get back";
 pub const EMPTY_FIRST_BODY: &str = "Tidy looks at caches, old logs, old build output and package caches. Nothing moves until you choose, and everything goes to the Trash.";
 pub const EMPTY_DONE_TITLE: &str = "Nothing to clean right now";
@@ -101,6 +104,9 @@ pub struct ItemRow {
     pub enabled: bool,
     pub leaving: bool,
     pub path: PathBuf,
+    /// (checks passed, checks in all) for the row's check dots, from the rule's guards and the
+    /// row's state. None for a Report only row, which has no check to pass.
+    pub guards: Option<(usize, usize)>,
 }
 
 impl ItemRow {
@@ -166,6 +172,8 @@ pub fn cleanup_rows(c: &CleanupState) -> Vec<CleanRow> {
                 enabled: c.enabled(item),
                 leaving: c.leaving.contains(&item.id),
                 path: item.path.clone(),
+                guards: Some(explain_with(item, c.guard_state(&item.id)).passed())
+                    .filter(|(_, total)| *total > 0),
             }));
         }
     }
@@ -189,8 +197,8 @@ fn render_row(row: &CleanRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement 
             tri,
             count,
             bytes,
-            first,
-        } => render_header(*group, *expanded, *tri, *count, *bytes, *first, ix, t, env),
+            ..
+        } => render_header(*group, *expanded, *tri, *count, *bytes, ix, t, env),
         CleanRow::Item(item) => render_item(item, ix, t, env),
     }
 }
@@ -202,7 +210,6 @@ fn render_header(
     tri: Option<Tri>,
     count: usize,
     bytes: u64,
-    first: bool,
     ix: usize,
     t: &Theme,
     env: &RowEnv,
@@ -210,80 +217,83 @@ fn render_header(
     let hover = t.row_hover;
     let toggle_model = env.model.clone();
     let check_model = env.model.clone();
+    // The row keeps the list's fixed height; the gray band sits at its bottom, so a gap opens
+    // above every group.
     div()
         .id(("clean-head", ix))
         .debug_selector(move || format!("group-{group:?}"))
-        .relative()
         .w_full()
         .h(px(metrics::CLEANUP_ROW_H))
-        .px(px(10.))
-        .gap(px(8.))
-        .rounded(px(8.))
         .flex()
-        .items_center()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .when(!first, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(10.))
-                    .right(px(10.))
-                    .h(px(1.))
-                    .bg(t.separator),
-            )
-        })
-        .on_click(move |_, _, cx| {
-            toggle_model.update(cx, |m, cx| m.toggle_collapsed(group, cx));
-        })
-        .child(
-            Icon::new(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .size(px(12.))
-            .text_color(t.text_3),
-        )
-        .child(checkbox(
-            ("group-check", ix),
-            format!("group-check-{group:?}"),
-            tri.unwrap_or(Tri::Off),
-            tri.is_some(),
-            t,
-            move |_, cx| {
-                check_model.update(cx, |m, cx| m.toggle_group(group, cx));
-            },
-        ))
+        .flex_col()
+        .justify_end()
         .child(
             div()
-                .text_size(px(13.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.text)
-                .whitespace_nowrap()
-                .child(group.label()),
+                .id(("clean-band", ix))
+                .w_full()
+                .h(px(36.))
+                .px(px(10.))
+                .gap(px(8.))
+                .rounded(px(6.))
+                .bg(t.fill)
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .on_click(move |_, _, cx| {
+                    toggle_model.update(cx, |m, cx| m.toggle_collapsed(group, cx));
+                })
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.))
+                    .text_color(t.text_2),
+                )
+                .child(checkbox(
+                    ("group-check", ix),
+                    format!("group-check-{group:?}"),
+                    tri.unwrap_or(Tri::Off),
+                    tri.is_some(),
+                    t,
+                    move |_, cx| {
+                        check_model.update(cx, |m, cx| m.toggle_group(group, cx));
+                    },
+                ))
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .display(FontWeight::BOLD)
+                        .text_color(t.text)
+                        .whitespace_nowrap()
+                        .child(group.label()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(t.text_2)
+                        .whitespace_nowrap()
+                        .child(format::items(count)),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .debug_selector(move || format!("group-size-{group:?}"))
+                        .flex_none()
+                        .w(px(76.))
+                        .text_right()
+                        .text_size(px(15.))
+                        .display(FontWeight::BOLD)
+                        .font_features(tnum())
+                        .text_color(t.text)
+                        .child(format::size(bytes)),
+                )
+                // The hover-action area of the item rows, so group totals line up with item
+                // sizes. Rows use a 10 pt gap and the band 8 pt, hence the extra 2.
+                .child(div().flex_none().w(px(metrics::CLEAN_TRAIL_W + 2.))),
         )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(t.text_2)
-                .whitespace_nowrap()
-                .child(format::items(count)),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .debug_selector(move || format!("group-size-{group:?}"))
-                .flex_none()
-                .text_size(px(13.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .font_features(tnum())
-                .text_color(t.text)
-                .child(format::size(bytes)),
-        )
-        // The hover-action area of the item rows, so group totals line up with item sizes.
-        .child(div().flex_none().w(px(metrics::CLEAN_TRAIL_W)))
         .into_any_element()
 }
 
@@ -303,6 +313,7 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
     let (row_id, check_id, menu_row_id, hover_key) =
         (id.clone(), id.clone(), id.clone(), id.clone());
     let selector_id = id.clone();
+    let dots_id = id.clone();
     let reveal_selector = format!("clean-reveal:{id}");
     let more_selector = format!("clean-more:{id}");
 
@@ -364,89 +375,96 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
             ))
     });
 
-    let el = div()
-        .id(("clean-item", ix))
-        .debug_selector(move || format!("clean-row:{selector_id}"))
-        .w_full()
-        .h(px(metrics::CLEANUP_ROW_H))
-        // 10 + chevron 12 + gap 8: the checkbox sits under the group's checkbox.
-        .pl(px(30.))
-        .pr(px(10.))
-        .gap(px(10.))
-        .rounded(px(8.))
-        .flex()
-        .items_center()
-        .when(hovered, |d| d.bg(hover_bg))
-        .on_hover(move |h, _, cx| {
-            let key = hover_key.clone();
-            let h = *h;
-            let _ = hover_view.update(cx, |v, cx| v.set_hovered(&key, h, cx));
-        })
-        .on_click(move |_, _, cx| {
-            row_model.update(cx, |m, cx| m.toggle_item(&row_id, cx));
-        })
-        .child(lead)
-        .child(glyph_tile(group_icon(item.group), 28., 6., 16., t))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(
-                    // The tag sits right after the name, as Haul's quality tag does.
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .text_size(px(13.))
-                                .line_height(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(t.text)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(item.name.clone()),
-                        )
-                        .children(item.tag().map(|label| tag(label, t))),
-                )
-                .child(
-                    div()
-                        .debug_selector({
-                            let key = format!("clean-meta:{id}");
-                            move || key
-                        })
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(if item.warn { t.warning } else { t.text_2 })
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(item.meta.clone()),
-                ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .w(px(76.))
-                .text_right()
-                .text_size(px(13.))
-                .font_features(tnum())
-                .text_color(t.text_2)
-                .whitespace_nowrap()
-                .child(format::size(item.bytes)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .w(px(metrics::CLEAN_TRAIL_W))
-                .flex()
-                .justify_end()
-                .children(actions),
-        );
+    let el =
+        div()
+            .id(("clean-item", ix))
+            .debug_selector(move || format!("clean-row:{selector_id}"))
+            .w_full()
+            .h(px(metrics::CLEANUP_ROW_H))
+            // 10 + chevron 12 + gap 8: the checkbox sits under the group's checkbox.
+            .pl(px(30.))
+            .pr(px(10.))
+            .gap(px(10.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .when(hovered, |d| d.bg(hover_bg))
+            .on_hover(move |h, _, cx| {
+                let key = hover_key.clone();
+                let h = *h;
+                let _ = hover_view.update(cx, |v, cx| v.set_hovered(&key, h, cx));
+            })
+            .on_click(move |_, _, cx| {
+                row_model.update(cx, |m, cx| m.toggle_item(&row_id, cx));
+            })
+            .child(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // The tag sits right after the name, as Haul's quality tag does.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .line_height(px(18.))
+                                    .display(FontWeight::SEMIBOLD)
+                                    .text_color(t.text)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(item.name.clone()),
+                            )
+                            .children(item.tag().map(|label| tag(label, t))),
+                    )
+                    .child(
+                        div()
+                            .debug_selector({
+                                let key = format!("clean-meta:{id}");
+                                move || key
+                            })
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(if item.warn { t.warning } else { t.text_2 })
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(item.meta.clone()),
+                    ),
+            )
+            .children(item.guards.map(|(passed, total)| {
+                check_dots(passed, total, format!("clean-dots:{dots_id}"), t)
+            }))
+            .when(item.guards.is_none(), |d| {
+                d.child(div().flex_none().w(px(DOTS_W)))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(76.))
+                    .text_right()
+                    .text_size(px(14.))
+                    .display(FontWeight::BOLD)
+                    .font_features(tnum())
+                    .text_color(t.text)
+                    .whitespace_nowrap()
+                    .child(format::size(item.bytes)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(metrics::CLEAN_TRAIL_W))
+                    .flex()
+                    .justify_end()
+                    .children(actions),
+            );
     if item.leaving && !env.reduce_motion {
         // The row fades over 140 ms as its item reaches the Trash; the model removes it then.
         el.with_animation(
@@ -656,11 +674,10 @@ impl TidyView {
                     ))
                 })
                 .when(snap.has_plan && !snap.empty_result, |d| {
-                    d.child(text_button(
+                    d.child(large_button(
                         "clean",
                         "clean-button".to_string(),
                         snap.button_label(),
-                        true,
                         snap.can_clean(),
                         t,
                         move |_, cx| {
@@ -671,7 +688,34 @@ impl TidyView {
         };
         // The summary stays put above the list, so the edge that shows when the list is
         // scrolled is under the summary, not under the toolbar.
-        let toolbar = self.toolbar(t, "Cleanup", false, controls, cx);
+        let hero_mode = snap.has_plan && !snap.empty_result;
+        let toolbar = if hero_mode {
+            self.drag_area(
+                div()
+                    .id("toolbar")
+                    .flex_none()
+                    .h(px(metrics::HERO_H))
+                    .px(px(20.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .bg(t.window_bg),
+                cx,
+            )
+            .child(self.hero_figure(t, &snap))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    // A press on a control never starts a window drag.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(controls),
+            )
+        } else {
+            self.toolbar(t, "Cleanup", false, controls, cx)
+        };
 
         let shown = snap
             .notice
@@ -792,51 +836,59 @@ impl TidyView {
             .into_any_element()
     }
 
-    /// 64 pt: the Figure ("6.3 GB ready to clean") and one line under it.
+    /// The Figure ("6.3 GB ready to clean"): Avenir Next at 800, the screen's one big number.
+    fn hero_figure(&self, t: &Theme, snap: &CleanupView) -> Div {
+        let big = snap.ticked_bytes > 0;
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_baseline()
+            .gap(px(10.))
+            .child(
+                div()
+                    .debug_selector(|| "figure".to_string())
+                    .text_size(px(if big { metrics::FIGURE_PT } else { 30. }))
+                    .line_height(px(if big { metrics::FIGURE_PT + 6. } else { 40. }))
+                    .display(FontWeight::EXTRA_BOLD)
+                    .font_features(tnum())
+                    .text_color(t.text)
+                    .whitespace_nowrap()
+                    .child(snap.figure()),
+            )
+            .when(big, |d| {
+                d.child(
+                    div()
+                        .text_size(px(17.))
+                        .text_color(t.text_2)
+                        .whitespace_nowrap()
+                        .child("ready to clean"),
+                )
+            })
+    }
+
+    /// The line under the Figure: what is left to review, when the scan ran, and what the dots
+    /// count.
     fn summary_strip(&self, t: &Theme, snap: &CleanupView, now: u64) -> Div {
         div()
             .debug_selector(|| "summary".to_string())
             .flex_none()
-            .h(px(metrics::SUMMARY_H))
+            .h(px(metrics::SUMMARY_LINE_H))
             .px(px(20.))
             .flex()
-            .flex_col()
-            .justify_center()
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .debug_selector(|| "figure".to_string())
-                            .text_size(px(figure::SIZE))
-                            .line_height(px(figure::LINE))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .font_features(tnum())
-                            .text_color(t.text)
-                            .whitespace_nowrap()
-                            .child(snap.figure()),
-                    )
-                    .when(snap.ticked_bytes > 0, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(15.))
-                                .text_color(t.text_2)
-                                .whitespace_nowrap()
-                                .child("ready to clean"),
-                        )
-                    }),
-            )
+            .items_start()
             .child(
                 div()
                     .debug_selector(|| "summary-line".to_string())
-                    .text_size(px(12.))
-                    .line_height(px(16.))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .line_height(px(18.))
                     .font_features(tnum())
                     .text_color(t.text_2)
                     .whitespace_nowrap()
-                    .child(snap.summary_line(now)),
+                    .child(format!("{} \u{b7} {}", snap.summary_line(now), DOTS_NOTE)),
             )
     }
 }
@@ -1012,6 +1064,56 @@ mod tests {
             CleanRow::Header { first, .. } => assert!(!*first),
             _ => unreachable!(),
         }
+    }
+
+    fn guards_of(c: &CleanupState, id: &str) -> Option<(usize, usize)> {
+        cleanup_rows(c).iter().find_map(|r| match r {
+            CleanRow::Item(i) if i.id == id => Some(i.guards),
+            _ => None,
+        })?
+    }
+
+    #[test]
+    fn dots_come_from_the_rules_guards_and_the_rows_state() {
+        let mut plan = Plan::empty("/fake", 100);
+        let mk = |id: &str, class: Class, blocked: Option<&str>| {
+            let mut i = item("x", Group::Caches, class, 3_000, blocked);
+            i.id = id.to_string();
+            i
+        };
+        plan.items = vec![
+            mk("cache.app:Library/Caches/a", Class::Safe, None),
+            mk(
+                "cache.chrome:Library/Caches/Google/Chrome/Default",
+                Class::Safe,
+                Some("Quit Google Chrome first"),
+            ),
+            mk("proj.target:Documents/p/target", Class::Safe, None),
+            mk("ai.vm:.colima", Class::ReportOnly, None),
+        ];
+        let mut m = TidyModel::new(Default::default());
+        m.load_demo(crate::app::Screen::Cleanup, Some(plan), None, None);
+        let mut c = std::mem::take(&mut m.cleanup);
+        c.collapsed.clear();
+        // A plain cache: owner, 24 hours, open files, recheck, Trash.
+        assert_eq!(guards_of(&c, "cache.app:Library/Caches/a"), Some((5, 5)));
+        // Chrome is running: its owner guard fails and the other four pass.
+        assert_eq!(
+            guards_of(&c, "cache.chrome:Library/Caches/Google/Chrome/Default"),
+            Some((4, 5))
+        );
+        // Build output has the project guards too, so its N is not 5.
+        let (ok, all) = guards_of(&c, "proj.target:Documents/p/target").unwrap();
+        assert_eq!(ok, all);
+        assert!(all > 5, "{all}");
+        // Tidy never moves a Report only row: nothing to pass, no dots.
+        assert_eq!(guards_of(&c, "ai.vm:.colima"), None);
+        // A skipped move fails the check right before the move.
+        c.skipped.insert(
+            "cache.app:Library/Caches/a".to_string(),
+            "In use, skipped".into(),
+        );
+        assert_eq!(guards_of(&c, "cache.app:Library/Caches/a"), Some((4, 5)));
     }
 
     #[test]

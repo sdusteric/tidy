@@ -1404,12 +1404,14 @@ fn the_denylist_and_excluded_folders_are_never_scanned() {
     );
     h.put(".ssh/id_ed25519", 4 * MIB, 40 * DAY);
     h.put(".config/gh/hosts.yml", 4 * MIB, 40 * DAY);
-    // A sqlite file inside a cache is not measured.
+    // A sqlite file inside a cache is not measured, and the move would refuse the folder
+    // that holds it, so the folder is not offered.
     h.put("Library/Caches/yarn/x.bin", MIB, 5 * DAY);
     h.put("Library/Caches/yarn/store.sqlite", 4 * MIB, 5 * DAY);
+    h.put("Library/Caches/Cypress/x.bin", MIB, 5 * DAY);
     let (env, _) = h.env();
     let plan = scan(&env);
-    assert_eq!(ids(&plan), ["cache.app:Library/Caches/yarn"]);
+    assert_eq!(ids(&plan), ["cache.app:Library/Caches/Cypress"]);
     assert_eq!(plan.items[0].bytes_alloc, MIB);
 }
 
@@ -2341,4 +2343,94 @@ fn a_slow_project_walk_stops_part_way_and_offers_nothing_from_it() {
     let plan = scan(&env);
     find(&plan, &format!("proj.target:{p}/big/target"));
     assert!(plan.skipped.is_empty());
+}
+
+// ---------- Rows that the move would refuse ----------
+
+/// Whether the temp volume treats `a` and `A` as one name.
+fn case_insensitive_volume(h: &Home) -> bool {
+    let probe = h.path("CaseProbe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let same = h.path("caseprobe").exists();
+    std::fs::remove_dir(&probe).unwrap();
+    same
+}
+
+#[test]
+fn a_project_root_spelled_in_another_case_is_scanned_by_its_on_disk_name() {
+    let h = Home::new();
+    if !case_insensitive_volume(&h) {
+        eprintln!("skipped: this test volume is case-sensitive");
+        return;
+    }
+    // The settings list "Documents/projects" (and "Projects"); the folder is Documents/Projects.
+    h.mark("Documents/Projects/app/Package.swift", 60 * DAY);
+    h.put("Documents/Projects/app/.build/debug/app", 2 * MIB, 40 * DAY);
+    h.mark("Projects/other/Package.swift", 60 * DAY);
+    h.put("Projects/other/.build/debug/app", 2 * MIB, 40 * DAY);
+    let (mut env, _) = h.env();
+    env.settings.project_roots = vec![
+        "Documents/projects".into(),
+        "Documents/Projects".into(),
+        "projects".into(),
+        "Projects".into(),
+    ];
+    let plan = scan(&env);
+    let item = find(&plan, "proj.swiftpm:Documents/Projects/app/.build").clone();
+    assert!(item.path.starts_with(h.path("Documents/Projects")));
+    assert!(item.path.to_string_lossy().contains("Documents/Projects/"));
+    // Each folder is offered once, however many spellings the settings hold.
+    assert_eq!(plan.items.len(), 2, "{:?}", ids(&plan));
+    assert_eq!(recheck(&env, &item), Ok(item.path.clone()));
+}
+
+#[test]
+fn a_symlink_on_the_path_is_still_refused_after_the_spelling_fix() {
+    let h = Home::new();
+    h.mark("elsewhere/app/Package.swift", 60 * DAY);
+    h.put("elsewhere/app/.build/debug/app", 2 * MIB, 40 * DAY);
+    std::fs::create_dir_all(h.path("Documents")).unwrap();
+    std::os::unix::fs::symlink(h.path("elsewhere"), h.path("Documents/Projects")).unwrap();
+    let (env, _) = h.env();
+    let plan = scan(&env);
+    assert!(plan.items.is_empty(), "{:?}", ids(&plan));
+    // A link swapped in after the scan is refused at the move.
+    h.mark("real/app/Package.swift", 60 * DAY);
+    h.put("real/app/.build/debug/app", 2 * MIB, 40 * DAY);
+    std::fs::remove_file(h.path("Documents/Projects")).unwrap();
+    std::fs::create_dir_all(h.path("Documents/Projects/app/.build")).unwrap();
+    h.mark("Documents/Projects/app/Package.swift", 60 * DAY);
+    h.put("Documents/Projects/app/.build/debug/app", 2 * MIB, 40 * DAY);
+    let plan = scan(&env);
+    let item = find(&plan, "proj.swiftpm:Documents/Projects/app/.build").clone();
+    std::fs::remove_dir_all(h.path("Documents/Projects/app")).unwrap();
+    std::os::unix::fs::symlink(h.path("real/app"), h.path("Documents/Projects/app")).unwrap();
+    assert!(recheck(&env, &item).is_err());
+}
+
+#[test]
+fn build_output_holding_a_denied_name_is_not_offered() {
+    let h = Home::new();
+    let p = "Documents/projects";
+    h.mark(&format!("{p}/web/package.json"), 60 * DAY);
+    h.put(
+        &format!("{p}/web/node_modules/a/index.js"),
+        2 * MIB,
+        40 * DAY,
+    );
+    h.put(
+        &format!("{p}/web/node_modules/db/cache.sqlite"),
+        4096,
+        40 * DAY,
+    );
+    h.mark(&format!("{p}/ok/package.json"), 60 * DAY);
+    h.put(
+        &format!("{p}/ok/node_modules/a/index.js"),
+        2 * MIB,
+        40 * DAY,
+    );
+    let (env, _) = h.env();
+    let plan = scan(&env);
+    find(&plan, &format!("proj.node_modules:{p}/ok/node_modules"));
+    absent(&plan, &format!("proj.node_modules:{p}/web/node_modules"));
 }

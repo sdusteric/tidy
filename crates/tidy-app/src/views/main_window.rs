@@ -172,9 +172,11 @@ impl TidyView {
         });
         // macOS posts no Reduce Motion change Base can follow, so re-read it whenever the
         // window becomes active.
-        let activation = cx.observe_window_activation(window, |_, window, cx| {
+        let activation = cx.observe_window_activation(window, |v, window, cx| {
             if window.is_window_active() {
                 gpui_kit::base::apply_system_reduce_motion(cx);
+                // Things may have been deleted while Tidy was in the background.
+                v.model.update(cx, |m, cx| m.prune_missing(cx));
             }
         });
         // The root element must hold focus, or the window's key bindings do nothing.

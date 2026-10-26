@@ -284,6 +284,17 @@ fn plain_ancestors(given_root: &Path, root: &Path, path: &Path) -> bool {
     false
 }
 
+/// Whether the folder `dir` holds an entry with a denied name anywhere inside, the check
+/// [`check`] makes before a move. A file or a link is judged by its own name. Never follows a
+/// symlink; an error means a folder inside cannot be read.
+pub fn holds_denied_name(path: &Path) -> io::Result<bool> {
+    match path.symlink_metadata() {
+        Ok(m) if m.is_dir() => find_denied_name(path),
+        Ok(_) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Searches the folder `dir` for an entry with a denied name, never following a symlink.
 /// Returns an error when a folder inside cannot be read.
 fn find_denied_name(dir: &Path) -> io::Result<bool> {

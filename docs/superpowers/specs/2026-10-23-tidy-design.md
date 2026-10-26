@@ -85,6 +85,8 @@ An item whose owner app is running is shown unticked and disabled, with the meta
 
 **After a clean.** A notice band under the toolbar: "Moved 6.3 GB to the Trash. Empty the Trash to free the space." with buttons "Empty Trash…" and Show History. It stays until dismissed or the next scan.
 
+**Rows that are gone.** When the Cleanup or Large files screen is shown again, and when the window becomes active, rows whose path no longer exists (one `symlink_metadata` each, off the UI thread above 200 paths) are dropped and the totals follow, with no rescan. After a clean, skipped rows stay with their reason and trashed rows do not return until a rescan finds them again.
+
 **Status bar.** Left: "12 selected, 6.3 GB". Right: "In the Trash from Tidy: 2.1 GB" and a text button "Empty Trash…".
 
 **Empty Trash.** A separate action, never part of Clean (decided before this document). It opens a confirm dialog: "Permanently delete the 214 items Tidy moved to the Trash (2.1 GB)? This can't be undone." Buttons: Cancel, Empty Trash (destructive style). It deletes only the items Tidy put there, using the Trash paths recorded in history, because listing `~/.Trash` needs Full Disk Access (C8). If macOS refuses (EPERM), Tidy shows "macOS didn't let Tidy empty the Trash. Empty it from Finder." and writes the failure to history. Other items in the Trash are never touched and never counted.
@@ -285,6 +287,8 @@ Project roots: `~/Documents/projects`, `~/Developer`, `~/Projects`, `~/src`, `~/
 | `vendor` | `composer.json` or `Gemfile` in the parent, plus its lock file | Review |
 
 **Project guard** (C33). Whatever its markers say, build output is never offered, and is skipped at the move, when it holds a `*-keypair.json` file, a `.git` folder or file anywhere inside, or a file Git tracks (read from the repository's `.git/index`, versions 2 to 4, without running `git`). An index that cannot be read counts as tracking something.
+
+**Offered means movable.** The scan never offers a row whose move the checks would refuse. It leaves such a row out (it does not show it as Review): the rule is the same "never offered" as the project guard, so a row that cannot move never comes back ticked on every scan. Besides the project guard, the scan leaves out any folder that holds a name the trash guard refuses (`Cookies`, `Login Data`, `*.sqlite` and the rest of the denied names), which the move reports as "Holds files Tidy never touches". Project roots are walked under the spelling the disk has: a settings entry `Documents/projects` finds `Documents/Projects` on a case-insensitive volume, and entries that resolve to one folder are walked once, so item paths match what the move check resolves and a real link anywhere on the path is still refused.
 
 "After 30 days" means the newest file mtime anywhere in the project folder (the parent, excluding the build output itself and `.git`) is older than 30 days, so an active project is never offered. On this Mac that means Haul's 35 GB `target` is not offered while Haul is being worked on, which is correct.
 
@@ -656,7 +660,7 @@ From the review of Mole, a GPL-3.0 cleaner (`reddit/mole.md`): its worst inciden
 ### 18.1 Safety (C32 to C37, C40)
 
 - The last gate before a move (`clean.rs`, `MoveGate`) is shared by Clean and Move to Trash: the ignore list read fresh (fail closed), then the open files of the user's processes (libproc `PROC_PIDLISTFDS` and `PROC_PIDFDVNODEPATHINFO`, fail closed). It runs after the path guard and the rule's re-check.
-- The project guard (`cleanup.rs`, `Guard`) runs in the scan's date walk and again, from scratch, at the move.
+- The project guard (`cleanup.rs`, `Guard`) runs in the scan's date walk and again, from scratch, at the move. The scan also drops folders that hold a denied name (`trash::holds_denied_name`, the check the move makes), so nothing is offered that the move would refuse for that reason.
 - A new seam, `OpenFilesProbe` (`LibcOpenFiles` in production, `FixedOpenFiles` in tests), joins the others in `env.rs`. The conservative default seams make every move skip.
 - Skip reasons: "On your ignore list", "Tidy couldn't read your ignore list, skipped", "Open in <name>, skipped", "Tidy couldn't check which files are open, skipped", "Tidy couldn't read which apps are open, skipped", "Holds a keypair file, skipped", "Holds a Git repository, skipped", "Git tracks files inside it, skipped", "Tidy couldn't read the project's Git index, skipped".
 - The details popover lists two more checks: "Skipped while a program has a file open inside it" on every item Tidy may move, and "Never when it holds a keypair, a Git repository or files Git tracks" on build output.

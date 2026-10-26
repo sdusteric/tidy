@@ -643,6 +643,13 @@ impl Cand {
         if ctx.clocks.over(key) {
             // Stopped part way: the size is not the whole folder's.
             self.dropped = true;
+            return;
+        }
+        // The move refuses a folder that holds a file Tidy never touches (a cookie store, a
+        // `*.sqlite`), so the scan does not offer it either (design 6.3, 18.1).
+        if self.size.files > 0 && crate::trash::holds_denied_name(&self.path).unwrap_or(true) {
+            tracing::info!(path = %self.path.display(), "holds files Tidy never touches");
+            self.dropped = true;
         }
         ctx.files.fetch_add(self.size.files, Ordering::Relaxed);
         ctx.bytes.fetch_add(self.size.alloc, Ordering::Relaxed);
@@ -1239,7 +1246,13 @@ fn chromium_cands(ctx: &Ctx, rule: &Rule, subs: &[&str]) -> Vec<Cand> {
 // ---------- Project build output ----------
 
 fn project_cands(ctx: &Ctx, out: &mut Vec<Cand>, skipped: &mut Vec<String>) {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for root in ctx.env.settings.project_root_paths(&ctx.root) {
+        // Walk the folder under its on-disk spelling, once however many spellings are listed.
+        let root = on_disk_spelling(&ctx.root, &root);
+        if !seen.insert(root.clone()) {
+            continue;
+        }
         let Ok(meta) = root.symlink_metadata() else {
             continue;
         };
@@ -1259,6 +1272,45 @@ fn project_cands(ctx: &Ctx, out: &mut Vec<Cand>, skipped: &mut Vec<String>) {
         }
         visit_project_dir(ctx, &root, &root, 0, out);
     }
+}
+
+/// `path` (inside `root`) with each part spelled as the folder that holds it spells it. On a
+/// case-insensitive volume a settings entry such as `Documents/projects` finds
+/// `Documents/Projects`; the scan must carry the real spelling, or the clean-time check
+/// (which compares resolved paths) would call the item a link. Only the letter case of a name
+/// changes: no link is followed, and a part that does not exist keeps its spelling.
+fn on_disk_spelling(root: &Path, path: &Path) -> PathBuf {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return path.to_path_buf();
+    };
+    let mut at = root.to_path_buf();
+    for c in rel.components() {
+        let std::path::Component::Normal(part) = c else {
+            return path.to_path_buf();
+        };
+        let mut found = None;
+        if let Ok(entries) = std::fs::read_dir(&at) {
+            for e in entries.flatten() {
+                let name = e.file_name();
+                if name == part {
+                    found = Some(name);
+                    break;
+                }
+                if found.is_none()
+                    && name.to_string_lossy().to_lowercase()
+                        == part.to_string_lossy().to_lowercase()
+                {
+                    found = Some(name);
+                }
+            }
+        }
+        match found {
+            // A different name is the same entry only when the volume ignores case.
+            Some(name) if name == part || at.join(part).symlink_metadata().is_ok() => at.push(name),
+            _ => at.push(part),
+        }
+    }
+    at
 }
 
 fn skipped_line(ctx: &Ctx, root: &Path) -> String {

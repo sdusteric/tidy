@@ -94,6 +94,34 @@ impl Global for Model {}
 pub struct Now(pub Arc<dyn Clock>);
 impl Global for Now {}
 
+/// Whether a path is still on disk, for dropping rows of things that are gone. Tests install
+/// their own; the real one is `symlink_metadata`, so a link counts as there and only
+/// "not found" counts as gone.
+pub struct Presence(pub Arc<dyn Fn(&Path) -> bool + Send + Sync>);
+impl Global for Presence {}
+
+fn path_is_there(path: &Path) -> bool {
+    match path.symlink_metadata() {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Lists up to this many paths are checked on the UI thread (a few microseconds each); longer
+/// lists are checked on the background executor.
+pub const PRUNE_INLINE_MAX: usize = 200;
+
+/// The rows of the visible list to check: each key with the paths its move would take.
+type Targets = Vec<(String, Vec<PathBuf>)>;
+
+fn missing_keys(targets: &Targets, there: &dyn Fn(&Path) -> bool) -> Vec<String> {
+    targets
+        .iter()
+        .filter(|(_, paths)| !paths.is_empty() && !paths.iter().any(|p| there(p)))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenKind {
     /// Open the file with its default app.
@@ -719,6 +747,126 @@ impl TidyModel {
         self.maybe_auto_scan(cx);
     }
 
+    /// Drops the rows of the visible Cleanup or Large files list whose path is no longer on
+    /// disk (deleted in Finder, trashed by another app) and lets the totals follow. It is not a
+    /// rescan: nothing new is looked for. Called when the screen is shown again and when the
+    /// window becomes active. A list longer than [`PRUNE_INLINE_MAX`] paths is checked off the
+    /// UI thread.
+    pub fn prune_missing(&mut self, cx: &mut Context<Self>) {
+        if crate::demo::state(cx).is_some() {
+            return;
+        }
+        let there: Arc<dyn Fn(&Path) -> bool + Send + Sync> = cx
+            .try_global::<Presence>()
+            .map_or_else(|| Arc::new(path_is_there) as _, |p| p.0.clone());
+        let (cleanup, large, stamp) = match self.screen {
+            Screen::Cleanup => {
+                if self.cleanup.scanning.is_some() || self.cleanup.cleaning.is_some() {
+                    return;
+                }
+                let Some(plan) = &self.cleanup.plan else {
+                    return;
+                };
+                let targets: Targets = plan
+                    .items
+                    .iter()
+                    .filter(|i| !self.cleanup.gone.contains(&i.id))
+                    .filter(|i| !self.cleanup.leaving.contains(&i.id))
+                    .map(|i| (i.id.clone(), i.paths()))
+                    .collect();
+                (targets, Vec::new(), plan.scanned_at)
+            }
+            Screen::Large => {
+                if self.large.scanning.is_some() || self.large.trashing.is_some() {
+                    return;
+                }
+                let Some(scan) = &self.large.scan else {
+                    return;
+                };
+                let stamp = scan.scanned_at;
+                let now = now_unix(cx);
+                let targets: Targets = self
+                    .large
+                    .rows(now, self.settings.not_opened_days)
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        LargeRow::Item(e) if !self.large.leaving.contains(&e.rel) => {
+                            Some((e.rel, vec![e.path]))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (Vec::new(), targets, stamp)
+            }
+            _ => return,
+        };
+        let total: usize = cleanup
+            .iter()
+            .chain(large.iter())
+            .map(|(_, p)| p.len())
+            .sum();
+        if total == 0 {
+            return;
+        }
+        if total <= PRUNE_INLINE_MAX {
+            let ids = missing_keys(&cleanup, &*there);
+            let rels = missing_keys(&large, &*there);
+            if self.apply_missing(ids, rels) {
+                cx.notify();
+            }
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let (ids, rels) = cx
+                .background_executor()
+                .spawn(async move {
+                    (
+                        missing_keys(&cleanup, &*there),
+                        missing_keys(&large, &*there),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                // A rescan that finished meanwhile has its own rows; this answer is old.
+                let same = m.cleanup.plan.as_ref().map(|p| p.scanned_at) == Some(stamp)
+                    || m.large.scan.as_ref().map(|s| s.scanned_at) == Some(stamp);
+                if same && m.apply_missing(ids, rels) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Takes the rows with these ids (Cleanup) and `rel`s (Large files) out of the lists.
+    /// Returns whether anything changed.
+    pub fn apply_missing(&mut self, ids: Vec<String>, rels: Vec<String>) -> bool {
+        let mut changed = false;
+        for id in ids {
+            if self
+                .cleanup
+                .plan
+                .as_ref()
+                .is_some_and(|p| p.item(&id).is_some())
+                && self.cleanup.gone.insert(id.clone())
+            {
+                self.cleanup.ticked.remove(&id);
+                self.cleanup.skipped.remove(&id);
+                self.cleanup.blocked.remove(&id);
+                self.cleanup.watch.remove(&id);
+                changed = true;
+            }
+        }
+        for rel in rels {
+            if self.large.gone.insert(rel.clone()) {
+                self.large.selected.remove(&rel);
+                self.large.skipped.remove(&rel);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// What a screen does when it becomes the visible one. Everything here only reads: the
     /// Memory snapshot, the last saved Security report, the last check up, the notification
     /// permission (never a prompt). Nothing scans or runs a check on its own.
@@ -727,7 +875,7 @@ impl TidyModel {
             Screen::Memory => self.enter_memory(cx),
             Screen::Security => self.load_last_security(cx),
             Screen::Checkup => self.enter_checkup(cx),
-            Screen::Cleanup | Screen::Large => {}
+            Screen::Cleanup | Screen::Large => self.prune_missing(cx),
         }
     }
 

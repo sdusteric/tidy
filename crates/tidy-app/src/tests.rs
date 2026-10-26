@@ -87,6 +87,8 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> Harness {
         cx.set_global(SettingsOpener(Box::new(move |link, _cx| {
             settings_rec.borrow_mut().push(link)
         })));
+        // Test plans use made-up paths: everything is on disk unless a test says otherwise.
+        cx.set_global(crate::app::Presence(Arc::new(|_| true)));
         cx.set_global(Terminate(term_global));
         cx.set_global(Notify(notify_global));
         let m = cx.new(|_| crate::app::TidyModel::new(settings));
@@ -3938,4 +3940,152 @@ fn the_checkup_buttons_cards_and_switches_are_tab_stops(cx: &mut TestAppContext)
     tab_to(cx, "card-security", 12);
     press(cx, "enter");
     assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Security);
+}
+
+// ---------- Rows of things that are gone ----------
+
+/// Makes `gone` paths read as missing from now on.
+fn vanish(cx: &mut VisualTestContext, gone: &[&str]) {
+    let gone: Vec<PathBuf> = gone.iter().map(PathBuf::from).collect();
+    cx.update(|_, cx| {
+        cx.set_global(crate::app::Presence(Arc::new(move |p| {
+            !gone.contains(&p.to_path_buf())
+        })))
+    });
+}
+
+#[::gpui::test]
+fn cleanup_rows_for_paths_that_are_gone_drop_when_the_screen_is_shown_again(
+    cx: &mut TestAppContext,
+) {
+    let (mut h, _view, cx) = open_with_plan(cx);
+    assert!(has(cx, "clean-row:r:a"));
+    let before = model(cx).read_with(cx, |m, _| {
+        (m.cleanup.safe_bytes(), m.cleanup.ticked_bytes())
+    });
+    assert_eq!(before, (Some(3 * GB + 500 * MB), 3 * GB + 500 * MB));
+
+    // Spotify's cache is deleted in Finder while Tidy sits on another screen.
+    keys(cx, "cmd-3");
+    vanish(cx, &["/fake/a"]);
+    keys(cx, "cmd-2");
+    assert!(!has(cx, "clean-row:r:a"));
+    assert!(has(cx, "clean-row:r:log"));
+    let after = model(cx).read_with(cx, |m, _| {
+        (m.cleanup.safe_bytes(), m.cleanup.ticked_bytes())
+    });
+    assert_eq!(after, (Some(500 * MB), 500 * MB));
+    // No rescan was asked for.
+    assert!(
+        !h.drain()
+            .iter()
+            .any(|c| matches!(c, Command::ScanCleanup | Command::ScanLarge { .. }))
+    );
+}
+
+#[::gpui::test]
+fn the_visible_list_drops_gone_rows_when_the_window_becomes_active(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    vanish(cx, &["/fake/log"]);
+    let m = model(cx);
+    m.update(cx, |m, cx| m.prune_missing(cx));
+    cx.run_until_parked();
+    assert!(!has(cx, "clean-row:r:log"));
+    assert!(has(cx, "clean-row:r:a"));
+}
+
+#[::gpui::test]
+fn a_long_list_is_checked_off_the_ui_thread(cx: &mut TestAppContext) {
+    let h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    let mut big = Plan::empty("/fake", NOW - 120);
+    big.items = (0..300)
+        .map(|i| item(&format!("n{i}"), Group::Caches, Class::Safe, MB, None))
+        .collect();
+    push(&h, cx, vec![Event::CleanupPlan(big)]);
+    vanish(cx, &["/fake/n7", "/fake/n250"]);
+    model(cx).update(cx, |m, cx| m.prune_missing(cx));
+    cx.run_until_parked();
+    let left = model(cx).read_with(cx, |m, _| m.cleanup.visible_count());
+    assert_eq!(left, 298);
+}
+
+#[::gpui::test]
+fn large_rows_for_paths_that_are_gone_drop_when_the_screen_is_shown_again(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_scan(cx);
+    assert!(has(cx, "large-row:Movies/trip.mov"));
+    keys(cx, "cmd-2");
+    vanish(cx, &["/fake/Movies/trip.mov"]);
+    keys(cx, "cmd-3");
+    assert!(!has(cx, "large-row:Movies/trip.mov"));
+    assert!(has(cx, &format!("large-row:{BIG}")));
+    let (count, before) = model(cx).read_with(cx, |m, _| {
+        (
+            m.large.item_count(),
+            m.large.scan.as_ref().map(|s| s.biggest(m.large.min).len()),
+        )
+    });
+    assert_eq!(count.map(|c| c + 1), before);
+}
+
+#[::gpui::test]
+fn after_a_clean_skipped_rows_stay_and_trashed_rows_do_not_come_back(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = open_with_plan(cx);
+    click(cx, "clean-button");
+    h.drain();
+    push(
+        &h,
+        cx,
+        vec![
+            Event::ItemTrashed {
+                id: "r:a".into(),
+                trash_path: Some(PathBuf::from("/trash/a")),
+            },
+            Event::ItemSkipped {
+                id: "r:log".into(),
+                reason: "Now a link, skipped".into(),
+            },
+        ],
+    );
+    advance(cx, 200);
+    push(
+        &h,
+        cx,
+        vec![Event::CleanDone(entry(
+            Source::Cleanup,
+            Action::Clean,
+            vec![
+                history_item("/fake/a", ItemResult::Trashed, None),
+                history_item(
+                    "/fake/log",
+                    ItemResult::Skipped,
+                    Some("Now a link, skipped"),
+                ),
+            ],
+            3 * GB,
+        ))],
+    );
+    // Leave the screen, come back, and let the window become active: the folder of the
+    // trashed item is gone from disk, the skipped one is still there.
+    vanish(cx, &["/fake/a"]);
+    keys(cx, "cmd-3");
+    keys(cx, "cmd-2");
+    model(cx).update(cx, |m, cx| m.prune_missing(cx));
+    cx.run_until_parked();
+    assert!(!has(cx, "clean-row:r:a"));
+    assert!(has(cx, "clean-row:r:log"));
+    let (reason, ticked) = model(cx).read_with(cx, |m, _| {
+        (
+            m.cleanup.skipped.get("r:log").cloned(),
+            m.cleanup.ticked.contains("r:log"),
+        )
+    });
+    assert_eq!(reason.as_deref(), Some("Now a link, skipped"));
+    assert!(!ticked);
+    // Even if the path came back (a new file of the same name), the row stays gone until a
+    // rescan finds it.
+    vanish(cx, &[]);
+    keys(cx, "cmd-3");
+    keys(cx, "cmd-2");
+    assert!(!has(cx, "clean-row:r:a"));
 }

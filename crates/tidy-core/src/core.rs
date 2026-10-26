@@ -40,6 +40,7 @@ use crate::model::{
 };
 use crate::reminder;
 use crate::security::{self, Sources};
+use crate::shelf::{self, ShelfState, ShelfStatus};
 use crate::walk::{ProgressFn, WalkProgress};
 
 /// How long [`Command::Shutdown`] waits for scans and a running action to stop.
@@ -66,6 +67,7 @@ pub fn start_with_sources(
     if let Err(e) = env.paths.create_all() {
         tracing::warn!("cannot create Tidy's folders: {e}");
     }
+    let shelf = shelf::read(&env.paths);
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
     let (done_tx, done_rx) = mpsc::unbounded_channel();
@@ -85,6 +87,7 @@ pub fn start_with_sources(
         security_busy: false,
         checkup: None,
         checkup_scanning: false,
+        shelf,
     };
     rt.spawn(actor.run(cmd_rx, done_rx));
     (CoreHandle::new(cmd_tx), ev_rx)
@@ -164,6 +167,8 @@ struct Actor {
     /// The running check up is still in its Cleanup scan. A `ScanCleanup` then waits for
     /// that scan's plan instead of starting a second scan.
     checkup_scanning: bool,
+    /// What Shelf's status file says now (None until a check up has finished).
+    shelf: Option<ShelfState>,
 }
 
 impl Actor {
@@ -527,6 +532,7 @@ impl Actor {
                     }),
                     Some(plan) => {
                         self.plan = Some(plan.clone());
+                        self.shelf_set_reclaimable(plan.safe_bytes());
                         self.emit(Event::CleanupPlan(plan));
                     }
                     None => self.failed("scan", "The scan stopped unexpectedly."),
@@ -550,7 +556,10 @@ impl Actor {
                 self.job = None;
                 match entry {
                     Some(entry) if empty_trash => self.emit(Event::EmptyTrashDone(entry)),
-                    Some(entry) => self.emit(Event::CleanDone(entry)),
+                    Some(entry) => {
+                        self.shelf_after_clean(&entry);
+                        self.emit(Event::CleanDone(entry));
+                    }
                     None => self.failed(
                         what,
                         "Tidy stopped partway. Check History to see what moved.",
@@ -608,6 +617,17 @@ impl Actor {
                     // The plan was taken when its `CleanupPlan` came through: taking it again
                     // here could replace a newer plan from a scan that ended since.
                     Some(out) => {
+                        // A check up whose Cleanup part failed keeps the earlier total.
+                        let bytes = out
+                            .checkup
+                            .cleanup
+                            .map(|c| c.safe_bytes)
+                            .or(self.shelf.map(|s| s.reclaimable_bytes))
+                            .unwrap_or(0);
+                        self.shelf_write(ShelfState {
+                            reclaimable_bytes: bytes,
+                            last_check_at: out.checkup.at,
+                        });
                         self.emit(Event::CheckupDone {
                             checkup: out.checkup,
                             reminder: out.reminder,
@@ -616,6 +636,35 @@ impl Actor {
                     None if aborted => {}
                     None => self.failed("checkup", "The check up stopped unexpectedly."),
                 }
+            }
+        }
+    }
+
+    /// Writes Shelf's status file. A failure is logged and never reaches the user.
+    fn shelf_write(&mut self, state: ShelfState) {
+        self.shelf = Some(state);
+        let status = ShelfStatus::new(self.env.now(), state.reclaimable_bytes, state.last_check_at);
+        if let Err(e) = shelf::write(&self.env.paths, &status) {
+            tracing::warn!("cannot write Shelf's status file: {e}");
+        }
+    }
+
+    /// A Cleanup scan changed the total: update the file, once a check up has set the date.
+    fn shelf_set_reclaimable(&mut self, bytes: u64) {
+        if let Some(s) = self.shelf {
+            self.shelf_write(ShelfState {
+                reclaimable_bytes: bytes,
+                ..s
+            });
+        }
+    }
+
+    /// A clean moved items to the Trash: their bytes are no longer reclaimable.
+    fn shelf_after_clean(&mut self, entry: &HistoryEntry) {
+        if let (Some(s), Some(plan)) = (self.shelf, self.plan.as_ref()) {
+            let next = s.after_clean(plan, entry);
+            if next != s {
+                self.shelf_write(next);
             }
         }
     }
@@ -1480,6 +1529,45 @@ mod tests {
         assert_eq!(next.compared_to.as_deref(), Some(report.id.as_str()));
         assert_eq!(next.compared_at, Some(report.at));
         assert_eq!(security::saved_runs(&m.r.env.paths).len(), 2);
+    }
+
+    fn shelf_file(m: &M2) -> serde_json::Value {
+        let bytes = std::fs::read(m.r.env.paths.shelf_status_file()).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn shelf_status_follows_the_check_up_and_the_clean_inside_tidy_home() {
+        let mut m = running_m2(Arc::new(FixedProbe::default()));
+        let paths = m.r.env.paths.clone();
+        assert!(
+            paths
+                .shelf_status
+                .starts_with(m.r.env.paths.data.parent().unwrap())
+        );
+        m.r.put(".npm/_cacache/a.bin", 2 * MIB);
+        assert!(!paths.shelf_status_file().exists());
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        let events = m.r.until(|e| matches!(e, Event::CheckupDone { .. }));
+        let id = events
+            .iter()
+            .find_map(|e| match e {
+                Event::CleanupPlan(p) => Some(p.items[0].id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let v = shelf_file(&m);
+        assert_eq!(v["reclaimable_bytes"], 2 * MIB as u64);
+        assert_eq!(v["last_check_at"], crate::model::format_utc(TEST_NOW));
+        // The clean moves the item, so the total drops to zero and the date stays.
+        m.r.core.send(Command::Clean { item_ids: vec![id] });
+        m.r.until(|e| matches!(e, Event::CleanDone(_)));
+        let v = shelf_file(&m);
+        assert_eq!(v["reclaimable_bytes"], 0);
+        assert_eq!(v["last_check_at"], crate::model::format_utc(TEST_NOW));
+        assert!(!v.to_string().contains("_cacache"));
     }
 
     #[test]

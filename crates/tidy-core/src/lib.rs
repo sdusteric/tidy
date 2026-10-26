@@ -29,6 +29,7 @@ pub mod reminder;
 pub mod rules;
 pub mod security;
 pub mod settings;
+pub mod shelf;
 pub mod store;
 pub mod sysdata;
 pub mod trash;

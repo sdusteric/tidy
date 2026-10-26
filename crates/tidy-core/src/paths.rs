@@ -19,6 +19,9 @@ pub struct AppPaths {
     pub cache: PathBuf,
     /// tidy.log.
     pub logs: PathBuf,
+    /// The folder Shelf reads live status from (`tidy.json`). `<TIDY_HOME>/shelf-status`
+    /// under `TIDY_HOME`, so tests and agents never touch the real one.
+    pub shelf_status: PathBuf,
     /// True when the paths come from `TIDY_HOME`.
     pub overridden: bool,
 }
@@ -43,6 +46,7 @@ impl AppPaths {
             data: home.join("data"),
             cache: home.join("cache"),
             logs: home.join("logs"),
+            shelf_status: home.join("shelf-status"),
             overridden: true,
         }
     }
@@ -60,6 +64,9 @@ impl AppPaths {
             data,
             cache,
             logs: home.join("Library/Logs/Tidy"),
+            shelf_status: dirs::data_dir()
+                .unwrap_or_else(|| home.join("Library/Application Support"))
+                .join("Shelf/status"),
             overridden: false,
         }
     }
@@ -83,6 +90,11 @@ impl AppPaths {
 
     pub fn lock_file(&self) -> PathBuf {
         self.data.join("lock")
+    }
+
+    /// Shelf's status file for Tidy (`.../Shelf/status/tidy.json`).
+    pub fn shelf_status_file(&self) -> PathBuf {
+        self.shelf_status.join("tidy.json")
     }
 
     pub fn log_file(&self) -> PathBuf {

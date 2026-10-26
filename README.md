@@ -16,6 +16,8 @@ The sidebar has five screens, in this order, reachable with Cmd-1 to Cmd-5:
 
 Cmd-R runs the current screen again.
 
+**Keyboard.** Every control is reachable with Tab and Shift-Tab, in drawing order: the sidebar, the toolbar, the rows (a row's checkbox, then its Details, Reveal and more buttons), then the status bar. Space or Return presses the focused control. The focused control gets a 2 pt ring in the text color, 2 pt off its edge, only while the last input was a key press. A row shows its buttons while Tab is on it, as it does under the pointer. On the Cleanup, Large files and Memory lists, Tab scrolls the list when it runs past the last row in view. A dialog opens with Cancel focused, so Return alone never confirms: Tab to the action button first. Tab stays inside a dialog, a sheet or a menu while it is open, Escape closes it, and the focus goes back to the control that opened it. Cmd-1 to Cmd-5 and Cmd-R work wherever the focus is.
+
 **Relaunch.** Relaunch sends the same polite terminate, waits up to 10 seconds for the app to exit, then opens the same app bundle again without bringing it to the front. It never force quits: an app still open after 10 seconds stays open and its row says so. Only real apps have it (never the System row, plain processes, Finder or Tidy).
 
 **Before each move.** Right before anything goes to the Trash (Cleanup and Large files alike), Tidy reads the ignore list from settings.json again (a read error stops the run), checks with libproc that no process of yours holds a file open inside the path, and for build output checks that it holds no `*-keypair.json`, no `.git` and no file Git tracks. A process list it cannot read skips every move.
@@ -98,7 +100,7 @@ Screenshots of the five screens, light and dark, 1800 x 1240 px, without a windo
 scripts/shots-bundle.sh && SHOTS_RENDER=1 scripts/shots.sh checkup memory security cleanup large
 ```
 
-They are written to `docs/app-shots/<scenario>-<light|dark>.png`. With no arguments `scripts/shots.sh` shoots the same five.
+They are written to `docs/app-shots/<scenario>-<light|dark>.png`. With no arguments `scripts/shots.sh` shoots the same five. Two more show the History sheet (`history`: four entries, the newest one open, with items in the Trash that Finder's Put Back restores and one skipped item that is still in place) and the focus ring (`cleanup-focus`: the keyboard on a row checkbox).
 
 ## Updates
 
@@ -129,7 +131,7 @@ Tidy updates itself with Sparkle 2.10.0, following the shared contract in `../ap
 | `TIDY_NO_UPDATES=1` | Sparkle does not start: no update checks in this run. |
 | `SPARKLE_FRAMEWORK=<path>` | The Sparkle.framework that the build links and `scripts/bundle.sh` embeds (default `../app-updates/vendor/Sparkle-2.10.0/Sparkle.framework`). |
 | `APP_UPDATES_PUBLISH=<path>` | The publish.sh that `scripts/release.sh` calls (default `../app-updates/tools/publish.sh`). |
-| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `memory-relaunch`, `memory-critical`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`, `cleanup-confirm`. No core, no lock, no disk access. |
+| `TIDY_DEMO=<scenario>` | Fixed UI for screenshots: `checkup`, `cleanup`, `cleanup-done`, `cleanup-empty`, `large`, `large-not-opened`, `large-folders`, `large-empty`, `memory`, `memory-tight`, `memory-relaunch`, `memory-critical`, `security`, `security-first`, `security-items`, `cleanup-why`, `system-data`, `system-data-report`, `checkup-trust`, `cleanup-confirm`, `history`, `cleanup-focus`. No core, no lock, no disk access. |
 | `TIDY_DEMO_SHOT=<file.png>` | With the `shot-export` feature, renders the first frame offscreen at 2x and writes the PNG. |
 | `TIDY_DEMO_EXIT_SECS` | Demo self-quit, default 30. |
 | `TIDY_APPEARANCE=<light or dark>` | Forces the appearance. |

@@ -25,7 +25,7 @@ use crate::format;
 use crate::theme::{DisplayType, MONO_FONT, Theme, figure, metrics, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
-use crate::views::{glyph_tile, hairline, icon_button, text_button};
+use crate::views::{RowFocus, glyph_tile, hairline, icon_button, row_action, text_button};
 
 pub const EMPTY_TITLE: &str = "Check this Mac's settings";
 pub const EMPTY_BODY: &str = "Tidy reads FileVault, the firewall, Gatekeeper, System Integrity Protection, XProtect, login items and Chrome extensions. It only reads settings and never asks for access.";
@@ -549,6 +549,7 @@ fn login_row_view(
     row: &LoginRow,
     ix: usize,
     hovered: bool,
+    row_focus: FocusHandle,
     t: &Theme,
     view: &WeakEntity<TidyView>,
 ) -> AnyElement {
@@ -557,36 +558,41 @@ fn login_row_view(
     let hover_view = view.clone();
     let hover_key = key.clone();
     let reveal_path = row.plist.clone().or(row.program.clone());
-    let actions = hovered.then(|| {
+    let actions = Some({
         let reveal = reveal_path.map(|path| {
-            icon_button(
-                ("sec-login-reveal", ix),
-                format!("sec-reveal:{key}"),
-                IconName::FolderSearch,
-                t,
-                move |_, cx| open_path(OpenKind::Reveal, &path, cx),
-            )
+            row_action(hovered, format!("sec-reveal:{key}"), |selector| {
+                icon_button(
+                    ("sec-login-reveal", ix),
+                    selector,
+                    IconName::FolderSearch,
+                    t,
+                    move |_, cx| open_path(OpenKind::Reveal, &path, cx),
+                )
+            })
         });
         let trash = row.can_trash.then(|| {
             let view = view.clone();
             let trash_key = key.clone();
             let label = row.label.clone();
-            icon_button(
-                ("sec-login-trash", ix),
-                format!("sec-trash:{key}"),
-                IconName::Trash,
-                t,
-                move |_, cx| {
-                    let (key, label) = (trash_key.clone(), label.clone());
-                    let _ = view.update(cx, |v, cx| v.request_trash_login_item(key, label, cx));
-                },
-            )
+            row_action(hovered, format!("sec-trash:{key}"), |selector| {
+                icon_button(
+                    ("sec-login-trash", ix),
+                    selector,
+                    IconName::Trash,
+                    t,
+                    move |_, cx| {
+                        let (key, label) = (trash_key.clone(), label.clone());
+                        let _ = view.update(cx, |v, cx| v.request_trash_login_item(key, label, cx));
+                    },
+                )
+            })
         });
         div().flex().items_center().children(reveal).children(trash)
     });
     let selector_key = key.clone();
     div()
         .id(("sec-login", ix))
+        .track_focus(&row_focus)
         .debug_selector(move || format!("sec-login:{selector_key}"))
         .w_full()
         .h(px(60.))
@@ -843,6 +849,7 @@ impl TidyView {
             Some(report) => {
                 let rows = snap.rows.clone();
                 let hovered = self.hovered.clone();
+                let keyboard_row = self.keyboard_row.clone();
                 let dim = snap.running.is_some();
                 let list = div()
                     .id("security-list")
@@ -863,8 +870,11 @@ impl TidyView {
                             first,
                         } => check_row(check, *updates_button, *first, ix, t, &model),
                         SecRow::Login(l) => {
-                            let hovered = hovered.as_deref() == Some(l.key.as_str());
-                            login_row_view(l, ix, hovered, t, &view)
+                            let focus_key = format!("sec:{}", l.key);
+                            let inside = keyboard_row.as_deref() == Some(focus_key.as_str());
+                            let hovered = inside || hovered.as_deref() == Some(l.key.as_str());
+                            let handle = RowFocus::handle(&focus_key, cx);
+                            login_row_view(l, ix, hovered, handle, t, &view)
                         }
                         SecRow::Extension(e) => extension_row_view(e, ix, t),
                     }));

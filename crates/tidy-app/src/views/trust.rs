@@ -21,7 +21,8 @@ use crate::format;
 use crate::theme::{DisplayType, MONO_FONT, Theme, figure, motion as m, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::overlay::{self, Phase, Sheet};
-use crate::views::{glyph_tile, hairline, icon_button, tag, text_button};
+use crate::views::{KeyStop, glyph_tile, hairline, icon_button, tag, text_button};
+use gpui_kit::base::FocusTrapElement as _;
 
 // ---------- item details (17.1) ----------
 
@@ -557,7 +558,12 @@ impl TidyView {
                     .position(at.at)
                     .offset(point(px(0.), px(14.)))
                     .snap_to_window_with_margin(px(8.))
-                    .child(overlay::present_popover(card, phase)),
+                    .child(if leaving {
+                        overlay::present_popover(card, phase)
+                    } else {
+                        let card = card.focus_trap("details-trap", &self.traps.details);
+                        overlay::present_popover(card, phase)
+                    }),
             ))
             .into_any_element()
     }
@@ -866,7 +872,7 @@ impl TidyView {
                         "sysdata-close",
                         "sysdata-close".to_string(),
                         IconName::X,
-                        t,
+                        &t.on(t.pop_bg),
                         move |_, cx| {
                             close_model.update(cx, |m, cx| m.close_system_data(cx));
                         },
@@ -888,7 +894,13 @@ impl TidyView {
                     scrim_model.update(cx, |m, cx| m.close_system_data(cx));
                 })
             });
-        overlay::present(Sheet::SystemData, scrim, card, phase)
+        // Tab and Shift-Tab stay inside the sheet while it is open.
+        if leaving {
+            overlay::present(Sheet::SystemData, scrim, card, phase)
+        } else {
+            let card = card.focus_trap("sysdata-trap", &self.traps.system_data);
+            overlay::present(Sheet::SystemData, scrim, card, phase)
+        }
     }
 
     /// The Check up row that opens the sheet: a settings row with a chevron.
@@ -912,6 +924,7 @@ impl TidyView {
             .on_click(move |_, _, cx| {
                 model.update(cx, |m, cx| m.open_system_data(cx));
             })
+            .key_stop(t)
             .child(
                 Icon::new(IconName::HardDrive)
                     .size(px(16.))

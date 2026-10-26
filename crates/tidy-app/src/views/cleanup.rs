@@ -18,8 +18,10 @@ use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{
-    DOTS_W, check_dots, checkbox, icon_button, large_button, plain_button, scroll_edge, tag,
+    DOTS_W, KeyStop, RowFocus, check_dots, checkbox, icon_button, icon_button_at, large_button,
+    plain_button, row_action, scroll_edge, tag,
 };
+use gpui_kit::base::FocusTrapElement as _;
 
 /// What the dots on a row count, said once under the Figure.
 pub const DOTS_NOTE: &str = "Dots count the checks passed before an item can move";
@@ -186,10 +188,12 @@ struct RowEnv {
     view: WeakEntity<TidyView>,
     /// The key of the hovered row (or the one a demo forces).
     hovered: Option<String>,
+    /// The key of the row the keyboard is on (see `RowFocus`).
+    keyboard_row: Option<String>,
     reduce_motion: bool,
 }
 
-fn render_row(row: &CleanRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement {
+fn render_row(row: &CleanRow, ix: usize, t: &Theme, env: &RowEnv, cx: &mut App) -> AnyElement {
     match row {
         CleanRow::Header {
             group,
@@ -199,7 +203,11 @@ fn render_row(row: &CleanRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement 
             bytes,
             ..
         } => render_header(*group, *expanded, *tri, *count, *bytes, ix, t, env),
-        CleanRow::Item(item) => render_item(item, ix, t, env),
+        CleanRow::Item(item) => {
+            let key = format!("clean:{}", item.id);
+            let inside = env.keyboard_row.as_deref() == Some(key.as_str());
+            render_item(item, ix, t, env, RowFocus::handle(&key, cx), inside)
+        }
     }
 }
 
@@ -243,6 +251,7 @@ fn render_header(
                 .on_click(move |_, _, cx| {
                     toggle_model.update(cx, |m, cx| m.toggle_collapsed(group, cx));
                 })
+                .key_stop(t)
                 .child(
                     Icon::new(if expanded {
                         IconName::ChevronDown
@@ -297,9 +306,17 @@ fn render_header(
         .into_any_element()
 }
 
-fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement {
+fn render_item(
+    item: &ItemRow,
+    ix: usize,
+    t: &Theme,
+    env: &RowEnv,
+    row_focus: FocusHandle,
+    keyboard_inside: bool,
+) -> AnyElement {
     let id = item.id.clone();
-    let hovered = env.hovered.as_deref() == Some(id.as_str());
+    // The pointer or the keyboard is on the row: it shows its actions.
+    let hovered = keyboard_inside || env.hovered.as_deref() == Some(id.as_str());
     let hover_bg = t.row_hover;
     let row_model = env.model.clone();
     let check_model = env.model.clone();
@@ -340,44 +357,49 @@ fn render_item(item: &ItemRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
             .into_any_element()
     };
 
-    let actions = hovered.then(|| {
+    let actions = Some(
         div()
             .flex()
             .items_center()
-            .child(icon_button(
-                ("clean-details", ix),
-                details_selector,
-                IconName::Info,
-                t,
-                move |window, cx| {
-                    let at = window.mouse_position();
-                    let id = details_id.clone();
-                    let _ = details_view.update(cx, |v, cx| v.open_details(id, at, cx));
-                },
-            ))
-            .child(icon_button(
-                ("clean-reveal", ix),
-                reveal_selector,
-                IconName::FolderSearch,
-                t,
-                move |_, cx| open_path(OpenKind::Reveal, &reveal_path, cx),
-            ))
-            .child(icon_button(
-                ("clean-more", ix),
-                more_selector,
-                IconName::Ellipsis,
-                t,
-                move |window, cx| {
-                    let at = window.mouse_position();
-                    let (id, path) = (menu_row_id.clone(), menu_path.clone());
-                    let _ = menu_view.update(cx, |v, cx| v.open_row_menu(id, path, at, cx));
-                },
-            ))
-    });
+            .child(row_action(hovered, details_selector, |selector| {
+                icon_button_at(
+                    ("clean-details", ix),
+                    selector,
+                    IconName::Info,
+                    t,
+                    move |at, _, cx| {
+                        let id = details_id.clone();
+                        let _ = details_view.update(cx, |v, cx| v.open_details(id, at, cx));
+                    },
+                )
+            }))
+            .child(row_action(hovered, reveal_selector, |selector| {
+                icon_button(
+                    ("clean-reveal", ix),
+                    selector,
+                    IconName::FolderSearch,
+                    t,
+                    move |_, cx| open_path(OpenKind::Reveal, &reveal_path, cx),
+                )
+            }))
+            .child(row_action(hovered, more_selector, |selector| {
+                icon_button_at(
+                    ("clean-more", ix),
+                    selector,
+                    IconName::Ellipsis,
+                    t,
+                    move |at, _, cx| {
+                        let (id, path) = (menu_row_id.clone(), menu_path.clone());
+                        let _ = menu_view.update(cx, |v, cx| v.open_row_menu(id, path, at, cx));
+                    },
+                )
+            })),
+    );
 
     let el =
         div()
             .id(("clean-item", ix))
+            .track_focus(&row_focus)
             .debug_selector(move || format!("clean-row:{selector_id}"))
             .w_full()
             .h(px(metrics::CLEANUP_ROW_H))
@@ -551,6 +573,7 @@ impl TidyView {
         let view = cx.entity().downgrade();
         let close = view.clone();
         let hover = t.row_hover;
+        let on_menu = t.on(t.pop_bg);
         let card = div()
             .debug_selector(|| "row-menu".to_string())
             .min_w(px(180.))
@@ -581,7 +604,9 @@ impl TidyView {
                     .on_click(move |_, _, cx| {
                         let _ = view.update(cx, |v, cx| v.run_menu_entry(entry, cx));
                     })
-            }));
+                    .key_stop(&on_menu)
+            }))
+            .focus_trap("row-menu-trap", &self.traps.menu);
         div()
             .absolute()
             .inset_0()
@@ -764,6 +789,7 @@ impl TidyView {
             let env_model = model.clone();
             let env_view = view.clone();
             let hovered = self.hovered.clone();
+            let keyboard_row = self.keyboard_row.clone();
             let dim = snap.scanning.is_some();
             let count = rows.len();
             let list = uniform_list("cleanup-rows", count, move |range, window, cx| {
@@ -772,10 +798,11 @@ impl TidyView {
                     model: env_model.clone(),
                     view: env_view.clone(),
                     hovered: hovered.clone(),
+                    keyboard_row: keyboard_row.clone(),
                     reduce_motion: cx.reduce_motion(),
                 };
                 range
-                    .filter_map(|ix| rows.get(ix).map(|row| render_row(row, ix, &t, &env)))
+                    .filter_map(|ix| rows.get(ix).map(|row| render_row(row, ix, &t, &env, cx)))
                     .collect::<Vec<AnyElement>>()
             })
             .track_scroll(&self.cleanup_scroll)
@@ -791,7 +818,7 @@ impl TidyView {
                 .flex_col()
                 .child(self.summary_strip(t, &snap, now))
                 .child(scroll_edge(t, scrolled))
-                .child(list)
+                .child(self.list_frame(list))
                 .into_any_element()
         };
 
@@ -813,7 +840,7 @@ impl TidyView {
                     "empty-trash".to_string(),
                     "Empty Trash\u{2026}",
                     true,
-                    t,
+                    &t.on(t.bar_bg),
                     move |_, cx| {
                         let _ = view.update(cx, |v, cx| v.request_empty_trash(cx));
                     },

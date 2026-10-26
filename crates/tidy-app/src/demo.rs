@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui_kit::*;
+use tidy_core::model::{Action, HistoryEntry, HistoryItem, ItemResult, Source, TrasherKind};
 use tidy_core::model::{
     AppMemory, CheckId, CheckResult, Checkup, CheckupCleanup, CheckupMemory, CheckupSecurity,
     ChromeExtension, Class, FolderNode, Group, Item, LargeItem, LargeKind, LargeScan, LaunchKind,
@@ -102,10 +103,16 @@ pub enum Scenario {
     SystemDataReport,
     /// Cleanup with a Review row ticked and the Move to Trash receipt open.
     CleanupConfirm,
+    /// Cleanup with the History sheet open: four entries, the newest one opened. Its items are
+    /// in the Trash and can be put back from Finder, and one skipped item is still in place
+    /// with Reveal.
+    History,
+    /// Cleanup with the keyboard on a row checkbox: the focus ring, and the row's actions.
+    CleanupFocus,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 20] = [
+    pub const ALL: [Scenario; 22] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -126,6 +133,8 @@ impl Scenario {
         Scenario::CheckupTrust,
         Scenario::SystemDataReport,
         Scenario::CleanupConfirm,
+        Scenario::History,
+        Scenario::CleanupFocus,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -156,6 +165,8 @@ impl Scenario {
             Scenario::CheckupTrust => "checkup-trust",
             Scenario::SystemDataReport => "system-data-report",
             Scenario::CleanupConfirm => "cleanup-confirm",
+            Scenario::History => "history",
+            Scenario::CleanupFocus => "cleanup-focus",
         }
     }
 
@@ -165,7 +176,9 @@ impl Scenario {
             | Scenario::CleanupDone
             | Scenario::CleanupEmpty
             | Scenario::CleanupWhy
-            | Scenario::CleanupConfirm => Screen::Cleanup,
+            | Scenario::CleanupConfirm
+            | Scenario::History
+            | Scenario::CleanupFocus => Screen::Cleanup,
             Scenario::Checkup
             | Scenario::SystemData
             | Scenario::SystemDataReport
@@ -283,6 +296,11 @@ pub struct DemoState {
     pub details: Option<(String, f32, f32)>,
     /// The Move to Trash receipt starts open.
     pub confirm: bool,
+    /// The History sheet starts open, with its newest entry expanded.
+    pub history: bool,
+    /// The row (its `RowFocus` key) whose first control gets the keyboard focus, drawn with
+    /// the focus ring. A hidden window has no keyboard, so the export moves the focus itself.
+    pub focus_row: Option<String>,
 }
 
 impl Global for DemoState {}
@@ -317,6 +335,9 @@ impl DemoState {
             // Where the Spotify row's Details button sits: the popover's top right corner
             // hangs under it.
             confirm: scenario == Scenario::CleanupConfirm,
+            history: scenario == Scenario::History,
+            focus_row: (scenario == Scenario::CleanupFocus)
+                .then(|| "clean:cache.app:Library/Caches/com.spotify.client".to_string()),
             details: (scenario == Scenario::CleanupWhy).then(|| {
                 (
                     "cache.app:Library/Caches/com.spotify.client".to_string(),
@@ -1154,6 +1175,14 @@ fn render_first_window(cx: &mut App) -> anyhow::Result<image::RgbaImage> {
         }
         // The state is fixed, so this frame is the creation frame, drawn for certain.
         window.draw(cx).clear(cx);
+        if let Some(key) = state(cx).and_then(|d| d.focus_row.clone()) {
+            // Put the keyboard on the row's first control, as one Tab from the row would. Two
+            // draws: the first registers the tab stops, the second shows the ring and actions.
+            crate::views::RowFocus::handle(&key, cx).focus(window, cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        }
         window.render_to_image()
     })?
 }
@@ -1196,6 +1225,8 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
         | Scenario::CleanupDone
         | Scenario::CleanupWhy
         | Scenario::CleanupConfirm
+        | Scenario::History
+        | Scenario::CleanupFocus
         | Scenario::Checkup
         | Scenario::SystemData
         | Scenario::SystemDataReport
@@ -1212,6 +1243,11 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
             m.cleanup
                 .ticked
                 .insert("cache.unknown:Library/Caches/com.example.updater".to_string());
+        }
+        Scenario::History => {
+            let (entries, present) = history_entries();
+            m.history.entries = Some(entries);
+            m.history.present = present;
         }
         Scenario::CleanupDone => {
             if let Some(plan) = &m.cleanup.plan {
@@ -1299,6 +1335,140 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
     }
 }
 
+/// The id of the History entry the `history` scenario opens.
+pub fn history_open_entry() -> String {
+    HistoryEntry::make_id(NOW - 2 * 3_600, 1)
+}
+
+/// Four History entries, oldest first as the core stores them, and the original paths that are
+/// still in place (the skipped Chrome cache, which gets a Reveal button). The newest entry's
+/// moved items are in the Trash, where Finder's Put Back restores them.
+pub fn history_entries() -> (Vec<HistoryEntry>, std::collections::HashSet<PathBuf>) {
+    let item = |rel: &str, bytes: u64, rule: &str, result: ItemResult, reason: Option<&str>| {
+        let path = PathBuf::from(ROOT).join(rel);
+        HistoryItem {
+            trash_path: (result == ItemResult::Trashed).then(|| {
+                PathBuf::from(ROOT)
+                    .join(".Trash")
+                    .join(rel.rsplit('/').next().unwrap_or(rel))
+            }),
+            path,
+            bytes,
+            rule: rule.to_string(),
+            result,
+            reason: reason.map(str::to_string),
+            trash_id: None,
+        }
+    };
+    let entry = |at: u64, seq: u32, action: Action, source: Source, items: Vec<HistoryItem>| {
+        let trashed_bytes = items
+            .iter()
+            .filter(|i| matches!(i.result, ItemResult::Trashed | ItemResult::Deleted))
+            .map(|i| i.bytes)
+            .sum();
+        HistoryEntry {
+            id: HistoryEntry::make_id(at, seq),
+            at,
+            action,
+            source,
+            trasher: TrasherKind::System,
+            items,
+            trashed_bytes,
+            message: None,
+        }
+    };
+    let skipped_chrome = PathBuf::from(ROOT).join("Library/Caches/Google/Chrome");
+    let entries = vec![
+        entry(
+            NOW - 9 * DAY,
+            1,
+            Action::Clean,
+            Source::Cleanup,
+            vec![
+                item(
+                    "Library/Caches/pip",
+                    640 * MB,
+                    "dev.pip",
+                    ItemResult::Deleted,
+                    None,
+                ),
+                item(
+                    "Library/Logs/DiagnosticReports",
+                    90 * MB,
+                    "logs.diagnostic",
+                    ItemResult::Deleted,
+                    None,
+                ),
+            ],
+        ),
+        entry(
+            NOW - 5 * DAY,
+            1,
+            Action::Trash,
+            Source::Large,
+            vec![item(
+                "Movies/2024/old-render.mov",
+                4_100 * MB,
+                "large",
+                ItemResult::Trashed,
+                None,
+            )],
+        ),
+        entry(
+            NOW - 3 * DAY,
+            1,
+            Action::EmptyTrash,
+            Source::Cleanup,
+            vec![
+                item(
+                    ".Trash/old-render.mov",
+                    4_100 * MB,
+                    "trash",
+                    ItemResult::Deleted,
+                    None,
+                ),
+                item(
+                    ".Trash/node-gyp",
+                    135 * MB,
+                    "trash",
+                    ItemResult::Deleted,
+                    None,
+                ),
+            ],
+        ),
+        entry(
+            NOW - 2 * 3_600,
+            1,
+            Action::Clean,
+            Source::Cleanup,
+            vec![
+                item(
+                    "Library/Caches/node-gyp",
+                    135 * MB,
+                    "dev.node-gyp",
+                    ItemResult::Trashed,
+                    None,
+                ),
+                item(
+                    "Library/Caches/com.spotify.client",
+                    1_400 * MB,
+                    "cache.app",
+                    ItemResult::Trashed,
+                    None,
+                ),
+                item(
+                    "Library/Caches/Google/Chrome",
+                    1_200 * MB,
+                    "cache.chrome",
+                    ItemResult::Skipped,
+                    Some("Google Chrome is running"),
+                ),
+            ],
+        ),
+    ];
+    (entries, [skipped_chrome].into_iter().collect())
+}
+
 /// Starts the demo inside `app.run`, after `gpui_kit::init` and `tidy_app::init`: no core, a
 /// tokio runtime (so SIGTERM quits cleanly), fixed state, then the window. Never activates the
 /// app and quits itself after `TIDY_DEMO_EXIT_SECS` (default 30).
@@ -1306,6 +1476,10 @@ pub fn start(scenario: Scenario, rt: tokio::runtime::Runtime, cx: &mut App) {
     set_accessory_policy();
     // One-shot motions render their end state on the only frame.
     cx.set_reduce_motion(true);
+    // The focus scenario is a keyboard scenario: the ring is drawn.
+    if scenario == Scenario::CleanupFocus {
+        crate::theme::set_ring_visible(true);
+    }
 
     install_demo(rt, settings(), cx);
     cx.set_global(DemoState::new(scenario));
@@ -1350,7 +1524,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 20);
+        assert_eq!(Scenario::ALL.len(), 22);
     }
 
     #[test]

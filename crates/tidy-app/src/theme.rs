@@ -104,6 +104,25 @@ pub struct Theme {
     /// Device pixels per point of the window the tokens are for (2 on Retina, 1 on a
     /// standard display). Hairline edges depend on it, see [`Theme::edge`].
     pub scale: f32,
+    /// Whether the last input was the keyboard. Only then do controls draw their focus ring,
+    /// so a click never leaves a ring behind. See [`Theme::focus_shadow`] and [`ring_visible`].
+    pub focus_ring: bool,
+}
+
+thread_local! {
+    static RING_VISIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether focus rings are drawn: true after a key press, false after a mouse press. GPUI's own
+/// `focus_visible` follows the last input too, but it also flips back on a mouse move, which
+/// would hide the ring when the trackpad is brushed. Tidy flips on key and mouse presses only.
+pub fn ring_visible() -> bool {
+    RING_VISIBLE.with(|c| c.get())
+}
+
+/// Sets [`ring_visible`]. Returns true when the value changed.
+pub fn set_ring_visible(on: bool) -> bool {
+    RING_VISIBLE.with(|c| c.replace(on) != on)
 }
 
 impl Theme {
@@ -150,6 +169,7 @@ impl Theme {
             danger_button: error_badge,
             surface: hex(0xfafaf8),
             scale: 2.,
+            focus_ring: false,
         }
     }
 
@@ -196,6 +216,7 @@ impl Theme {
             danger_button: hex(0xc62d1f),
             surface: hex(0x0b0c0b),
             scale: 2.,
+            focus_ring: false,
         }
     }
 
@@ -207,7 +228,10 @@ impl Theme {
     }
 
     pub fn of(window: &Window) -> Theme {
-        Theme::for_appearance(window.appearance()).at_scale(window.scale_factor())
+        Theme {
+            focus_ring: ring_visible(),
+            ..Theme::for_appearance(window.appearance()).at_scale(window.scale_factor())
+        }
     }
 
     /// The same tokens for a window at `scale` device pixels per point.
@@ -294,6 +318,26 @@ impl Theme {
         }
     }
 
+    /// The keyboard focus ring: a 2 pt ring in `text` (ink in light, near white in dark) set
+    /// 2 pt off the control, with the gap painted in `surface` so the ring also reads on an ink
+    /// button or a selected row. `base` is the control's own shadow (a secondary button's edge),
+    /// kept inside the ring. Ink on any surface is above 3:1, see `documented_pairs`.
+    pub fn focus_shadow(&self, base: Vec<BoxShadow>) -> Vec<BoxShadow> {
+        let spread = |width: f32, color: Hsla| BoxShadow {
+            color,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(width),
+            inset: false,
+        };
+        let mut shadows = vec![
+            spread(FOCUS_GAP + FOCUS_RING_W, self.text),
+            spread(FOCUS_GAP, self.surface),
+        ];
+        shadows.extend(base);
+        shadows
+    }
+
     /// A 0.5 pt ring with no blur, the mockup's `0 0 0 .5px` hairline. At 2x it is one device
     /// pixel. At 1x gpui draws a 0.5 px spread as a whole pixel at full strength, about twice
     /// as dark as the browser's half-covered pixel, so there it is one pixel at half alpha.
@@ -312,6 +356,11 @@ impl Theme {
         }
     }
 }
+
+/// Width of the keyboard focus ring, in points.
+pub const FOCUS_RING_W: f32 = 2.;
+/// Gap between a control and its focus ring, in points.
+pub const FOCUS_GAP: f32 = 2.;
 
 /// Sizes from the design (section 11), in points.
 pub mod metrics {
@@ -634,7 +683,31 @@ mod tests {
                 3.0,
             ),
             ("ok dot on window", t.success, t.window_bg, 3.0),
+            ("focus ring on window", t.text, t.window_bg, 3.0),
+            ("focus ring on sidebar", t.text, t.sidebar_bg, 3.0),
+            ("focus ring on dialog", t.text, t.pop_bg, 3.0),
+            ("focus ring on band (fill)", t.text, t.fill, 3.0),
+            ("focus ring on status bar", t.text, t.bar_bg, 3.0),
+            ("focus ring on hovered row", t.text, band(t.row_hover), 3.0),
+            ("focus ring on card", t.text, t.card_bg(), 3.0),
         ]
+    }
+
+    #[test]
+    fn the_focus_ring_is_two_points_wide_and_two_points_off_the_control() {
+        for t in [Theme::light(), Theme::dark()] {
+            let ring = t.focus_shadow(t.button_shadow());
+            // Ink ring first (painted underneath), then the gap in the surface color, then the
+            // control's own edge.
+            assert_eq!(ring.len(), 3);
+            assert_eq!(ring[0].color, t.text);
+            assert_eq!(ring[1].color, t.surface);
+            let spread = |i: usize| f32::from(ring[i].spread_radius);
+            assert_eq!(spread(1), FOCUS_GAP);
+            assert_eq!(spread(0) - spread(1), FOCUS_RING_W);
+            assert_eq!(FOCUS_RING_W, 2.);
+            assert_eq!(FOCUS_GAP, 2.);
+        }
     }
 
     #[test]

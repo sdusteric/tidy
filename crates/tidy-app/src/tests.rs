@@ -74,6 +74,8 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> Harness {
     let (term_global, notify_global) = (terminator.clone(), notifier.clone());
     let clock = Arc::new(FixedClock::new(NOW));
     let now_clock = clock.clone();
+    // Each test starts with the pointer in charge: no focus rings.
+    crate::theme::set_ring_visible(false);
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::init(cx);
@@ -176,6 +178,59 @@ fn hover(cx: &mut VisualTestContext, selector: &str) {
 fn keys(cx: &mut VisualTestContext, keystrokes: &str) {
     cx.simulate_keystrokes(keystrokes);
     cx.run_until_parked();
+}
+
+/// Space or Return as a person presses it: the key goes down, then up. GPUI clicks the focused
+/// control on the release, and `simulate_keystrokes` sends only the press.
+fn press(cx: &mut VisualTestContext, key: &str) {
+    keys(cx, key);
+    let stroke = Keystroke::parse(key).unwrap();
+    cx.update(|window, cx| {
+        window.dispatch_event(KeyUpEvent { keystroke: stroke }.to_platform_input(), cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Draws the frames a display would draw after an input: a move that scrolls a long list
+/// finishes on the frame after the one that shows the scrolled rows.
+fn frames(cx: &mut VisualTestContext) {
+    for _ in 0..4 {
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+    }
+}
+
+fn tab(cx: &mut VisualTestContext) {
+    keys(cx, "tab");
+    frames(cx);
+}
+
+fn shift_tab(cx: &mut VisualTestContext) {
+    keys(cx, "shift-tab");
+    frames(cx);
+}
+
+/// The element id of the control that holds the keyboard focus, or "none" when no tab stop does.
+/// A key nothing is bound to travels the focus path, and each stop on it notes its id.
+fn focused_stop(cx: &mut VisualTestContext) -> String {
+    crate::views::FOCUS_PROBE.with(|p| *p.borrow_mut() = None);
+    keys(cx, "f13");
+    crate::views::FOCUS_PROBE
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+/// Presses Tab `n` times and returns the stop after each press.
+fn tab_walk(cx: &mut VisualTestContext, n: usize) -> Vec<String> {
+    (0..n)
+        .map(|_| {
+            tab(cx);
+            focused_stop(cx)
+        })
+        .collect()
 }
 
 fn advance(cx: &mut VisualTestContext, ms: u64) {
@@ -669,12 +724,19 @@ fn review_items_ask_first(cx: &mut TestAppContext) {
 }
 
 #[::gpui::test]
-fn return_confirms_the_dialog(cx: &mut TestAppContext) {
+fn return_presses_the_focused_dialog_button_which_starts_as_cancel(cx: &mut TestAppContext) {
     let (mut h, view, cx) = open_with_plan(cx);
     click(cx, "clean-check:r:b");
     click(cx, "clean-button");
     assert!(dialog_of(&view, cx).is_some());
-    keys(cx, "enter");
+    // Return used to confirm. Now the safe button has the focus, so Return cancels.
+    press(cx, "enter");
+    assert!(dialog_of(&view, cx).is_none());
+    assert!(h.drain().is_empty(), "nothing is sent");
+
+    click(cx, "clean-button");
+    tab(cx);
+    press(cx, "enter");
     assert!(dialog_of(&view, cx).is_none());
     assert!(matches!(h.drain()[..], [Command::Clean { .. }]));
 }
@@ -1592,7 +1654,9 @@ fn moving_to_trash_always_asks_and_names_the_risks(cx: &mut TestAppContext) {
     );
     assert!(h.drain().is_empty(), "nothing moves before Move to Trash");
 
-    keys(cx, "enter");
+    // Cancel has the focus, so Return alone would cancel. Tab to Move to Trash, then Return.
+    tab(cx);
+    press(cx, "enter");
     let cmds = h.drain();
     match &cmds[..] {
         [Command::TrashPaths { paths }] => assert_eq!(
@@ -3481,4 +3545,397 @@ fn an_opened_history_entry_fades_its_items_in_and_closes_at_once(cx: &mut TestAp
     );
     click(cx, "history-entry-0");
     assert!(!has(cx, "history-item-0-0"), "closing is instant");
+}
+
+// ---------- keyboard access ----------
+
+/// A Cleanup plan with `n` Safe items, enough rows to scroll.
+fn long_plan(n: usize) -> Plan {
+    let mut plan = Plan::empty("/fake", NOW - 120);
+    plan.items = (0..n)
+        .map(|i| {
+            item(
+                &format!("row{i:02}"),
+                Group::Caches,
+                Class::Safe,
+                (100 + i as u64) * MB,
+                None,
+            )
+        })
+        .collect();
+    plan.sort();
+    plan
+}
+
+/// Presses Tab until the focus is on the stop with this id, at most `limit` times.
+fn tab_to(cx: &mut VisualTestContext, id: &str, limit: usize) {
+    for _ in 0..limit {
+        if focused_stop(cx) == id {
+            return;
+        }
+        tab(cx);
+    }
+    assert_eq!(
+        focused_stop(cx),
+        id,
+        "no Tab stop {id} within {limit} presses"
+    );
+}
+
+fn ticked(cx: &mut VisualTestContext, id: &str) -> bool {
+    model(cx).read_with(cx, |m, _| {
+        m.cleanup
+            .plan
+            .as_ref()
+            .and_then(|p| p.item(id))
+            .is_some_and(|i| m.cleanup.is_ticked(i))
+    })
+}
+
+#[::gpui::test]
+fn tab_walks_the_sidebar_then_the_toolbar_then_the_rows(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    assert_eq!(
+        focused_stop(cx),
+        "none",
+        "the window opens with no control focused"
+    );
+    let walk = tab_walk(cx, 17);
+    assert_eq!(
+        walk,
+        [
+            // The sidebar, top to bottom.
+            "sidebar-row-0",
+            "sidebar-row-1",
+            "sidebar-row-2",
+            "sidebar-row-3",
+            "sidebar-row-4",
+            // The toolbar, left to right.
+            "history",
+            "rescan",
+            "clean",
+            // The first group: its band, its checkbox, then each row's checkbox and actions.
+            "clean-band-0",
+            "group-check-0",
+            "clean-check-1",
+            "clean-details-1",
+            "clean-reveal-1",
+            "clean-more-1",
+            "clean-check-2",
+            "clean-details-2",
+            "clean-reveal-2",
+        ]
+    );
+}
+
+#[::gpui::test]
+fn shift_tab_walks_the_same_stops_backward_and_wraps(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    let forward = tab_walk(cx, 12);
+    let mut back = Vec::new();
+    for _ in 0..11 {
+        shift_tab(cx);
+        back.push(focused_stop(cx));
+    }
+    let mut expected: Vec<String> = forward[..11].to_vec();
+    expected.reverse();
+    assert_eq!(back, expected);
+    // Shift-Tab from the first stop goes to the last one on the screen.
+    assert_eq!(focused_stop(cx), "sidebar-row-0");
+    shift_tab(cx);
+    assert_ne!(focused_stop(cx), "sidebar-row-0");
+    assert_ne!(focused_stop(cx), "none");
+}
+
+#[::gpui::test]
+fn return_presses_the_focused_sidebar_row(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    tab_to(cx, "sidebar-row-2", 10);
+    press(cx, "enter");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Large);
+    // The focus stays on the row, so the next key is still on the sidebar.
+    assert_eq!(focused_stop(cx), "sidebar-row-2");
+    tab_to(cx, "sidebar-row-0", 10);
+    shift_tab(cx);
+    tab_to(cx, "sidebar-row-0", 10);
+    press(cx, "space");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Checkup);
+}
+
+#[::gpui::test]
+fn space_and_return_toggle_the_focused_checkbox(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    assert!(ticked(cx, "r:a"));
+    tab_to(cx, "clean-check-1", 30);
+    press(cx, "space");
+    assert!(!ticked(cx, "r:a"), "Space unticks Spotify");
+    press(cx, "enter");
+    assert!(ticked(cx, "r:a"), "Return ticks it again");
+    // Pressing the key down alone does nothing: a control acts on the release.
+    keys(cx, "space");
+    assert!(ticked(cx, "r:a"));
+}
+
+#[::gpui::test]
+fn a_row_shows_its_actions_while_the_keyboard_is_on_it(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    assert!(!has(cx, "clean-reveal:r:a") && !has(cx, "clean-reveal:r:b"));
+    tab_to(cx, "clean-check-1", 30);
+    assert!(
+        has(cx, "clean-details:r:a") && has(cx, "clean-reveal:r:a") && has(cx, "clean-more:r:a"),
+        "the focused row shows its three actions"
+    );
+    assert!(!has(cx, "clean-reveal:r:b"), "and the others do not");
+    tab(cx);
+    assert_eq!(focused_stop(cx), "clean-details-1");
+    assert!(has(cx, "clean-more:r:a"));
+    tab_to(cx, "clean-check-2", 10);
+    assert!(!has(cx, "clean-reveal:r:a") && has(cx, "clean-reveal:r:b"));
+    // A click hands the screen back to the pointer: no row keeps its actions.
+    click(cx, "sidebar-cleanup");
+    assert!(!has(cx, "clean-reveal:r:b"));
+}
+
+#[::gpui::test]
+fn the_focus_ring_shows_after_a_key_and_hides_after_a_click(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    let ring = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| crate::theme::Theme::of(window).focus_ring)
+    };
+    assert!(!ring(cx), "no ring before the keyboard is used");
+    tab(cx);
+    assert!(ring(cx));
+    // Moving the pointer does not hide it: only a press does.
+    hover(cx, "clean-row:r:a");
+    assert!(ring(cx));
+    click(cx, "clean-check:r:a");
+    assert!(!ring(cx));
+    tab(cx);
+    assert!(ring(cx));
+}
+
+#[::gpui::test]
+fn a_dialog_opens_on_cancel_keeps_tab_inside_and_return_cancels(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    click(cx, "clean-check:r:b");
+    tab_to(cx, "clean", 30);
+    press(cx, "enter");
+    assert!(dialog_of(&view, cx).is_some(), "Return on Clean asks first");
+    assert_eq!(
+        focused_stop(cx),
+        "dialog-cancel",
+        "the safe button has the focus"
+    );
+
+    // Tab and Shift-Tab cycle between the two buttons and never leave the dialog.
+    let walk = tab_walk(cx, 5);
+    assert_eq!(
+        walk,
+        [
+            "dialog-confirm",
+            "dialog-cancel",
+            "dialog-confirm",
+            "dialog-cancel",
+            "dialog-confirm",
+        ]
+    );
+    shift_tab(cx);
+    assert_eq!(focused_stop(cx), "dialog-cancel");
+    shift_tab(cx);
+    assert_eq!(focused_stop(cx), "dialog-confirm");
+    tab(cx);
+
+    // Return on the default button cancels: nothing is sent.
+    assert_eq!(focused_stop(cx), "dialog-cancel");
+    press(cx, "enter");
+    assert!(dialog_of(&view, cx).is_none());
+    assert!(h.drain().is_empty());
+    // The focus went back to the button that opened it.
+    assert_eq!(focused_stop(cx), "clean");
+
+    // Tab to the action button and press it: that confirms.
+    press(cx, "enter");
+    assert!(dialog_of(&view, cx).is_some());
+    tab(cx);
+    assert_eq!(focused_stop(cx), "dialog-confirm");
+    press(cx, "space");
+    assert!(dialog_of(&view, cx).is_none());
+    assert!(matches!(h.drain()[..], [Command::Clean { .. }]));
+}
+
+#[::gpui::test]
+fn escape_cancels_a_dialog_from_either_button(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_with_plan(cx);
+    click(cx, "clean-check:r:b");
+    click(cx, "clean-button");
+    tab(cx);
+    assert_eq!(focused_stop(cx), "dialog-confirm");
+    keys(cx, "escape");
+    assert!(dialog_of(&view, cx).is_none() && h.drain().is_empty());
+    // Back on the toolbar, the window shortcuts still work.
+    keys(cx, "cmd-3");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Large);
+}
+
+#[::gpui::test]
+fn the_window_shortcuts_work_wherever_the_focus_is(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = open_with_plan(cx);
+    tab_to(cx, "rescan", 10);
+    // The rescan button is on Cleanup only; leaving the screen removes the focused control.
+    for (key, screen) in [
+        ("cmd-3", Screen::Large),
+        ("cmd-4", Screen::Memory),
+        ("cmd-5", Screen::Security),
+        ("cmd-1", Screen::Checkup),
+        ("cmd-2", Screen::Cleanup),
+    ] {
+        keys(cx, key);
+        assert_eq!(model(cx).read_with(cx, |m, _| m.screen), screen, "{key}");
+        tab(cx);
+        frames(cx);
+    }
+    h.drain();
+    tab_to(cx, "rescan", 20);
+    keys(cx, "cmd-r");
+    assert!(
+        h.drain().iter().any(|c| matches!(c, Command::ScanCleanup)),
+        "Cmd-R rescans with a control focused"
+    );
+}
+
+#[::gpui::test]
+fn the_row_menu_opens_from_the_keyboard_traps_tab_and_hands_the_focus_back(
+    cx: &mut TestAppContext,
+) {
+    let (_h, view, cx) = open_with_plan(cx);
+    tab_to(cx, "clean-more-1", 30);
+    press(cx, "enter");
+    assert!(view.read_with(cx, |v, _| v.menu.is_some()));
+    // The menu has three entries; Tab cycles through them and never leaves.
+    tab(cx);
+    let walk = tab_walk(cx, 7);
+    assert!(
+        walk.iter().all(|id| id.starts_with("menu-item-")),
+        "Tab stays in the menu: {walk:?}"
+    );
+    assert_eq!(
+        walk.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+    keys(cx, "escape");
+    assert!(view.read_with(cx, |v, _| v.menu.is_none()));
+    assert_eq!(focused_stop(cx), "clean-more-1");
+}
+
+#[::gpui::test]
+fn the_history_sheet_traps_tab_and_hands_the_focus_back(cx: &mut TestAppContext) {
+    let (_h, view, cx) = open_with_plan(cx);
+    tab_to(cx, "history", 10);
+    press(cx, "enter");
+    assert!(view.read_with(cx, |v, _| v.history_open));
+    model(cx).update(cx, |m, _| {
+        m.set_history(vec![entry(
+            Source::Cleanup,
+            Action::Clean,
+            vec![history_item("/fake/a", ItemResult::Trashed, None)],
+            GB,
+        )]);
+    });
+    let walk = tab_walk(cx, 6);
+    assert!(
+        walk.iter().all(|id| id.starts_with("history")),
+        "Tab stays in the sheet: {walk:?}"
+    );
+    assert!(walk.contains(&"history-close".to_string()));
+    assert!(walk.contains(&"history-entry-0".to_string()));
+    keys(cx, "escape");
+    assert!(!view.read_with(cx, |v, _| v.history_open));
+    assert_eq!(focused_stop(cx), "history");
+}
+
+#[::gpui::test]
+fn tab_scrolls_a_long_list_to_reach_every_row(cx: &mut TestAppContext) {
+    let h = setup(cx);
+    let (_view, cx) = open_main(cx);
+    push(&h, cx, vec![Event::CleanupPlan(long_plan(30))]);
+    // The group header is row 0, so the 30 items are rows 1 to 30. The window shows about a
+    // dozen rows, so most of them have no controls until the list scrolls.
+    tab_to(cx, "clean-check-1", 30);
+    let mut seen = Vec::new();
+    for _ in 0..140 {
+        tab(cx);
+        let id = focused_stop(cx);
+        if let Some(n) = id.strip_prefix("clean-check-") {
+            seen.push(n.parse::<usize>().unwrap());
+        }
+        if id == "clean-more-30" {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        (2..=30).collect::<Vec<_>>(),
+        "every row in order, none skipped"
+    );
+    // And back up to the top.
+    for _ in 0..140 {
+        shift_tab(cx);
+        if focused_stop(cx) == "clean-check-1" {
+            return;
+        }
+    }
+    panic!("Shift-Tab did not reach the first row again");
+}
+
+#[::gpui::test]
+fn large_files_controls_come_in_reading_order(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_scan(cx);
+    let walk = tab_walk(cx, 17);
+    assert_eq!(
+        walk[5..],
+        [
+            // The filter, the mode, the threshold and Rescan, left to right.
+            "large-filter-0",
+            "large-filter-1",
+            "large-mode-0",
+            "large-mode-1",
+            "threshold",
+            "large-rescan",
+            // Then the first rows: checkbox, Reveal, Move to Trash.
+            "large-check-0",
+            "large-reveal-0",
+            "large-trash-0",
+            "large-check-1",
+            "large-reveal-1",
+            "large-trash-1",
+        ]
+    );
+    // The last stop wraps to the first.
+    let more = tab_walk(cx, 2);
+    assert_eq!(more[0], "sidebar-row-0");
+}
+
+#[::gpui::test]
+fn the_checkup_buttons_cards_and_switches_are_tab_stops(cx: &mut TestAppContext) {
+    let (_h, _view, cx) = open_with_plan(cx);
+    keys(cx, "cmd-1");
+    frames(cx);
+    let walk = tab_walk(cx, 13);
+    assert_eq!(
+        walk[5..],
+        [
+            "run-checkup",
+            "include-updates",
+            "card-cleanup",
+            "checkup-clean",
+            "card-security",
+            "card-memory",
+            "reminder-toggle",
+            "sysdata-open",
+        ]
+    );
+    // A card opens its screen from the keyboard.
+    tab_to(cx, "card-security", 12);
+    press(cx, "enter");
+    assert_eq!(model(cx).read_with(cx, |m, _| m.screen), Screen::Security);
 }

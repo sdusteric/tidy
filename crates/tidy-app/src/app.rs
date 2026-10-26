@@ -44,8 +44,9 @@ actions!(
         Rescan,
         ParentFolder,
         TrashSelection,
-        DialogConfirm,
-        DialogCancel
+        DialogCancel,
+        FocusNext,
+        FocusPrev
     ]
 );
 
@@ -1526,9 +1527,20 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-r", Rescan, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-up", ParentFolder, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-backspace", TrashSelection, Some(ROOT_CONTEXT)),
-        KeyBinding::new("enter", DialogConfirm, Some(ROOT_CONTEXT)),
         KeyBinding::new("escape", DialogCancel, Some(ROOT_CONTEXT)),
+        // Tab and Shift-Tab move through the controls. Base binds the same keys one context
+        // higher; Tidy's own handler also scrolls a long list to its next row.
+        KeyBinding::new("tab", FocusNext, Some(ROOT_CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrev, Some(ROOT_CONTEXT)),
     ]);
+    // A key press shows the focus rings, a mouse press (see the main window) hides them. This
+    // runs before the key binding, so Tab itself shows the ring on the control it lands on.
+    cx.intercept_keystrokes(|_, window, _| {
+        if crate::theme::set_ring_visible(true) {
+            window.refresh();
+        }
+    })
+    .detach();
     // Components (the tooltip) follow the system appearance too.
     gpui_kit::component::theme::Theme::sync_system_appearance(None, cx);
     crate::theme::sync_component_tokens(cx);

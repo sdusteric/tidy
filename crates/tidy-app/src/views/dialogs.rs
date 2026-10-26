@@ -1,6 +1,7 @@
 //! Confirm dialogs (design section 11): 420 pt wide, a title, one sentence, the items in a
-//! scrollable box up to 200 pt high, and Cancel plus the action at the right. Return confirms
-//! and Escape cancels.
+//! scrollable box up to 200 pt high, and Cancel plus the action at the right. Cancel has the
+//! keyboard focus when the dialog opens, Tab and Shift-Tab stay inside it, Space or Return press
+//! the focused button (so Return alone cancels) and Escape cancels.
 //!
 //! The dialog is drawn inside the main window's view over a scrim, so it is part of the view
 //! state and the tests can see what it says. What a dialog asks for is plain data
@@ -13,7 +14,17 @@ use tidy_core::model::{Class, Item as CleanItem, TrashSummary};
 use crate::app::LargeEntry;
 use crate::format;
 use crate::theme::{DisplayType, Theme, metrics, tnum};
+use crate::views::KeyStop;
 use crate::views::overlay::{Phase, Sheet, present};
+use gpui_kit::base::FocusTrapElement as _;
+
+/// The focus handles of a live dialog: the container that traps Tab, and Cancel, which gets the
+/// focus first because it is the safe choice.
+#[derive(Clone)]
+pub struct DialogFocus {
+    pub trap: FocusHandle,
+    pub cancel: FocusHandle,
+}
 
 /// Shown when any selected item lives under `~/Library` (C10).
 pub const APP_DATA_NOTE: &str =
@@ -227,10 +238,14 @@ enum ButtonKind {
     Danger,
 }
 
+/// A live dialog's buttons are tab stops; a leaving copy's are not. `focus` is the handle to
+/// track when the caller needs to move focus to the button (Cancel).
 fn dialog_button(
     id: &'static str,
     label: String,
     kind: ButtonKind,
+    live: bool,
+    focus: Option<&FocusHandle>,
     t: &Theme,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -251,8 +266,12 @@ fn dialog_button(
         .child(label)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| on_click(window, cx));
+    let base = match focus {
+        Some(handle) => base.track_focus(handle),
+        None => base,
+    };
     let pressed = t.row_pressed;
-    match kind {
+    let button = match kind {
         ButtonKind::Secondary => base
             .bg(t.button_fill())
             .text_color(t.text)
@@ -266,6 +285,17 @@ fn dialog_button(
             .bg(t.danger_button)
             .text_color(gpui_kit::white())
             .active(|s| s.opacity(0.9)),
+    };
+    if live {
+        let base_shadow = if kind == ButtonKind::Secondary {
+            t.button_shadow()
+        } else {
+            Vec::new()
+        };
+        // The gap of the ring takes the card's color; the fill stays as it was.
+        button.key_stop_with(&t.on(t.pop_bg), base_shadow)
+    } else {
+        button
     }
 }
 
@@ -379,6 +409,7 @@ pub fn render_dialog(
     spec: &DialogSpec,
     t: &Theme,
     phase: Phase,
+    focus: Option<&DialogFocus>,
     on_cancel: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_confirm: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -431,13 +462,14 @@ pub fn render_dialog(
         .rounded(px(12.))
         .bg(t.pop_bg)
         .shadow(t.pop_shadow())
-        .flex()
-        .flex_col()
-        .gap(px(14.))
         // A click inside the card is not a click on the scrim.
         .when(!leaving, |d| {
             d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        })
+        });
+    let content = div()
+        .flex()
+        .flex_col()
+        .gap(px(14.))
         .child(
             div()
                 .debug_selector(|| "dialog-title".to_string())
@@ -486,6 +518,8 @@ pub fn render_dialog(
                     "dialog-cancel",
                     "Cancel".to_string(),
                     ButtonKind::Secondary,
+                    !leaving,
+                    focus.map(|f| &f.cancel),
                     t,
                     on_cancel,
                 ))
@@ -497,10 +531,18 @@ pub fn render_dialog(
                     } else {
                         ButtonKind::Primary
                     },
+                    // No handle of its own: gpui gives it one, in tab order after Cancel.
+                    !leaving,
+                    None,
                     t,
                     on_confirm,
                 )),
         );
+    // Tab and Shift-Tab cycle through the two buttons and never reach the screen underneath.
+    let card = match focus {
+        Some(f) => card.child(content.focus_trap("dialog-trap", &f.trap)),
+        None => card.child(content),
+    };
     let scrim = div()
         .id("dialog-scrim")
         .absolute()

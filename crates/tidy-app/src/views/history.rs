@@ -13,7 +13,8 @@ use crate::theme::motion as m;
 use crate::theme::{DisplayType, MONO_FONT, Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::overlay::{self, Phase, Sheet};
-use crate::views::{hairline, icon_button};
+use crate::views::{KeyStop, hairline, icon_button};
+use gpui_kit::base::FocusTrapElement as _;
 
 /// "Cleanup", "Large files" or "Emptied the Trash".
 pub fn action_label(action: Action) -> &'static str {
@@ -94,6 +95,7 @@ impl TidyView {
             .map(|p| p.root.clone())
             .unwrap_or_default();
         let hover = t.row_hover;
+        let on_sheet = t.on(t.pop_bg);
 
         let body: AnyElement = match entries {
             None => message(t, "Loading\u{2026}").into_any_element(),
@@ -122,6 +124,7 @@ impl TidyView {
                                 let id = id.clone();
                                 let _ = toggle.update(cx, |v, cx| v.toggle_history_entry(&id, cx));
                             })
+                            .key_stop(&on_sheet)
                             .child(
                                 div()
                                     .flex_1()
@@ -157,12 +160,13 @@ impl TidyView {
                             .into_any_element(),
                     );
                     if open {
-                        let items = div().flex().flex_col().children(
-                            e.items
-                                .iter()
-                                .enumerate()
-                                .map(|(k, item)| history_item(t, n, k, item, &root, &present)),
-                        );
+                        let items =
+                            div()
+                                .flex()
+                                .flex_col()
+                                .children(e.items.iter().enumerate().map(|(k, item)| {
+                                    history_item(t, &on_sheet, n, k, item, &root, &present)
+                                }));
                         // The entry just opened: its rows fade in; the rows below move at once.
                         let fade = match &opened {
                             Some((id, at, generation)) if *id == e.id => {
@@ -223,7 +227,7 @@ impl TidyView {
                         "history-close",
                         "history-close".to_string(),
                         IconName::X,
-                        t,
+                        &on_sheet,
                         move |_, cx| {
                             let _ = close_view.update(cx, |v, cx| {
                                 v.history_open = false;
@@ -251,7 +255,13 @@ impl TidyView {
                     });
                 })
             });
-        overlay::present(Sheet::History, scrim, card, phase)
+        // Tab and Shift-Tab stay inside the sheet while it is open.
+        if leaving {
+            overlay::present(Sheet::History, scrim, card, phase)
+        } else {
+            let card = card.focus_trap("history-trap", &self.traps.history);
+            overlay::present(Sheet::History, scrim, card, phase)
+        }
     }
 }
 
@@ -270,6 +280,7 @@ fn message(t: &Theme, text: &'static str) -> Div {
 /// is still where it was.
 fn history_item(
     t: &Theme,
+    on_sheet: &Theme,
     entry: usize,
     k: usize,
     item: &HistoryItem,
@@ -294,6 +305,7 @@ fn history_item(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
+                .text_ellipsis()
                 .font_family(MONO_FONT)
                 .text_size(px(12.))
                 .text_color(t.text_2)
@@ -312,7 +324,7 @@ fn history_item(
         .child(
             div()
                 .flex_none()
-                .max_w(px(160.))
+                .max_w(px(280.))
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_size(px(12.))
@@ -328,7 +340,7 @@ fn history_item(
                 ("history-reveal", entry * 10_000 + k),
                 format!("history-reveal-{entry}-{k}"),
                 IconName::FolderSearch,
-                t,
+                on_sheet,
                 move |_, cx| open_path(OpenKind::Reveal, &path, cx),
             ))
         })

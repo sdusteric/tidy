@@ -252,7 +252,7 @@ impl TidyView {
 pub fn present(
     sheet: Sheet,
     scrim: Stateful<Div>,
-    card: Stateful<Div>,
+    card: impl Styled + IntoElement + 'static,
     phase: Phase,
 ) -> AnyElement {
     let [scrim_in, card_in, scrim_out, card_out] = sheet.ids();
@@ -293,7 +293,7 @@ pub fn present(
 
 /// The why-safe popover's card in its phase: in, it fades up while it settles from
 /// [`POP_SETTLE`] pt nearer the click; out, it only fades.
-pub fn present_popover(card: Stateful<Div>, phase: Phase) -> AnyElement {
+pub fn present_popover(card: impl Styled + IntoElement + 'static, phase: Phase) -> AnyElement {
     match phase {
         Phase::Still => card.into_any_element(),
         Phase::Enter(generation) => card

@@ -12,18 +12,68 @@ use gpui_kit::*;
 use tidy_core::api::Command;
 
 use crate::app::{
-    DialogCancel, DialogConfirm, GoCheckup, GoCleanup, GoLarge, GoMemory, GoSecurity,
+    DialogCancel, FocusNext, FocusPrev, GoCheckup, GoCleanup, GoLarge, GoMemory, GoSecurity,
     MEMORY_PERIOD, MainWindow, Notice, ParentFolder, ROOT_CONTEXT, RUNNING_PERIOD, Rescan, Screen,
     TidyModel, TrashSelection, background_mode, model, send,
 };
 use crate::format;
 use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::cleanup::RowMenu;
-use crate::views::dialogs::{DialogKind, DialogSpec, render_dialog};
+use crate::views::dialogs::{DialogFocus, DialogKind, DialogSpec, render_dialog};
 use crate::views::memory::MemoryMenu;
 use crate::views::overlay::{self, Phase, Sheet};
 use crate::views::trust::DetailsAt;
 use crate::views::{hairline, icon_button, large_button, text_button};
+
+/// The overlays that take the keyboard while they are open. Each one traps Tab and Shift-Tab in
+/// its own container and gives the focus back to what had it when it closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layer {
+    Dialog,
+    /// Any of the three small menus (a Cleanup row's "...", the Large files threshold, a Memory
+    /// row's "..."). Only one is ever open.
+    Menu,
+    Details,
+    History,
+    SystemData,
+}
+
+/// The focus handles of the overlays, made once with the view.
+pub(crate) struct Traps {
+    pub dialog: DialogFocus,
+    pub menu: FocusHandle,
+    pub details: FocusHandle,
+    pub history: FocusHandle,
+    pub system_data: FocusHandle,
+}
+
+impl Traps {
+    fn new(cx: &mut Context<TidyView>) -> Traps {
+        Traps {
+            dialog: DialogFocus {
+                trap: cx.focus_handle(),
+                // Cancel is a tab stop like any button; gpui reads that flag off the handle.
+                cancel: cx.focus_handle().tab_stop(true),
+            },
+            menu: cx.focus_handle(),
+            details: cx.focus_handle(),
+            history: cx.focus_handle(),
+            system_data: cx.focus_handle(),
+        }
+    }
+
+    /// Where the focus goes when a layer opens: Cancel for a dialog (the safe button), the
+    /// layer's container for the rest, so the first Tab lands on its first control.
+    fn initial(&self, layer: Layer) -> FocusHandle {
+        match layer {
+            Layer::Dialog => self.dialog.cancel.clone(),
+            Layer::Menu => self.menu.clone(),
+            Layer::Details => self.details.clone(),
+            Layer::History => self.history.clone(),
+            Layer::SystemData => self.system_data.clone(),
+        }
+    }
+}
 
 pub struct TidyView {
     pub model: Entity<TidyModel>,
@@ -36,6 +86,9 @@ pub struct TidyView {
     pub(crate) sysdata_scroll: ScrollHandle,
     /// The row under the pointer (its key), which shows its hover actions.
     pub hovered: Option<String>,
+    /// The row the keyboard is on (its `RowFocus` key), which shows its actions like a hovered
+    /// row. Set in render from the focus.
+    pub(crate) keyboard_row: Option<String>,
     /// The "..." menu of a Cleanup row, when open.
     pub menu: Option<RowMenu>,
     /// The threshold menu, when open: where it was clicked.
@@ -69,7 +122,44 @@ pub struct TidyView {
     /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
     /// fully covered or on another Space, and then the Memory screen does not poll.
     window_visible: bool,
+    /// Wraps whichever virtual list the screen shows (Cleanup, Large files, Memory). It marks
+    /// the list as one region, so Tab can tell that the focus left it and scroll to the next row.
+    pub(crate) list_focus: FocusHandle,
+    /// Focus handles of the overlays.
+    pub(crate) traps: Traps,
+    /// The overlays that are open, oldest first, each with the handle that had the focus when it
+    /// opened (what Escape or a button hands the focus back to).
+    layers: Vec<(Layer, Option<FocusHandle>)>,
     _subs: Vec<Subscription>,
+}
+
+/// Most rows one Tab may scroll past before it gives up (a row with nothing to focus).
+const MAX_LIST_SCROLLS: usize = 40;
+
+/// One step of Tab or Shift-Tab. Inside a focus trap the step repeats until it lands inside the
+/// trap again, and falls back to the trap itself when it holds no tab stop (Base does the same
+/// for its own dialogs).
+fn step_focus(window: &mut Window, cx: &mut App, forward: bool) {
+    fn advance(window: &mut Window, cx: &mut App, forward: bool) {
+        if forward {
+            window.focus_next(cx);
+        } else {
+            window.focus_prev(cx);
+        }
+    }
+    let Some(trap) = gpui_kit::base::active_focus_trap(window, cx) else {
+        advance(window, cx, forward);
+        return;
+    };
+    advance(window, cx, forward);
+    let first = window.focused(cx);
+    while !trap.contains_focused(window, cx) {
+        advance(window, cx, forward);
+        if window.focused(cx) == first {
+            trap.focus(window, cx);
+            break;
+        }
+    }
 }
 
 impl TidyView {
@@ -90,6 +180,16 @@ impl TidyView {
         // The root element must hold focus, or the window's key bindings do nothing.
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+
+        // When the focused control leaves the screen (a switch of screen, a row that was
+        // trashed, a closed overlay), gpui has nothing focused and every Cmd shortcut stops
+        // working. Hand the focus to the nearest ancestor still on screen, or the root.
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+            let target = window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| this.focus.clone());
+            target.focus(window, cx);
+        });
 
         let demo = crate::demo::state(cx).is_some();
         let visibility = cx.observe_window_visibility(window, move |v, visibility, _, cx| {
@@ -165,6 +265,7 @@ impl TidyView {
             checkup_scroll,
             sysdata_scroll,
             hovered: crate::demo::state(cx).and_then(|d| d.hovered.clone()),
+            keyboard_row: None,
             menu: None,
             threshold_menu: None,
             memory_menu: None,
@@ -176,8 +277,11 @@ impl TidyView {
             }),
             copied: None,
             dialog,
-            history_open: false,
-            history_expanded: HashSet::new(),
+            history_open: crate::demo::state(cx).is_some_and(|d| d.history),
+            history_expanded: crate::demo::state(cx)
+                .filter(|d| d.history)
+                .map(|_| [crate::demo::history_open_entry()].into_iter().collect())
+                .unwrap_or_default(),
             card_figures: Default::default(),
             card_changed: [None; 3],
             card_generation: 0,
@@ -186,7 +290,10 @@ impl TidyView {
             overlays: Default::default(),
             should_move: false,
             window_visible: window.is_visible(),
-            _subs: vec![observed, appearance, activation, visibility],
+            list_focus: cx.focus_handle(),
+            traps: Traps::new(cx),
+            layers: Vec::new(),
+            _subs: vec![observed, appearance, activation, visibility, focus_lost],
         }
     }
 
@@ -204,7 +311,130 @@ impl TidyView {
         }
     }
 
+    // ----- keyboard focus -----
+
+    /// Wraps the screen's virtual list. See [`TidyView::list_focus`].
+    pub(crate) fn list_frame(&self, list: impl IntoElement) -> Div {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .track_focus(&self.list_focus)
+            .child(list)
+    }
+
+    /// The scroll handle and row height of the virtual list on the current screen.
+    fn visible_list(&self, cx: &App) -> Option<(UniformListScrollHandle, f32)> {
+        match self.model.read(cx).screen {
+            Screen::Cleanup => Some((self.cleanup_scroll.clone(), metrics::CLEANUP_ROW_H)),
+            Screen::Large => Some((self.large_scroll.clone(), metrics::LARGE_ROW_H)),
+            Screen::Memory => Some((self.memory_scroll.clone(), metrics::CLEANUP_ROW_H)),
+            Screen::Checkup | Screen::Security => None,
+        }
+    }
+
+    /// Tab (`forward`) or Shift-Tab. Moves to the next control in drawing order; inside a
+    /// dialog, sheet or menu the move wraps within it, never reaching the screen underneath.
+    ///
+    /// The Cleanup, Large files and Memory lists draw only the rows in view, so a row below the
+    /// window has no controls to reach yet. When Tab would leave such a list while rows remain
+    /// in that direction, the focus stays, the list scrolls one row, and the move is tried again
+    /// after the new row is drawn (at most `scrolls_left` times).
+    pub(crate) fn move_focus(
+        &mut self,
+        forward: bool,
+        scrolls_left: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = window.focused(cx);
+        let was_in_list = before
+            .as_ref()
+            .is_some_and(|h| self.list_focus.contains(h, window));
+        step_focus(window, cx, forward);
+        if !was_in_list || scrolls_left == 0 || self.list_focus.contains_focused(window, cx) {
+            return;
+        }
+        let Some((scroll, row_h)) = self.visible_list(cx) else {
+            return;
+        };
+        let handle = scroll.0.borrow().base_handle.clone();
+        let (offset, max) = (handle.offset(), handle.max_offset());
+        let more_rows = if forward {
+            -offset.y < max.y - px(0.5)
+        } else {
+            offset.y < px(-0.5)
+        };
+        if !more_rows {
+            return;
+        }
+        // Stay on the control that had the focus, scroll one row, and try again once drawn.
+        if let Some(before) = before {
+            before.focus(window, cx);
+        }
+        let dy = if forward { -row_h } else { row_h };
+        let y = (offset.y + px(dy)).clamp(-max.y, px(0.));
+        handle.set_offset(point(offset.x, y));
+        window.refresh();
+        let view = cx.entity().downgrade();
+        // The callback runs right after the next frame is drawn, which shows the scrolled list.
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |v, cx| {
+                v.move_focus(forward, scrolls_left - 1, window, cx);
+            });
+        });
+    }
+
     // ----- overlays -----
+
+    /// The overlays that are open now.
+    fn open_layers(&self, cx: &App) -> Vec<Layer> {
+        let mut open = Vec::new();
+        if self.history_open {
+            open.push(Layer::History);
+        }
+        if self.model.read(cx).system_data.open {
+            open.push(Layer::SystemData);
+        }
+        if self.menu.is_some() || self.threshold_menu.is_some() || self.memory_menu.is_some() {
+            open.push(Layer::Menu);
+        }
+        if self.details.is_some() {
+            open.push(Layer::Details);
+        }
+        if self.dialog.is_some() {
+            open.push(Layer::Dialog);
+        }
+        open
+    }
+
+    /// Moves the keyboard focus into an overlay that just opened (the dialog's Cancel, or the
+    /// overlay's container) and back out to where it was when the overlay closes. Called from
+    /// render; the moves run after the frame, once the new controls exist.
+    fn sync_layer_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.open_layers(cx);
+        let mut give_back: Option<Option<FocusHandle>> = None;
+        self.layers.retain(|(layer, before)| {
+            if open.contains(layer) {
+                return true;
+            }
+            give_back = Some(before.clone());
+            false
+        });
+        let mut go_to = None;
+        for layer in open {
+            if self.layers.iter().any(|(l, _)| *l == layer) {
+                continue;
+            }
+            self.layers.push((layer, window.focused(cx)));
+            go_to = Some(self.traps.initial(layer));
+        }
+        let target = go_to.or_else(|| give_back.map(|before| before.unwrap_or(self.focus.clone())));
+        if let Some(target) = target {
+            window.defer(cx, move |window, cx| target.focus(window, cx));
+        }
+    }
 
     pub fn open_dialog(&mut self, spec: DialogSpec, cx: &mut Context<Self>) {
         if self.dialog.is_none() {
@@ -234,7 +464,7 @@ impl TidyView {
         }
     }
 
-    /// Return: confirms the open dialog.
+    /// The dialog's confirm button: runs what the dialog asks for.
     pub fn confirm_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(spec) = self.dialog.take() else {
             return;
@@ -511,7 +741,7 @@ impl TidyView {
                 "notice-dismiss",
                 "notice-dismiss".to_string(),
                 IconName::X,
-                t,
+                &on_band,
                 on_dismiss,
             ));
         if cx.reduce_motion() {
@@ -661,7 +891,7 @@ impl TidyView {
             self.overlays.dialog_leaving.clone(),
         ) {
             // The leaving copy takes no action: its buttons and scrim do nothing.
-            layers.push(render_dialog(&spec, t, phase, |_, _| {}, |_, _| {}));
+            layers.push(render_dialog(&spec, t, phase, None, |_, _| {}, |_, _| {}));
         }
         if let Some(spec) = self.dialog.clone() {
             let view = cx.entity().downgrade();
@@ -671,6 +901,7 @@ impl TidyView {
                 &spec,
                 t,
                 phase,
+                Some(&self.traps.dialog),
                 move |_, cx| {
                     let _ = cancel_view.update(cx, |v, cx| {
                         v.dialog = None;
@@ -701,6 +932,7 @@ impl TidyView {
 impl Render for TidyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::of(window);
+        self.keyboard_row = crate::views::RowFocus::focused(window, cx);
         let screen = self.model.read(cx).screen;
         let sidebar = self.render_sidebar(&t, cx);
         let content = match screen {
@@ -711,12 +943,19 @@ impl Render for TidyView {
             Screen::Security => self.render_security(&t, cx),
         };
         let overlays = self.render_overlays(&t, cx);
+        self.sync_layer_focus(window, cx);
         let model = self.model.clone();
 
         div()
             .id("tidy-root")
             .key_context(ROOT_CONTEXT)
             .track_focus(&self.focus)
+            // A mouse press hides the focus rings. A key press shows them (see `app::init`).
+            .capture_any_mouse_down(cx.listener(|_, _, _, cx| {
+                if crate::theme::set_ring_visible(false) {
+                    cx.notify();
+                }
+            }))
             .on_action({
                 let model = model.clone();
                 move |_: &GoCheckup, _, cx| {
@@ -760,8 +999,13 @@ impl Render for TidyView {
                 }
             })
             .on_action(cx.listener(|this, _: &TrashSelection, _, cx| this.trash_selection(cx)))
-            .on_action(cx.listener(|this, _: &DialogConfirm, _, cx| this.confirm_dialog(cx)))
             .on_action(cx.listener(|this, _: &DialogCancel, _, cx| this.cancel_overlay(cx)))
+            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+                this.move_focus(true, MAX_LIST_SCROLLS, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
+                this.move_focus(false, MAX_LIST_SCROLLS, window, cx)
+            }))
             .relative()
             .size_full()
             .flex()

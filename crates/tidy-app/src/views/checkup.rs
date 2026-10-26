@@ -22,7 +22,7 @@ use crate::format;
 use crate::macos::Permission;
 use crate::theme::{DisplayType, Theme, figure, metrics, motion as m, tnum};
 use crate::views::main_window::TidyView;
-use crate::views::{checkbox, large_button, text_button};
+use crate::views::{KeyStop, checkbox, large_button, text_button};
 
 pub const RUN_LABEL: &str = "Run Check up";
 pub const RUNNING_LABEL: &str = "Running Check up";
@@ -451,6 +451,12 @@ pub fn switch(
     };
     div()
         .id(id)
+        .role(gpui_kit::accesskit::Role::Switch)
+        .aria_toggled(if on {
+            gpui_kit::accesskit::Toggled::True
+        } else {
+            gpui_kit::accesskit::Toggled::False
+        })
         .debug_selector(|| id.to_string())
         .relative()
         .flex_none()
@@ -465,6 +471,7 @@ pub fn switch(
             cx.stop_propagation();
             on_click(window, cx)
         })
+        .key_stop(t)
         .child(knob)
 }
 
@@ -503,6 +510,7 @@ impl TidyView {
             .on_click(move |_, _, cx| {
                 model.update(cx, |m, cx| m.select_screen(screen, cx));
             })
+            .key_stop(t)
             .child(
                 div()
                     .flex()

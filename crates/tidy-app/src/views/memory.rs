@@ -29,7 +29,8 @@ use crate::format;
 use crate::theme::{DisplayType, Theme, figure, metrics, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
-use crate::views::{glyph_tile, icon_button, scroll_edge, text_button};
+use crate::views::{KeyStop, glyph_tile, icon_button, icon_button_at, scroll_edge, text_button};
+use gpui_kit::base::FocusTrapElement as _;
 
 /// Samples the pressure graph keeps: five minutes at one every 2 seconds.
 pub const HISTORY_MAX: usize = 150;
@@ -690,6 +691,7 @@ impl TidyView {
         let view = cx.entity().downgrade();
         let close = view.clone();
         let hover = t.row_hover;
+        let on_menu = t.on(t.pop_bg);
         let card = div()
             .debug_selector(|| "memory-menu".to_string())
             .min_w(px(160.))
@@ -717,8 +719,10 @@ impl TidyView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, _, cx| {
                         let _ = view.update(cx, |v, cx| v.request_force_quit(cx));
-                    }),
-            );
+                    })
+                    .key_stop(&on_menu),
+            )
+            .focus_trap("memory-menu-trap", &self.traps.menu);
         div()
             .absolute()
             .inset_0()
@@ -837,7 +841,7 @@ impl TidyView {
                     .children(help_line(s, &snap.rows).map(|line| help(t, line)))
                     .child(list_header(t))
                     .child(scroll_edge(t, scrolled))
-                    .child(list)
+                    .child(self.list_frame(list))
                     .into_any_element()
             }
         };
@@ -1165,13 +1169,12 @@ fn render_row(
     let more = row.shows_more().then(|| {
         let view = view.clone();
         let (more_id, more_name) = (id.clone(), row.name.clone());
-        icon_button(
+        icon_button_at(
             ("memory-more", ix),
             format!("memory-more:{id}"),
             IconName::Ellipsis,
             t,
-            move |window, cx| {
-                let at = window.mouse_position();
+            move |at, _, cx| {
                 let (id, name) = (more_id.clone(), more_name.clone());
                 let _ = view.update(cx, |v, cx| v.open_memory_menu(id, name, at, cx));
             },

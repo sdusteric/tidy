@@ -19,6 +19,116 @@ use gpui_kit::*;
 
 use crate::app::Tri;
 use crate::theme::{DisplayType, Theme, metrics, tnum};
+use gpui_kit::accesskit::{Role, Toggled};
+
+/// What a screen reader says for an icon-only button.
+fn icon_label(icon: &IconName) -> &'static str {
+    match icon {
+        IconName::Info => "Details",
+        IconName::FolderSearch => "Reveal in Finder",
+        IconName::Ellipsis => "More",
+        IconName::RefreshCw => "Rescan",
+        IconName::Clock => "History",
+        IconName::X => "Close",
+        IconName::Trash => "Move to Trash",
+        IconName::ChevronRight => "Open folder",
+        _ => "Button",
+    }
+}
+
+/// Keyboard access for a control: Tab and Shift-Tab reach it (a tab stop at index 0, so the
+/// order is the order the elements are drawn in: sidebar, toolbar, rows, status bar, then any
+/// sheet on top), Space and Return click it, and while the keyboard drives it draws the focus
+/// ring of [`Theme::focus_shadow`]. The element needs an id.
+pub trait KeyStop: Sized {
+    fn key_stop(self, t: &Theme) -> Self {
+        self.key_stop_with(t, Vec::new())
+    }
+
+    /// `base` is the control's resting shadow, which the ring replaces while focused.
+    fn key_stop_with(self, t: &Theme, base: Vec<BoxShadow>) -> Self;
+}
+
+// Tests only: the id of the key stop that holds the focus, set by a key press (see
+// `focused_stop` in tests.rs). Capture listeners run from the outside in, so the innermost
+// stop on the focus path writes last.
+#[cfg(test)]
+thread_local! {
+    pub static FOCUS_PROBE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+impl KeyStop for Stateful<Div> {
+    fn key_stop_with(self, t: &Theme, base: Vec<BoxShadow>) -> Self {
+        let t = *t;
+        #[cfg(test)]
+        let self_ = {
+            let name = Element::id(&self)
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            self.capture_key_down(move |_, _, _| {
+                FOCUS_PROBE.with(|p| *p.borrow_mut() = Some(name.clone()));
+            })
+        };
+        #[cfg(not(test))]
+        let self_ = self;
+        let el = self_.tab_index(0);
+        if t.focus_ring {
+            el.focus(move |s| s.shadow(t.focus_shadow(base)))
+        } else {
+            el
+        }
+    }
+}
+
+/// The focus handle of each list row, by row key. The handle is not a tab stop: it marks the row
+/// as a whole, so a row can tell that the keyboard is on one of its controls and show the
+/// actions it otherwise shows only under the pointer.
+#[derive(Default)]
+pub struct RowFocus(std::collections::HashMap<String, FocusHandle>);
+impl Global for RowFocus {}
+
+impl RowFocus {
+    /// The row's handle, made on first use.
+    pub fn handle(key: &str, cx: &mut App) -> FocusHandle {
+        if let Some(h) = cx.default_global::<RowFocus>().0.get(key) {
+            return h.clone();
+        }
+        let handle = cx.focus_handle();
+        cx.default_global::<RowFocus>()
+            .0
+            .insert(key.to_string(), handle.clone());
+        handle
+    }
+
+    /// The key of the row the keyboard is on or inside, if any. Only while the keyboard drives:
+    /// after a click the pointer does, and a row shows its actions by hover alone.
+    pub fn focused(window: &Window, cx: &App) -> Option<String> {
+        if !crate::theme::ring_visible() {
+            return None;
+        }
+        cx.try_global::<RowFocus>()?
+            .0
+            .iter()
+            .find(|(_, handle)| handle.contains_focused(window, cx))
+            .map(|(key, _)| key.clone())
+    }
+}
+
+/// Draws a row action only while `shown` (the pointer or the keyboard is on its row). A hidden
+/// action stays in the layout and in the tab order, so Tab and Shift-Tab walk through every row
+/// control in a fixed sequence; the focus then makes the row show its actions. Its test
+/// selector is left out while it is hidden, so tests see only what a person can see.
+pub fn row_action(
+    shown: bool,
+    selector: String,
+    make: impl FnOnce(String) -> Stateful<Div>,
+) -> Stateful<Div> {
+    if shown {
+        make(selector)
+    } else {
+        make(String::new()).opacity(0.)
+    }
+}
 
 /// A 26 x 26 icon button (radius 6, 16 px icon). The icon takes its color from this element,
 /// so hover lifts it from `text_2` to `text`.
@@ -29,9 +139,33 @@ pub fn icon_button(
     t: &Theme,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    icon_button_at(id, selector, icon, t, move |_, window, cx| {
+        on_click(window, cx)
+    })
+}
+
+/// Where a menu or popover opened by a click should hang: at the pointer for a mouse click,
+/// under the control for Space or Return.
+pub fn click_anchor(ev: &ClickEvent, window: &Window) -> Point<Pixels> {
+    match ev {
+        ClickEvent::Keyboard(k) => k.bounds.bottom_right(),
+        _ => window.mouse_position(),
+    }
+}
+
+/// [`icon_button`] whose handler also gets the [`click_anchor`].
+pub fn icon_button_at(
+    id: impl Into<ElementId>,
+    selector: String,
+    icon: IconName,
+    t: &Theme,
+    on_click: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
     let (hover, pressed, lifted) = (t.row_hover, t.row_pressed, t.text);
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(icon_label(&icon))
         .debug_selector(|| selector)
         .flex_none()
         .size(px(metrics::ACTION))
@@ -46,10 +180,12 @@ pub fn icon_button(
         .hover(move |s| s.bg(hover).text_color(lifted))
         .active(move |s| s.bg(pressed))
         .child(Icon::new(icon).size(px(16.)))
-        .on_click(move |_, window, cx| {
+        .on_click(move |ev, window, cx| {
             cx.stop_propagation();
-            on_click(window, cx)
+            let at = click_anchor(ev, window);
+            on_click(at, window, cx)
         })
+        .key_stop(t)
 }
 
 /// A 26 px high text button (radius 7, 12 px, display 700). Primary is an ink button (`accent`
@@ -93,6 +229,14 @@ pub fn text_button(
             .when(primary, |b| b.active(|s| s.opacity(0.9)))
             .when(!primary, |b| b.active(move |s| s.bg(pressed)))
             .on_click(move |_, window, cx| on_click(window, cx))
+            .key_stop_with(
+                t,
+                if primary {
+                    Vec::new()
+                } else {
+                    t.button_shadow()
+                },
+            )
     } else {
         base.opacity(0.4)
     }
@@ -129,6 +273,7 @@ pub fn large_button(
         base.cursor_pointer()
             .active(|s| s.opacity(0.9))
             .on_click(move |_, window, cx| on_click(window, cx))
+            .key_stop(t)
     } else {
         base.opacity(0.4)
     }
@@ -163,6 +308,7 @@ pub fn plain_button(
             .hover(move |s| s.bg(hover).text_color(lifted))
             .active(move |s| s.bg(pressed))
             .on_click(move |_, window, cx| on_click(window, cx))
+            .key_stop(t)
     } else {
         base.opacity(0.4)
     }
@@ -181,6 +327,12 @@ pub fn checkbox(
 ) -> Stateful<Div> {
     let base = div()
         .id(id)
+        .role(Role::CheckBox)
+        .aria_toggled(match state {
+            Tri::Off => Toggled::False,
+            Tri::On => Toggled::True,
+            Tri::Mixed => Toggled::Mixed,
+        })
         .debug_selector(|| selector)
         .flex_none()
         .size(px(16.))
@@ -210,10 +362,12 @@ pub fn checkbox(
         ),
     };
     if enabled {
-        base.cursor_pointer().on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx)
-        })
+        base.cursor_pointer()
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_click(window, cx)
+            })
+            .key_stop(t)
     } else {
         base.opacity(0.4)
     }
@@ -233,6 +387,7 @@ pub struct Segment {
 /// A two-button group, 26 px high: the selected segment is an ink pill, the others are plain
 /// text on a `fill` track.
 pub fn segmented(id: &'static str, segments: Vec<Segment>, t: &Theme) -> Div {
+    let t = *t;
     let (selected_fill, selected_text, text_2) = (t.accent, t.on_accent, t.text_2);
     div()
         .flex_none()
@@ -247,6 +402,8 @@ pub fn segmented(id: &'static str, segments: Vec<Segment>, t: &Theme) -> Div {
             let on_click = seg.on_click;
             div()
                 .id((id, i))
+                .role(Role::Tab)
+                .aria_selected(seg.selected)
                 .debug_selector(|| seg.selector)
                 .h(px(22.))
                 .px(px(10.))
@@ -264,6 +421,7 @@ pub fn segmented(id: &'static str, segments: Vec<Segment>, t: &Theme) -> Div {
                 .when(!seg.selected, |d| d.text_color(text_2))
                 .child(seg.label)
                 .on_click(move |_, window, cx| on_click(window, cx))
+                .key_stop(&t)
         }))
 }
 

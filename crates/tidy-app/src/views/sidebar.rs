@@ -8,8 +8,8 @@ use crate::app::{Screen, TidyModel};
 use crate::format;
 use crate::theme::{DisplayType, Theme, metrics, tnum};
 use crate::views::main_window::TidyView;
-use crate::views::plain_button;
 use crate::views::trust::SYSDATA_LINK;
+use crate::views::{KeyStop, plain_button};
 
 /// The selector name of a screen's sidebar row (for tests).
 pub fn selector_for(screen: Screen) -> &'static str {
@@ -64,12 +64,15 @@ impl TidyView {
         );
 
         let t = *t;
+        let on_sidebar = t.on(t.sidebar_bg);
         let items = rows.into_iter().map(|(screen, figure)| {
             let selected = screen == current;
             let model = self.model.clone();
             let (hover, selected_bg) = (t.row_hover, t.sidebar_selected);
             div()
                 .id(("sidebar-row", screen as usize))
+                .role(gpui_kit::accesskit::Role::Tab)
+                .aria_selected(selected)
                 .debug_selector(move || selector_for(screen).to_string())
                 .h(px(metrics::SIDEBAR_ROW_H))
                 .px(px(12.))
@@ -83,6 +86,7 @@ impl TidyView {
                 .on_click(move |_, _, cx| {
                     model.update(cx, |m, cx| m.select_screen(screen, cx));
                 })
+                .key_stop(&on_sidebar)
                 .child(
                     div()
                         .flex_1()
@@ -172,7 +176,7 @@ impl TidyView {
                             "sysdata-link".to_string(),
                             SYSDATA_LINK,
                             true,
-                            &t,
+                            &on_sidebar,
                             move |_, cx| {
                                 link_model.update(cx, |m, cx| m.open_system_data(cx));
                             },

@@ -452,7 +452,7 @@ Cards and groups (Check up cards, the reminder row, Memory figures and graph) sh
 - Status bar: left "3 selected, 12.4 GB" or "48 items, up to 214 GB"; right "Move to Trash…" text button, disabled with no selection.
 - Scanning: the toolbar shows a spinner and "Scanning, 214,000 files" in 12 tnum `text_2`; a Stop text button cancels. The previous result stays visible, dimmed to 50%, until the new one arrives.
 
-**Dialogs**: gpui-component dialog, 420 pt wide, title 13/600, body 13/400 with the item list in a scrollable box up to 200 pt high (12 tnum rows: name left, size right), buttons right-aligned: Cancel (secondary) and the action (primary; Empty Trash uses `danger_button`). Return confirms, Escape cancels.
+**Dialogs**: gpui-component dialog, 420 pt wide, title 13/600, body 13/400 with the item list in a scrollable box up to 200 pt high (12 tnum rows: name left, size right), buttons right-aligned: Cancel (secondary) and the action (primary; Empty Trash uses `danger_button`). Cancel has the keyboard focus when the dialog opens, Space or Return presses the focused button (so Return alone cancels), Escape cancels, and Tab stays inside the dialog (section 11.y).
 
 **History sheet**: 560 x 480 pt, rows 44 pt: date 13/500, action and counts 12 `text_2`, size right; expanded items are 32 pt rows with mono paths.
 
@@ -468,7 +468,19 @@ Cleanup shows the Figure at 56 pt in the header with the Clean button at its rig
 
 The Move to Trash confirmations (Cleanup with a Review item ticked, Large files) are receipts: a line per category (per item on Large files) with a dot leader, a double rule, the total at 34 pt, and "Nothing is deleted. Every item goes to the Trash and Tidy writes it in History, so you can put it back." The zigzag bottom edge of the mockup is left out because gpui has no clean way to clip a div to a path.
 
-Contrast: every text and background pair is at least 4.5:1 and display text at least 3:1 in both sets; `theme::tests::documented_contrast_ratios_hold` computes them and fails below the bar. gpui exposes no accessibility label for a div, so the row's meaning is carried by the "k of N" text, never by the dots. Controls are drawn as clickable divs and are not keyboard focusable today, so there is no focus ring to restyle.
+Contrast: every text and background pair is at least 4.5:1 and display text at least 3:1 in both sets; `theme::tests::documented_contrast_ratios_hold` computes them and fails below the bar. gpui exposes no accessibility label for a div, so the row's meaning is carried by the "k of N" text, never by the dots. The focus ring is specified in 11.y.
+
+### 11.y Keyboard access (2026-10-25)
+
+gpui-pre 0.3.9 has what this needs, so Tidy adds no focus manager of its own: `FocusHandle` with `tab_stop` and `tab_index`, `track_focus` and `tab_index` on a div (an element with an id and `tab_index` gets a handle kept in its element state), `Window::focus_next` and `focus_prev`, Space and Return mapped to a click on release, `on_action` with `key_context`, `focus` and `focus_visible` styles, `on_focus_lost`, and, from gpui-base, a Tab/Shift-Tab binding plus `focus_trap`. What gpui lacks, Tidy adds:
+
+- **Order.** Every control is a tab stop at index 0 (`views::KeyStop`), so the order is the drawing order: sidebar rows, toolbar (segments, threshold, buttons), list rows, status bar, then any overlay. A Cleanup row is checkbox, Details, Reveal, more; a Large files row is checkbox, Reveal, Move to Trash or Open. Disabled controls are not stops. The sidebar has no "current section" jump; each of the five rows is a stop.
+- **Row buttons.** They exist for every row but are drawn only while the pointer or the keyboard is on the row (`RowFocus`, one non-stop handle per row). They stay in the tab order while hidden, so Shift-Tab reaches them too.
+- **Long lists.** `uniform_list` draws only the rows in view. When Tab or Shift-Tab leaves such a list and rows remain in that direction, `TidyView::move_focus` keeps the focus, scrolls one row and retries after the next frame (at most 40 rows per press).
+- **Ring.** `Theme::focus_shadow`: a 2 pt ring in `text` with a 2 pt gap painted in the surface color the control sits on (`Theme::on`), so it also shows on ink buttons and on the selected sidebar row. Ink on every surface Tidy uses is above 3:1 (`documented_pairs` holds it in both sets). The ring shows after a key press and hides after a mouse press (`theme::ring_visible`), not on mouse moves as gpui's `focus_visible` does. No motion: the ring appears at once (motion gate: a Tab press is a frequent action, so it fails the frequency question).
+- **Overlays.** A dialog, History, System Data, the details popover and the three small menus each trap Tab (`focus_trap`) and take the focus when they open: Cancel for a dialog, the overlay itself for the rest, so the first Tab lands on its first control. When one closes, the focus returns to what had it. If the focused control leaves the screen, `on_focus_lost` hands the focus to the nearest ancestor still drawn (or the window), so Cmd-1 to Cmd-5 and Cmd-R keep working.
+- **Return.** No longer a global confirm. It presses the focused control, and a dialog starts on Cancel.
+- **Screen readers.** Icon buttons carry a role and a label, checkboxes and switches a toggled state, sidebar rows and segments a selected state. Text buttons and rows rely on their text.
 
 ## 12. Packaging
 

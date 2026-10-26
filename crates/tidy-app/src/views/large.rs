@@ -21,8 +21,10 @@ use crate::theme::{DisplayType, MONO_FONT, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
 use crate::views::{
-    Segment, checkbox, glyph_tile, icon_button, plain_button, scroll_edge, segmented, tag,
+    KeyStop, RowFocus, Segment, checkbox, glyph_tile, icon_button, plain_button, row_action,
+    scroll_edge, segmented, tag,
 };
+use gpui_kit::base::FocusTrapElement as _;
 
 pub const EMPTY_TITLE: &str = "See what takes up space";
 
@@ -159,6 +161,8 @@ struct RowEnv {
     model: Entity<TidyModel>,
     view: WeakEntity<TidyView>,
     hovered: Option<String>,
+    /// The key of the row the keyboard is on (see `RowFocus`).
+    keyboard_row: Option<String>,
     reduce_motion: bool,
     mode: LargeMode,
     selected: BTreeSet<String>,
@@ -168,9 +172,13 @@ struct RowEnv {
     leaving: std::collections::HashSet<String>,
 }
 
-fn render_row(row: &LargeRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement {
+fn render_row(row: &LargeRow, ix: usize, t: &Theme, env: &RowEnv, cx: &mut App) -> AnyElement {
     match row {
-        LargeRow::Item(e) => render_item(e, ix, t, env),
+        LargeRow::Item(e) => {
+            let key = format!("large:{}", e.rel);
+            let inside = env.keyboard_row.as_deref() == Some(key.as_str());
+            render_item(e, ix, t, env, RowFocus::handle(&key, cx), inside)
+        }
         LargeRow::Rest { count, bytes } => div()
             .debug_selector(|| "large-rest".to_string())
             .w_full()
@@ -197,9 +205,17 @@ fn render_row(row: &LargeRow, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement 
     }
 }
 
-fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement {
+fn render_item(
+    e: &LargeEntry,
+    ix: usize,
+    t: &Theme,
+    env: &RowEnv,
+    row_focus: FocusHandle,
+    keyboard_inside: bool,
+) -> AnyElement {
     let rel = e.rel.clone();
-    let hovered = env.hovered.as_deref() == Some(rel.as_str());
+    // The pointer or the keyboard is on the row: it shows its actions.
+    let hovered = keyboard_inside || env.hovered.as_deref() == Some(rel.as_str());
     let selected = env.selected.contains(&rel);
     let hover_bg = t.row_hover;
     let folders = env.mode == LargeMode::Folders;
@@ -266,15 +282,19 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
     let actions = div()
         .flex()
         .items_center()
-        .when(hovered, |d| {
-            d.child(icon_button(
-                ("large-reveal", ix),
-                format!("large-reveal:{rel}"),
-                IconName::FolderSearch,
-                t,
-                move |_, cx| open_path(OpenKind::Reveal, &reveal_path, cx),
-            ))
-        })
+        .child(row_action(
+            hovered,
+            format!("large-reveal:{rel}"),
+            |selector| {
+                icon_button(
+                    ("large-reveal", ix),
+                    selector,
+                    IconName::FolderSearch,
+                    t,
+                    move |_, cx| open_path(OpenKind::Reveal, &reveal_path, cx),
+                )
+            },
+        ))
         .map(|d| {
             if drill {
                 d.child(icon_button(
@@ -286,24 +306,29 @@ fn render_item(e: &LargeEntry, ix: usize, t: &Theme, env: &RowEnv) -> AnyElement
                         open_model.update(cx, |m, cx| m.open_folder(&open_rel, cx));
                     },
                 ))
-            } else if hovered {
-                d.child(icon_button(
-                    ("large-trash", ix),
+            } else {
+                d.child(row_action(
+                    hovered,
                     format!("large-trash:{rel}"),
-                    IconName::Trash,
-                    t,
-                    move |_, cx| {
-                        let rel = trash_rel.clone();
-                        let _ = trash_view.update(cx, |v, cx| v.trash_single(&rel, cx));
+                    |selector| {
+                        icon_button(
+                            ("large-trash", ix),
+                            selector,
+                            IconName::Trash,
+                            t,
+                            move |_, cx| {
+                                let rel = trash_rel.clone();
+                                let _ = trash_view.update(cx, |v, cx| v.trash_single(&rel, cx));
+                            },
+                        )
                     },
                 ))
-            } else {
-                d
             }
         });
 
     let el = div()
         .id(("large-item", ix))
+        .track_focus(&row_focus)
         .debug_selector(move || format!("large-row:{selector_rel}"))
         .w_full()
         .h(px(metrics::LARGE_ROW_H))
@@ -455,6 +480,7 @@ impl TidyView {
         let close = view.clone();
         let hover = t.row_hover;
         let model = self.model.clone();
+        let on_menu = t.on(t.pop_bg);
         let card = div()
             .debug_selector(|| "threshold-menu".to_string())
             .min_w(px(150.))
@@ -494,7 +520,9 @@ impl TidyView {
                             cx.notify();
                         });
                     })
-            }));
+                    .key_stop(&on_menu)
+            }))
+            .focus_trap("threshold-menu-trap", &self.traps.menu);
         div()
             .absolute()
             .inset_0()
@@ -664,13 +692,14 @@ impl TidyView {
                             .whitespace_nowrap()
                             .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, window, cx| {
-                                let at = window.mouse_position();
+                            .on_click(move |ev, window, cx| {
+                                let at = crate::views::click_anchor(ev, window);
                                 let _ = threshold_view.update(cx, |v, cx| {
                                     v.threshold_menu = Some(at);
                                     cx.notify();
                                 });
                             })
+                            .key_stop_with(t, t.button_shadow())
                             .child(threshold_label)
                             .child(
                                 Icon::new(IconName::ChevronsUpDown)
@@ -774,6 +803,7 @@ impl TidyView {
             let env_model = model.clone();
             let env_view = view.clone();
             let hovered = self.hovered.clone();
+            let keyboard_row = self.keyboard_row.clone();
             let dim = snap.scanning.is_some();
             let (mode, selected, root, now) = (
                 snap.mode,
@@ -783,7 +813,7 @@ impl TidyView {
             );
             let (skipped, leaving) = (snap.skipped.clone(), snap.leaving.clone());
             let count = rows.len();
-            uniform_list("large-rows", count, move |range, window, cx| {
+            let list = uniform_list("large-rows", count, move |range, window, cx| {
                 let t = Theme::of(window);
                 let env = RowEnv {
                     viewport_w: f32::from(window.viewport_size().width),
@@ -791,6 +821,7 @@ impl TidyView {
                     model: env_model.clone(),
                     view: env_view.clone(),
                     hovered: hovered.clone(),
+                    keyboard_row: keyboard_row.clone(),
                     reduce_motion: cx.reduce_motion(),
                     mode,
                     selected: selected.clone(),
@@ -800,7 +831,7 @@ impl TidyView {
                     leaving: leaving.clone(),
                 };
                 range
-                    .filter_map(|ix| rows.get(ix).map(|row| render_row(row, ix, &t, &env)))
+                    .filter_map(|ix| rows.get(ix).map(|row| render_row(row, ix, &t, &env, cx)))
                     .collect::<Vec<AnyElement>>()
             })
             .track_scroll(&self.large_scroll)
@@ -808,8 +839,8 @@ impl TidyView {
             .px(px(metrics::LIST_INSET))
             .pt(px(2.))
             .pb(px(8.))
-            .when(dim, |l| l.opacity(0.5))
-            .into_any_element()
+            .when(dim, |l| l.opacity(0.5));
+            self.list_frame(list).into_any_element()
         };
 
         let left = snap.status_left();
@@ -834,7 +865,7 @@ impl TidyView {
                         None => "Move to Trash\u{2026}".to_string(),
                     },
                     can_trash,
-                    t,
+                    &t.on(t.bar_bg),
                     move |_, cx| {
                         let _ = view.update(cx, |v, cx| v.trash_selection(cx));
                     },
@@ -906,6 +937,7 @@ impl TidyView {
                         .on_click(move |_, _, cx| {
                             model.update(cx, |m, cx| m.open_folder(&rel, cx));
                         })
+                        .key_stop(t)
                         .into_any_element()
                 });
                 parts

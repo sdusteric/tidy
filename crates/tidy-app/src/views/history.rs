@@ -22,6 +22,7 @@ pub fn action_label(action: Action) -> &'static str {
         Action::Clean => "Cleanup",
         Action::Trash => "Large files",
         Action::EmptyTrash => "Emptied the Trash",
+        Action::Uninstall => "Uninstaller",
     }
 }
 

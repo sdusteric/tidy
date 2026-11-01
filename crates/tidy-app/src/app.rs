@@ -29,6 +29,7 @@ use crate::views::main_window::open_main_window;
 use crate::views::memory::MemoryState;
 use crate::views::security::SecurityState;
 use crate::views::trust::SystemDataState;
+use crate::views::uninstaller::UninstallState;
 
 actions!(
     tidy,
@@ -41,6 +42,7 @@ actions!(
         GoLarge,
         GoMemory,
         GoSecurity,
+        GoUninstaller,
         Rescan,
         ParentFolder,
         TrashSelection,
@@ -254,15 +256,17 @@ pub enum Screen {
     Large,
     Memory,
     Security,
+    Uninstaller,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 5] = [
+    pub const ALL: [Screen; 6] = [
         Screen::Checkup,
         Screen::Cleanup,
         Screen::Large,
         Screen::Memory,
         Screen::Security,
+        Screen::Uninstaller,
     ];
 
     pub fn title(self) -> &'static str {
@@ -272,10 +276,11 @@ impl Screen {
             Screen::Large => "Large files",
             Screen::Memory => "Memory",
             Screen::Security => "Security",
+            Screen::Uninstaller => "Uninstaller",
         }
     }
 
-    /// The shortcut shown in the Go menu: Cmd-1 to Cmd-5 in sidebar order.
+    /// The shortcut shown in the Go menu: Cmd-1 to Cmd-6 in sidebar order.
     pub fn shortcut(self) -> &'static str {
         match self {
             Screen::Checkup => "\u{2318}1",
@@ -283,6 +288,7 @@ impl Screen {
             Screen::Large => "\u{2318}3",
             Screen::Memory => "\u{2318}4",
             Screen::Security => "\u{2318}5",
+            Screen::Uninstaller => "\u{2318}6",
         }
     }
 }
@@ -690,6 +696,8 @@ pub struct TidyModel {
     pub checkup: CheckupState,
     /// The System Data sheet (design 17.2).
     pub system_data: SystemDataState,
+    /// The Uninstaller (design section 19).
+    pub uninstall: UninstallState,
     pub disk: Option<DiskInfo>,
     /// Number of applied batches (tests check the pump's throttle with it).
     pub applies: usize,
@@ -709,6 +717,7 @@ impl TidyModel {
             security: SecurityState::default(),
             checkup: CheckupState::default(),
             system_data: SystemDataState::default(),
+            uninstall: UninstallState::default(),
             disk: None,
             applies: 0,
             activity: None,
@@ -876,6 +885,7 @@ impl TidyModel {
             Screen::Security => self.load_last_security(cx),
             Screen::Checkup => self.enter_checkup(cx),
             Screen::Cleanup | Screen::Large => self.prune_missing(cx),
+            Screen::Uninstaller => self.enter_uninstaller(cx),
         }
     }
 
@@ -913,6 +923,7 @@ impl TidyModel {
             Screen::Large => self.scan_large(cx),
             Screen::Memory => self.snapshot_memory(cx),
             Screen::Security => self.run_security(false, cx),
+            Screen::Uninstaller => self.rescan_uninstaller(cx),
         }
     }
 
@@ -1299,6 +1310,7 @@ impl TidyModel {
             || self.cleanup.cleaning.is_some()
             || self.large.scanning.is_some()
             || self.large.trashing.is_some()
+            || self.uninstall.removing.is_some()
             || self.security.running.is_some()
             || self.checkup.running;
         if !busy {
@@ -1310,6 +1322,7 @@ impl TidyModel {
     pub fn apply(&mut self, batch: Batch, cx: &mut Context<Self>) {
         let mut leaving_cleanup = Vec::new();
         let mut leaving_large = Vec::new();
+        let mut leaving_uninstall = Vec::new();
         let mut refresh_disk = false;
         for event in batch.events {
             match event {
@@ -1354,14 +1367,19 @@ impl TidyModel {
                     ScanKind::Large => self.large.scanning = None,
                 },
                 Event::CleanProgress { done, total } => {
-                    if self.cleanup.cleaning.is_some() {
+                    if self.uninstall.removing.is_some() {
+                        self.uninstall.removing = Some((done, total));
+                    } else if self.cleanup.cleaning.is_some() {
                         self.cleanup.cleaning = Some((done, total));
                     } else if self.large.trashing.is_some() {
                         self.large.trashing = Some((done, total));
                     }
                 }
                 Event::ItemTrashed { id, .. } => {
-                    if self.security.is_trashing(Path::new(&id)) {
+                    if self.uninstall.is_removing(&id) {
+                        self.uninstall.on_trashed(&id);
+                        leaving_uninstall.push(id);
+                    } else if self.security.is_trashing(Path::new(&id)) {
                         self.security.on_trashed();
                     } else if self
                         .cleanup
@@ -1381,7 +1399,9 @@ impl TidyModel {
                     }
                 }
                 Event::ItemSkipped { id, reason } => {
-                    if self.security.is_trashing(Path::new(&id)) {
+                    if self.uninstall.is_removing(&id) {
+                        self.uninstall.on_skipped(id, reason);
+                    } else if self.security.is_trashing(Path::new(&id)) {
                         self.security.on_skipped(reason);
                     } else if self
                         .cleanup
@@ -1416,6 +1436,7 @@ impl TidyModel {
                             self.large.trashing = None;
                             self.large.notice = Some(notice);
                         }
+                        Source::Uninstaller => self.on_uninstall_done(&entry),
                     }
                     refresh_disk = true;
                 }
@@ -1444,6 +1465,7 @@ impl TidyModel {
                     refresh_disk = true;
                 }
                 Event::RunningChanged(set) => {
+                    self.uninstall.on_running(&set);
                     self.cleanup.running = set;
                     self.cleanup.running_known = true;
                     self.refresh_blocked();
@@ -1488,6 +1510,10 @@ impl TidyModel {
                         }));
                     }
                     "memory" => self.memory.notice = Some(Notice::Error(message)),
+                    "uninstall" => {
+                        self.uninstall.removing = None;
+                        self.uninstall.notice = Some(Notice::Error(message));
+                    }
                     "security" => {
                         self.security.running = None;
                         self.security.notice = Some(Notice::Error(message));
@@ -1506,6 +1532,7 @@ impl TidyModel {
             self.refresh_disk();
         }
         self.fade_out(leaving_cleanup, leaving_large, cx);
+        self.fade_out_uninstall(leaving_uninstall, cx);
         self.applies += 1;
         cx.notify();
     }
@@ -1672,6 +1699,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-3", GoLarge, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-4", GoMemory, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-5", GoSecurity, Some(ROOT_CONTEXT)),
+        KeyBinding::new("cmd-6", GoUninstaller, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-r", Rescan, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-up", ParentFolder, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-backspace", TrashSelection, Some(ROOT_CONTEXT)),
@@ -1716,6 +1744,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Large Files", GoLarge),
                 MenuItem::action("Memory", GoMemory),
                 MenuItem::action("Security", GoSecurity),
+                MenuItem::action("Uninstaller", GoUninstaller),
                 MenuItem::separator(),
                 MenuItem::action("Rescan", Rescan),
             ],

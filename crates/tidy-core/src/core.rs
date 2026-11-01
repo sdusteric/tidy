@@ -99,6 +99,7 @@ enum Job {
     Clean(Vec<String>),
     Trash(Vec<PathBuf>),
     EmptyTrash,
+    Uninstall(PathBuf, Vec<String>),
 }
 
 impl Job {
@@ -107,6 +108,7 @@ impl Job {
             Job::Clean(_) => "clean",
             Job::Trash(_) => "trash",
             Job::EmptyTrash => "empty_trash",
+            Job::Uninstall(..) => "uninstall",
         }
     }
 }
@@ -210,6 +212,39 @@ impl Actor {
             Command::Clean { item_ids } => self.enqueue(Job::Clean(item_ids)),
             Command::TrashPaths { paths } => self.enqueue(Job::Trash(paths)),
             Command::EmptyTidyTrash => self.enqueue(Job::EmptyTrash),
+            Command::Uninstall { app, ids } => self.enqueue(Job::Uninstall(app, ids)),
+            Command::ListApps { reply } => {
+                let env = self.env.clone();
+                let signatures = self.sources.signatures.clone();
+                tokio::spawn(async move {
+                    let list = tokio::task::spawn_blocking(move || {
+                        crate::uninstall::list_apps(&env, signatures.as_ref())
+                    })
+                    .await;
+                    match list {
+                        Ok(l) => {
+                            let _ = reply.send(l);
+                        }
+                        Err(e) => tracing::warn!("listing apps failed: {e}"),
+                    }
+                });
+            }
+            Command::FindLeftovers { app, reply } => {
+                let env = self.env.clone();
+                let signatures = self.sources.signatures.clone();
+                tokio::spawn(async move {
+                    let plan = tokio::task::spawn_blocking(move || {
+                        crate::uninstall::find_leftovers(&env, signatures.as_ref(), &app)
+                    })
+                    .await;
+                    match plan {
+                        Ok(p) => {
+                            let _ = reply.send(p);
+                        }
+                        Err(e) => tracing::warn!("looking for leftovers failed: {e}"),
+                    }
+                });
+            }
             Command::Cancel => {
                 for flag in [&self.cleanup_scan, &self.large_scan].into_iter().flatten() {
                     flag.store(true, Ordering::Relaxed);
@@ -475,10 +510,12 @@ impl Actor {
             Job::Clean(ids) => Work::Clean(self.items_for(&ids)),
             Job::Trash(paths) => Work::Trash(paths),
             Job::EmptyTrash => Work::EmptyTrash,
+            Job::Uninstall(app, ids) => Work::Uninstall(app, ids),
         };
         let stop = Arc::new(AtomicBool::new(false));
         self.job = Some(stop.clone());
         let env = self.env.clone();
+        let signatures = self.sources.signatures.clone();
         let events = self.events.clone();
         let done = self.done.clone();
         tokio::task::spawn_blocking(move || {
@@ -491,6 +528,14 @@ impl Actor {
                     clean::trash_paths_until(&env, &paths, &mut send, Some(&stop))
                 }
                 Work::EmptyTrash => clean::empty_tidy_trash_until(&env, Some(&stop)),
+                Work::Uninstall(app, ids) => crate::uninstall::uninstall_until(
+                    &env,
+                    signatures.as_ref(),
+                    &app,
+                    &ids,
+                    &mut send,
+                    Some(&stop),
+                ),
             }))
             .ok();
             let _ = done.send(Done::Job {
@@ -726,6 +771,7 @@ enum Work {
     Clean(Vec<Item>),
     Trash(Vec<PathBuf>),
     EmptyTrash,
+    Uninstall(PathBuf, Vec<String>),
 }
 
 #[cfg(test)]
@@ -867,6 +913,7 @@ mod tests {
                     Signer::Unsigned
                 },
                 notarized: None,
+                team_id: None,
             }
         }
     }
@@ -1009,6 +1056,48 @@ mod tests {
         assert!(trash.join("a.bin").is_file());
         assert!(!r.env.at(".npm/_cacache").exists());
         assert_eq!(r.rt.block_on(r.core.history()), std::slice::from_ref(entry));
+    }
+
+    #[test]
+    fn uninstall_lists_finds_and_moves_an_app() {
+        let mut r = running();
+        r.put("Applications/Box.app/Contents/MacOS/Box", 4096);
+        std::fs::write(
+            r.env.at("Applications/Box.app/Contents/Info.plist"),
+            "<plist><dict><key>CFBundleIdentifier</key><string>com.example.box</string>\
+             <key>CFBundleExecutable</key><string>Box</string></dict></plist>",
+        )
+        .unwrap();
+        let cache = r.put("Library/Caches/com.example.box/a.bin", 4096);
+        let app = r.env.at("Applications/Box.app");
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        r.core.send(Command::ListApps { reply: tx });
+        let list = r.rt.block_on(rx).unwrap();
+        assert_eq!(list.apps.len(), 1);
+        assert_eq!(list.apps[0].path, app);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        r.core.send(Command::FindLeftovers {
+            app: app.clone(),
+            reply: tx,
+        });
+        let plan = r.rt.block_on(rx).unwrap().unwrap();
+        let ids: Vec<String> = plan.items.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids.len(), 2);
+
+        r.core.send(Command::Uninstall {
+            app: app.clone(),
+            ids,
+        });
+        let events = r.until(|e| matches!(e, Event::CleanDone(_)));
+        let Some(Event::CleanDone(entry)) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(entry.action, Action::Uninstall);
+        assert_eq!(entry.source, crate::model::Source::Uninstaller);
+        assert_eq!(entry.trashed().count(), 2);
+        assert!(!app.exists() && !cache.parent().unwrap().exists());
     }
 
     #[test]

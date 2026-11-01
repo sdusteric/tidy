@@ -667,7 +667,7 @@ mod tests {
                 t.sidebar_selected,
                 4.5,
             ),
-            ("white on danger button", white, t.danger_button, 4.5),
+            ("white on Empty Trash button", white, t.danger_button, 4.5),
             ("figure (text) on window, large", t.text, t.window_bg, 3.0),
             (
                 "checkbox outline on window",

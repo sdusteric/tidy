@@ -1841,13 +1841,20 @@ fn answer_next_reminder(cmds: Vec<Command>, d: ReminderDate) -> bool {
 // ---------- sidebar and shortcuts ----------
 
 #[::gpui::test]
-fn the_sidebar_lists_five_screens_in_order_and_cmd_1_to_5_switch(cx: &mut TestAppContext) {
+fn the_sidebar_lists_six_screens_in_order_and_cmd_1_to_6_switch(cx: &mut TestAppContext) {
     let mut h = setup(cx);
     let (_view, cx) = open_main(cx);
     let titles: Vec<&str> = Screen::ALL.iter().map(|s| s.title()).collect();
     assert_eq!(
         titles,
-        ["Check up", "Cleanup", "Large files", "Memory", "Security"]
+        [
+            "Check up",
+            "Cleanup",
+            "Large files",
+            "Memory",
+            "Security",
+            "Uninstaller"
+        ]
     );
     let shortcuts: Vec<&str> = Screen::ALL.iter().map(|s| s.shortcut()).collect();
     assert_eq!(
@@ -1857,7 +1864,8 @@ fn the_sidebar_lists_five_screens_in_order_and_cmd_1_to_5_switch(cx: &mut TestAp
             "\u{2318}2",
             "\u{2318}3",
             "\u{2318}4",
-            "\u{2318}5"
+            "\u{2318}5",
+            "\u{2318}6"
         ]
     );
     // Top to bottom in the sidebar.
@@ -1878,6 +1886,7 @@ fn the_sidebar_lists_five_screens_in_order_and_cmd_1_to_5_switch(cx: &mut TestAp
         ("cmd-3", Screen::Large, "large"),
         ("cmd-4", Screen::Memory, "memory"),
         ("cmd-5", Screen::Security, "security"),
+        ("cmd-6", Screen::Uninstaller, "uninstaller"),
     ] {
         keys(cx, keystroke);
         assert_eq!(
@@ -3602,7 +3611,7 @@ fn tab_walks_the_sidebar_then_the_toolbar_then_the_rows(cx: &mut TestAppContext)
         "none",
         "the window opens with no control focused"
     );
-    let walk = tab_walk(cx, 17);
+    let walk = tab_walk(cx, 18);
     assert_eq!(
         walk,
         [
@@ -3612,6 +3621,7 @@ fn tab_walks_the_sidebar_then_the_toolbar_then_the_rows(cx: &mut TestAppContext)
             "sidebar-row-2",
             "sidebar-row-3",
             "sidebar-row-4",
+            "sidebar-row-5",
             // The toolbar, left to right.
             "history",
             "rescan",
@@ -3892,9 +3902,9 @@ fn tab_scrolls_a_long_list_to_reach_every_row(cx: &mut TestAppContext) {
 #[::gpui::test]
 fn large_files_controls_come_in_reading_order(cx: &mut TestAppContext) {
     let (_h, _view, cx) = open_with_scan(cx);
-    let walk = tab_walk(cx, 17);
+    let walk = tab_walk(cx, 18);
     assert_eq!(
-        walk[5..],
+        walk[6..],
         [
             // The filter, the mode, the threshold and Rescan, left to right.
             "large-filter-0",
@@ -3922,9 +3932,9 @@ fn the_checkup_buttons_cards_and_switches_are_tab_stops(cx: &mut TestAppContext)
     let (_h, _view, cx) = open_with_plan(cx);
     keys(cx, "cmd-1");
     frames(cx);
-    let walk = tab_walk(cx, 13);
+    let walk = tab_walk(cx, 14);
     assert_eq!(
-        walk[5..],
+        walk[6..],
         [
             "run-checkup",
             "include-updates",
@@ -4157,4 +4167,293 @@ fn tidy_check_for_updates_takes_the_menu_items_path(cx: &mut TestAppContext) {
     assert_eq!(ran, 0);
     assert_eq!(fake.checks.get(), 1);
     assert!(h.drain().is_empty());
+}
+
+// ---------- Uninstaller ----------
+
+use tidy_core::uninstall::{AppEntry, AppList, Leftover, LeftoverKind, UninstallPlan};
+
+fn un_app(name: &str, mb: u64) -> AppEntry {
+    AppEntry {
+        path: PathBuf::from(format!("/Applications/{name}.app")),
+        name: name.to_string(),
+        bundle_id: format!("com.example.{}", name.to_lowercase()),
+        version: Some("1.0".to_string()),
+        executable: Some(name.to_string()),
+        team_id: None,
+        team_name: None,
+        bytes: mb * MB,
+        last_used: None,
+        used_source: UseSource::FileTimes,
+        helpers: Vec::new(),
+        movable: true,
+    }
+}
+
+fn un_list() -> AppList {
+    AppList {
+        apps: vec![
+            un_app("Alpha", 100),
+            un_app("Beta", 900),
+            un_app("Gamma", 300),
+        ],
+        left_out: 12,
+        at: NOW - 60,
+    }
+}
+
+fn un_row(path: &str, kind: LeftoverKind, mb: u64, ticked: bool) -> Leftover {
+    Leftover {
+        id: path.to_string(),
+        path: PathBuf::from(path),
+        kind,
+        bytes: Some(mb * MB),
+        ticked,
+        selectable: true,
+        by_name: false,
+        note: None,
+    }
+}
+
+const BETA: &str = "/Applications/Beta.app";
+const BETA_CACHE: &str = "/fake/Library/Caches/com.example.beta";
+const BETA_GROUP: &str = "/fake/Library/Group Containers/T.shared";
+
+fn un_plan(blocked: Option<&str>) -> UninstallPlan {
+    let mut shared = un_row(BETA_GROUP, LeftoverKind::GroupContainer, 5, false);
+    shared.note = Some("Shared with Gamma".to_string());
+    let mut daemon = un_row(
+        "/Library/LaunchDaemons/com.example.beta.plist",
+        LeftoverKind::System,
+        0,
+        false,
+    );
+    daemon.selectable = false;
+    UninstallPlan {
+        app: un_app("Beta", 900),
+        items: vec![
+            un_row(BETA, LeftoverKind::App, 900, true),
+            un_row(BETA_CACHE, LeftoverKind::Caches, 50, true),
+            shared,
+            daemon,
+        ],
+        blocked: blocked.map(str::to_string),
+        root: PathBuf::from("/fake"),
+    }
+}
+
+/// Opens the Uninstaller and answers its ListApps with [`un_list`].
+fn open_uninstaller(
+    cx: &mut TestAppContext,
+) -> (Harness, Entity<TidyView>, &mut VisualTestContext) {
+    let mut h = setup(cx);
+    let (view, cx) = open_main(cx);
+    h.drain();
+    keys(cx, "cmd-6");
+    let mut answered = false;
+    for c in h.drain() {
+        if let Command::ListApps { reply } = c {
+            reply.send(un_list()).unwrap();
+            answered = true;
+        }
+    }
+    assert!(answered, "opening the screen lists the apps");
+    cx.run_until_parked();
+    (h, view, cx)
+}
+
+/// Opens Beta and answers its FindLeftovers with `plan`.
+fn open_beta(h: &mut Harness, cx: &mut VisualTestContext, plan: UninstallPlan) {
+    click(cx, "app-row:com.example.beta");
+    let mut answered = false;
+    for c in h.drain() {
+        if let Command::FindLeftovers { app, reply } = c {
+            assert_eq!(app, PathBuf::from(BETA));
+            reply.send(Some(plan.clone())).unwrap();
+            answered = true;
+        }
+    }
+    assert!(answered, "opening an app looks for its files");
+    cx.run_until_parked();
+}
+
+#[::gpui::test]
+fn the_uninstaller_lists_apps_when_opened_and_sorts_them(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = open_uninstaller(cx);
+    for id in ["alpha", "beta", "gamma"] {
+        assert!(has(cx, &format!("app-row:com.example.{id}")), "{id}");
+    }
+    let y = |cx: &mut VisualTestContext, id: &str| {
+        bounds(cx, &format!("app-row:com.example.{id}"))
+            .unwrap()
+            .origin
+            .y
+    };
+    assert!(y(cx, "alpha") < y(cx, "beta") && y(cx, "beta") < y(cx, "gamma"));
+    click(cx, "sort-size");
+    assert!(y(cx, "beta") < y(cx, "gamma") && y(cx, "gamma") < y(cx, "alpha"));
+    let status = model(cx).read_with(cx, |m, _| m.uninstall.list_status());
+    assert_eq!(
+        status,
+        "3 apps, 1.3 GB \u{b7} Tidy doesn't list Apple's apps or itself"
+    );
+    // Another visit soon after does not list again; Cmd-R does.
+    keys(cx, "cmd-1");
+    keys(cx, "cmd-6");
+    assert!(
+        !h.drain()
+            .iter()
+            .any(|c| matches!(c, Command::ListApps { .. }))
+    );
+    keys(cx, "cmd-r");
+    assert!(
+        h.drain()
+            .iter()
+            .any(|c| matches!(c, Command::ListApps { .. }))
+    );
+}
+
+#[::gpui::test]
+fn opening_an_app_shows_its_files_ticked_as_found(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = open_uninstaller(cx);
+    open_beta(&mut h, cx, un_plan(None));
+    assert!(has(cx, "uninstaller-app") && has(cx, "breadcrumb"));
+    for id in [BETA, BETA_CACHE, BETA_GROUP] {
+        assert!(has(cx, &format!("leftover-check:{id}")), "{id}");
+    }
+    // The Report only row has no checkbox.
+    assert!(has(
+        cx,
+        "leftover-row:/Library/LaunchDaemons/com.example.beta.plist"
+    ));
+    assert!(!has(
+        cx,
+        "leftover-check:/Library/LaunchDaemons/com.example.beta.plist"
+    ));
+    let status =
+        |cx: &mut VisualTestContext| model(cx).read_with(cx, |m, _| m.uninstall.detail_status());
+    assert_eq!(status(cx), "2 of 3 selected, 950 MB");
+    click(cx, &format!("leftover-check:{BETA_GROUP}"));
+    assert_eq!(status(cx), "3 of 3 selected, 955 MB");
+    // Cmd-Up and the breadcrumb go back to the list.
+    keys(cx, "cmd-up");
+    assert!(has(cx, "uninstaller") && !has(cx, "uninstaller-app"));
+    open_beta(&mut h, cx, un_plan(None));
+    click(cx, "crumb-apps");
+    assert!(has(cx, "app-row:com.example.beta"));
+}
+
+#[::gpui::test]
+fn uninstall_asks_with_the_receipt_then_moves_and_goes_back(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_uninstaller(cx);
+    open_beta(&mut h, cx, un_plan(None));
+    click(cx, "uninstall-button");
+    let spec = dialog_of(&view, cx).expect("the receipt");
+    assert_eq!(spec.kind, DialogKind::Uninstall);
+    assert_eq!(spec.title, "Uninstall Beta?");
+    assert!(h.drain().is_empty(), "nothing moves before Move to Trash");
+    tab(cx);
+    press(cx, "enter");
+    match &h.drain()[..] {
+        [Command::Uninstall { app, ids }] => {
+            assert_eq!(app, &PathBuf::from(BETA));
+            assert_eq!(ids, &[BETA.to_string(), BETA_CACHE.to_string()]);
+        }
+        other => panic!("{other:?}"),
+    }
+    push(
+        &h,
+        cx,
+        vec![
+            Event::ItemTrashed {
+                id: BETA.into(),
+                trash_path: None,
+            },
+            Event::ItemTrashed {
+                id: BETA_CACHE.into(),
+                trash_path: None,
+            },
+            Event::CleanProgress { done: 2, total: 2 },
+        ],
+    );
+    assert!(has(cx, &format!("leftover-row:{BETA_CACHE}")), "fading");
+    advance(cx, 160);
+    assert!(!has(cx, &format!("leftover-row:{BETA_CACHE}")));
+    push(
+        &h,
+        cx,
+        vec![Event::CleanDone(entry(
+            Source::Uninstaller,
+            Action::Uninstall,
+            vec![
+                history_item(BETA, ItemResult::Trashed, None),
+                history_item(BETA_CACHE, ItemResult::Trashed, None),
+            ],
+            950 * MB,
+        ))],
+    );
+    // Back on the list, without Beta, with the notice and its Empty Trash button.
+    assert!(has(cx, "uninstaller") && !has(cx, "uninstaller-app"));
+    assert!(!has(cx, "app-row:com.example.beta"));
+    assert!(has(cx, "notice") && has(cx, "notice-empty-trash"));
+    assert!(model(cx).read_with(cx, |m, _| m.uninstall.removing.is_none()));
+}
+
+#[::gpui::test]
+fn a_skipped_item_keeps_the_app_open_with_the_reason(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_uninstaller(cx);
+    open_beta(&mut h, cx, un_plan(None));
+    view.update(cx, |v, cx| v.request_uninstall(cx));
+    view.update(cx, |v, cx| v.confirm_dialog(cx));
+    h.drain();
+    push(
+        &h,
+        cx,
+        vec![
+            Event::ItemSkipped {
+                id: BETA.into(),
+                reason: "Quit Beta first".into(),
+            },
+            Event::ItemTrashed {
+                id: BETA_CACHE.into(),
+                trash_path: None,
+            },
+            Event::CleanDone(entry(
+                Source::Uninstaller,
+                Action::Uninstall,
+                vec![
+                    history_item(BETA, ItemResult::Skipped, Some("Quit Beta first")),
+                    history_item(BETA_CACHE, ItemResult::Trashed, None),
+                ],
+                50 * MB,
+            )),
+        ],
+    );
+    assert!(has(cx, "uninstaller-app"), "the app stays open");
+    let skipped = model(cx).read_with(cx, |m, _| m.uninstall.skipped.get(BETA).cloned());
+    assert_eq!(skipped.as_deref(), Some("Quit Beta first"));
+    assert!(has(cx, "notice"));
+}
+
+#[::gpui::test]
+fn an_open_app_turns_uninstall_off_until_it_quits(cx: &mut TestAppContext) {
+    let (mut h, view, cx) = open_uninstaller(cx);
+    open_beta(&mut h, cx, un_plan(Some("Quit Beta first")));
+    let meta = model(cx).read_with(cx, |m, _| m.uninstall.can_uninstall());
+    assert!(!meta);
+    click(cx, "uninstall-button");
+    assert!(dialog_of(&view, cx).is_none(), "the button is off");
+    // While it is open, the process list is read every 3 seconds.
+    cx.executor().advance_clock(RUNNING_PERIOD);
+    cx.run_until_parked();
+    assert!(h.drain().iter().any(|c| matches!(c, Command::CheckRunning)));
+    push(&h, cx, vec![Event::RunningChanged(RunningSet::default())]);
+    assert!(model(cx).read_with(cx, |m, _| m.uninstall.can_uninstall()));
+    click(cx, "uninstall-button");
+    assert!(dialog_of(&view, cx).is_some());
+    // Once it quit, nothing polls.
+    keys(cx, "escape");
+    cx.executor().advance_clock(RUNNING_PERIOD);
+    cx.run_until_parked();
+    assert!(!h.drain().iter().any(|c| matches!(c, Command::CheckRunning)));
 }

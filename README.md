@@ -6,13 +6,14 @@ Tidy is a macOS utility that replaces CleanMyMac: it finds space you can get bac
 
 ## What it does
 
-Five screens in the sidebar:
+Six screens in the sidebar:
 
 - Check up: one button runs the cleanup scan, the Security checks and a memory snapshot, and shows three cards that link to their screens. Holds the opt-in weekly reminder, the "What is System Data on this Mac?" sheet and the "What Tidy never does" list.
 - Cleanup: space you can get back, in six groups (System and app caches, Logs, Developer, AI models and large app data, Old installers, Trash). Safe items are ticked, Review items are not. Details on each row says why it is offered, what rebuilds it, which checks guard the move and which rule matched. Old installers lists `.dmg` and `.pkg` files in Downloads older than 30 days, always unticked.
 - Large files: the biggest files and folders, or the ones not opened lately, with Reveal and Move to Trash.
 - Memory: a verdict from memory pressure, Pressure, Swap used and Compressed, a pressure graph, and the top apps by memory with Relaunch and a polite Quit. Chrome, Edge, Brave and Arc rows above 4 GB name the browser's own memory setting. This is the only screen that polls (every 2 seconds, only while visible).
 - Security: FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against your last check.
+- Uninstaller: the apps in `/Applications` and `~/Applications` with their sizes. Open one to see the app and what it left in your Library (Application Support, Caches, Preferences, Containers and Group Containers, Saved Application State, Logs, HTTPStorages, WebKit data and launch agents), matched by bundle ID, helper IDs and signing team, each with its size. Uninstall shows a receipt first and moves everything to the Trash. Apple's apps and Tidy are never listed, an open app can't be uninstalled until it quits, and files in `/Library` are listed but left alone.
 
 Other behavior:
 
@@ -27,13 +28,13 @@ Other behavior:
 
 | Keys | Action |
 |---|---|
-| Cmd-1 to Cmd-5 | Check up, Cleanup, Large files, Memory, Security |
+| Cmd-1 to Cmd-6 | Check up, Cleanup, Large files, Memory, Security, Uninstaller |
 | Cmd-R | Run the current screen again |
 | Tab, Shift-Tab | Move through the sidebar, toolbar, rows (checkbox, Details, Reveal, more) and status bar |
 | Space, Return | Press the focused control |
 | Esc | Close a dialog, sheet or menu; focus returns to what opened it |
 
-A focus ring shows only while the last input was a key press. Dialogs open with Cancel focused, so Return alone never confirms. Cmd-1 to Cmd-5 and Cmd-R work wherever focus is.
+A focus ring shows only while the last input was a key press. Dialogs open with Cancel focused, so Return alone never confirms. Cmd-1 to Cmd-6 and Cmd-R work wherever focus is.
 
 ## Permissions and what it never does
 
@@ -44,7 +45,7 @@ A focus ring shows only while the last input was a key press. Dialogs open with 
 - Never runs in the background: nothing starts at login, no helper, no launch agent, no sudo.
 - Never kills a process. Quit is a polite request; Force Quit needs a confirm.
 - Never runs cleanup commands for you (`brew cleanup`, `pnpm store prune`, `simctl delete`, `purge`, `tmutil`, `docker`). It shows the command to copy. The one exception is read-only `tmutil listlocalsnapshots /`.
-- Never shows alarms, badges, countdowns or upgrade copy. It scans only the home folder and has a hard denylist (Mail, Messages, Safari, Keychains, iCloud Drive, Photos library, `.ssh` and more).
+- Never shows alarms, badges, countdowns or upgrade copy. Cleanup and Large files scan only the home folder and have a hard denylist (Mail, Messages, Safari, Keychains, iCloud Drive, Photos library, `.ssh` and more).
 
 ## Install and updates
 
@@ -73,7 +74,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude tidy-app
 cargo test -p tidy-app -- --test-threads=1
 cargo test -p tidy-core trash::      # one crate or a filter
-scripts/accept.sh offline            # AC1 to AC9 and U1; a full run has FAIL 0 and SKIP 0
+scripts/accept.sh offline            # AC1 to AC10 and U1; a full run has FAIL 0 and SKIP 0
 ```
 
 AC6 and AC7 read this Mac read-only (`sysctl`, `vm_stat`, `top`, `fdesetup`, `socketfilterfw`, `spctl`, `csrutil`, launch agent folders and signatures).
@@ -107,6 +108,9 @@ TIDY_HOME="$T" cargo run -p tidy-cli -- security [--include-updates]   # updates
 | `checkup [--include-updates]` | Scan, Security and memory; appends to `data/checkups.jsonl` |
 | `explain ID` | Details of one item: reason, rebuild, checks, rule and pattern |
 | `system-data` | What Tidy can measure of System Data |
+| `apps` | The apps the Uninstaller lists |
+| `leftovers APP` | An app (path or bundle ID) and what it left in the Library |
+| `uninstall APP [--ids ...]` | Move an app and its ticked leftovers to the Trash (same rule as `clean`) |
 
 Screenshots, light and dark, 1800 x 1240 px, without a window or a change of frontmost app:
 
@@ -121,7 +125,7 @@ They go to `docs/app-shots/<scenario>-<light|dark>.png`. `history` and `cleanup-
 | Crate | Contents |
 |---|---|
 | `crates/tidy-core` | Library, no UI: model, command and event API, environment and test seams (`MemoryProbe`, `CommandRunner`, `OpenFilesProbe`), project guard, settings, history, instance lock, Trash guard, walker, memory engine, Security checks, check up log, reminder math, core actor |
-| `crates/tidy-app` | GPUI app (library plus `tidy` binary): sidebar, five screens, History sheet, dialogs, `Terminator` and `Notifier` wrappers, demo scenarios |
+| `crates/tidy-app` | GPUI app (library plus `tidy` binary): sidebar, six screens, History sheet, dialogs, `Terminator` and `Notifier` wrappers, demo scenarios |
 | `crates/tidy-cli` | `tidyctl`, a headless driver that prints one JSON object per line |
 | `crates/tidy-fixtures` | `tidy-fixture-home`: fake home folders with exact sizes and dates, fake Security output and process table |
 

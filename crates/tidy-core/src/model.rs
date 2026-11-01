@@ -538,6 +538,9 @@ pub enum Action {
     Trash,
     /// Empty Trash: permanent deletion of the items Tidy moved to the Trash.
     EmptyTrash,
+    /// Uninstall on the Uninstaller screen (or `tidyctl uninstall`): an app and its
+    /// leftovers to the Trash.
+    Uninstall,
 }
 
 /// Which screen started the action.
@@ -546,6 +549,7 @@ pub enum Action {
 pub enum Source {
     Cleanup,
     Large,
+    Uninstaller,
 }
 
 /// Which Trash the items went to, so a reader can prove a test never used the real one.

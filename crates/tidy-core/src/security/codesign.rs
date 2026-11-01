@@ -79,6 +79,9 @@ pub struct Signature {
     /// check out), None when it does not apply (Apple's own programs) or no ticket was found
     /// offline.
     pub notarized: Option<bool>,
+    /// The team id of a team signature (`EQHXZ8M8AV`), for matching an app's shared
+    /// containers. None for Apple's own, unsigned and ad-hoc programs.
+    pub team_id: Option<String>,
 }
 
 impl Signature {
@@ -87,6 +90,7 @@ impl Signature {
         Signature {
             signer: Signer::Unknown,
             notarized: None,
+            team_id: None,
         }
     }
 }
@@ -132,6 +136,7 @@ pub fn check(path: &Path) -> Signature {
         return Signature {
             signer: Signer::Unsigned,
             notarized: Some(false),
+            team_id: None,
         };
     }
     let info = signing_info(&code);
@@ -139,14 +144,17 @@ pub fn check(path: &Path) -> Signature {
         return Signature {
             signer: Signer::Unsigned,
             notarized: Some(false),
+            team_id: None,
         };
     }
     if valid == 0 && satisfies(&code, "anchor apple") == Some(true) {
         return Signature {
             signer: Signer::Apple,
             notarized: None,
+            team_id: None,
         };
     }
+    let team_id = info.team_id.clone();
     let signer = match (info.team_name, info.team_id) {
         (Some(name), _) => Signer::Team(name),
         (None, Some(id)) => Signer::Team(id),
@@ -160,7 +168,11 @@ pub fn check(path: &Path) -> Signature {
         // Offline, a missing ticket does not prove the program is not notarized.
         satisfies(&code, "notarized").filter(|n| *n)
     };
-    Signature { signer, notarized }
+    Signature {
+        signer,
+        notarized,
+        team_id,
+    }
 }
 
 /// Whether `code` satisfies the requirement `text`. None when the requirement cannot be built

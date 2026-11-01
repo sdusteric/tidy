@@ -380,6 +380,8 @@ pub struct InstalledApp {
     pub bundle_id: String,
     /// `CFBundleExecutable`, the process name when the app runs.
     pub executable: Option<String>,
+    /// `CFBundleShortVersionString`.
+    pub version: Option<String>,
     pub path: PathBuf,
 }
 
@@ -515,6 +517,7 @@ pub fn read_app(app: &Path) -> Option<InstalledApp> {
             "CFBundleDisplayName",
             "CFBundleName",
             "CFBundleExecutable",
+            "CFBundleShortVersionString",
         ],
     );
     let bundle_id = keys.get("CFBundleIdentifier")?.clone();
@@ -528,6 +531,7 @@ pub fn read_app(app: &Path) -> Option<InstalledApp> {
         name,
         bundle_id,
         executable: keys.get("CFBundleExecutable").cloned(),
+        version: keys.get("CFBundleShortVersionString").cloned(),
         path: app.to_path_buf(),
     })
 }

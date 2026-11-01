@@ -323,7 +323,7 @@ fn stopped(stop: Option<&AtomicBool>) -> bool {
 /// `~/.Trash` without Full Disk Access), it keeps `moved_id`, the identity read from the
 /// original path right before the move: a move to the Trash is a rename on the same volume,
 /// which keeps the device, inode and birth time.
-fn record(
+pub(crate) fn record(
     path: &Path,
     trash_path: Option<PathBuf>,
     moved_id: Option<FileId>,
@@ -356,14 +356,14 @@ fn record(
 /// - The open files of the user's processes are read with libproc. A path that a process
 ///   holds open, or holds something open inside, is skipped; when they cannot be read, every
 ///   path is skipped.
-struct MoveGate {
+pub(crate) struct MoveGate {
     ignored: Vec<PathBuf>,
     open: Result<crate::env::OpenFiles, String>,
 }
 
 impl MoveGate {
     /// Reads the ignore list and the open files. The error is the ignore list's.
-    fn read(env: &Env) -> Result<MoveGate, String> {
+    pub(crate) fn read(env: &Env) -> Result<MoveGate, String> {
         let mut ignored = crate::settings::Settings::read_ignore_list(&env.paths.settings_file())
             .map_err(|e| {
             tracing::warn!("cannot read the ignore list: {e}");
@@ -384,7 +384,7 @@ impl MoveGate {
     }
 
     /// Passes `at` (the resolved form of `path`) on when neither check refuses it.
-    fn allows(&self, path: &Path, at: PathBuf) -> Result<PathBuf, (ItemResult, String)> {
+    pub(crate) fn allows(&self, path: &Path, at: PathBuf) -> Result<PathBuf, (ItemResult, String)> {
         let touches = |p: &Path| {
             self.ignored
                 .iter()
@@ -421,7 +421,7 @@ fn guarded(env: &Env, path: &Path) -> Result<PathBuf, (ItemResult, String)> {
 
 /// Moves a path the guard accepted. EPERM and EACCES read "macOS didn't allow access" and
 /// are never retried (design 6.2, rule 6).
-fn move_checked(
+pub(crate) fn move_checked(
     env: &Env,
     at: &Path,
 ) -> Result<(Option<PathBuf>, Option<FileId>), (ItemResult, String)> {
@@ -438,7 +438,7 @@ fn move_checked(
 }
 
 /// Whether `at` is one of Tidy's folders, inside one, or holds one.
-fn touches_tidy(env: &Env, at: &Path) -> bool {
+pub(crate) fn touches_tidy(env: &Env, at: &Path) -> bool {
     let p = &env.paths;
     [&p.data, &p.cache, &p.logs].into_iter().any(|d| {
         let d = d.canonicalize().unwrap_or_else(|_| d.clone());
@@ -497,7 +497,7 @@ fn is_permission(e: &io::Error) -> bool {
 
 /// Builds the entry, appends it to history (unless it has no items) and returns it. A failed
 /// write is logged and noted in the entry's message; the action itself already happened.
-fn finish(
+pub(crate) fn finish(
     env: &Env,
     action: Action,
     source: Source,
@@ -506,7 +506,7 @@ fn finish(
 ) -> HistoryEntry {
     let counted = match action {
         Action::EmptyTrash => ItemResult::Deleted,
-        Action::Clean | Action::Trash => ItemResult::Trashed,
+        Action::Clean | Action::Trash | Action::Uninstall => ItemResult::Trashed,
     };
     let at = env.now();
     let entry = HistoryEntry {

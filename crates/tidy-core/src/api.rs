@@ -22,6 +22,7 @@ use crate::model::{
 use crate::reminder::ReminderDate;
 use crate::settings::Settings;
 use crate::sysdata::SystemDataReport;
+use crate::uninstall::{AppList, UninstallPlan};
 
 /// Which scan a progress or stop event is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -113,6 +114,21 @@ pub enum Command {
         reply: oneshot::Sender<SystemDataReport>,
     },
 
+    // ----- Uninstaller (design section 19) -----
+    /// List the apps in the application folders, each measured (C47). Read-only, beside the
+    /// actor like [`Command::MeasureSystemData`].
+    ListApps { reply: oneshot::Sender<AppList> },
+    /// Look for the leftovers of the app at `app` (C48). Read-only, beside the actor. None
+    /// when `app` is not an app the uninstaller lists.
+    FindLeftovers {
+        app: PathBuf,
+        reply: oneshot::Sender<Option<UninstallPlan>>,
+    },
+    /// Move the app at `app` and the items named by `ids` (their paths) to the Trash, after
+    /// finding the leftovers again (C50). Queued with the other actions; answered with
+    /// progress, one [`Event::ItemTrashed`] or [`Event::ItemSkipped`] per id, then
+    /// [`Event::CleanDone`] whose source is `uninstaller`.
+    Uninstall { app: PathBuf, ids: Vec<String> },
     /// Stop everything cleanly, then reply on the channel.
     Shutdown(oneshot::Sender<()>),
 }
@@ -229,6 +245,27 @@ impl CoreHandle {
     pub async fn system_data(&self) -> Option<SystemDataReport> {
         let (reply, rx) = oneshot::channel();
         if self.send(Command::MeasureSystemData { reply }) {
+            rx.await.ok()
+        } else {
+            None
+        }
+    }
+
+    /// Asks the core to list the apps the uninstaller offers. None when the core is gone.
+    pub async fn apps(&self) -> Option<AppList> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::ListApps { reply }) {
+            rx.await.ok()
+        } else {
+            None
+        }
+    }
+
+    /// Asks the core for the leftovers of the app at `app`. The outer None means the core is
+    /// gone; the inner one that `app` is not a listed app.
+    pub async fn leftovers(&self, app: PathBuf) -> Option<Option<UninstallPlan>> {
+        let (reply, rx) = oneshot::channel();
+        if self.send(Command::FindLeftovers { app, reply }) {
             rx.await.ok()
         } else {
             None

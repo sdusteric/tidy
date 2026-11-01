@@ -25,11 +25,12 @@ Why build it: CleanMyMac costs a subscription, runs background agents, asks for 
 - Explain why the Mac is slow (memory pressure, swap, which apps use the most) and let the user quit an app politely (M2).
 - Give a weekly security summary in plain words, with each amber item linking to the right System Settings page (M2).
 - One "Check up" button that runs all of it, with an optional weekly reminder (M2).
+- Uninstall an app together with what it leaves in the home folder's Library (section 19, added 2026-10-31): the last CleanMyMac feature the user relied on.
 - Be safe by construction: every removal goes to the Trash and is written to a history file; tests and agents can never touch the real home folder or the real Trash.
 
 ## 3. Non-goals (for now)
 
-- App uninstaller (finding an app's leftovers).
+- Finding leftovers of apps that are already gone (orphans). The uninstaller of section 19 starts from an installed app.
 - Malware database or signature scanning. XProtect already does this; Tidy only reports whether XProtect is fresh.
 - App updater.
 - Menu bar monitor or any always-running agent.
@@ -681,3 +682,84 @@ From the animation gate (`motion/tidy.md`), all four rows:
 - **History.** An entry that opens fades its item rows in over `NOTE_IN`; rows below move at once; closing is instant.
 - Every motion is keyed by a fresh generation and plays only within `CHANGE_GATE` of the change, so a window that opens on a settled state, or a demo shot, shows it still. Under Reduce Motion nothing plays and nothing leaves through a copy.
 
+
+## 19. Uninstaller (design note, 2026-10-31)
+
+The user cancelled Setapp on 2026-10-26. The one CleanMyMac feature they still relied on was removing an app together with the files it leaves behind, and they asked for it on 2026-10-31. The brief: remove an app with its Application Support, Caches, Preferences, Containers and Group Containers, Saved Application State, Logs, HTTPStorages, WebKit data and launch agents, matched by bundle id and team; Trash only, never a permanent delete; never system apps, Apple apps or a running app; show what will move, with sizes, before anything moves. The calls below (C46 to C57) were made by the building agent without a question round, because the brief settled the behavior.
+
+### 19.1 Screen (C46)
+
+- **Sidebar.** A sixth row, "Uninstaller", after Security, Cmd-6, and the same item in the Go menu. Cmd-1 to Cmd-5 keep their screens. No trailing figure.
+- **List.** Toolbar: the title, a segmented "Name | Size" sort (Name by default), Rescan. No summary strip, as Large files. Rows are 52 pt: the app icon 32 (read from the bundle a few per frame, an `AppWindow` glyph tile until it loads), the name 13/600 `text` with a tag, the meta line 12 `text_2` ("Version 4.41 · Zoom Video Communications, Inc. · Opened 7 months ago": version, signing team, last-use phrase), the size 13/600 tnum `text` in the 80 pt column, and a trailing `ChevronRight` 12 `text_3`. The whole row is a key stop and a button (Space or Return opens it). Tag "Needs admin" on apps Tidy cannot move (19.4). Status bar: "12 apps, 9 GB · Tidy doesn't list Apple's apps or itself" at the left, "Listed 2 min ago" at the right.
+- **Listing** runs when the screen opens with no list, or a list older than 10 minutes (`STALE_SCAN_SECS`), and on Rescan or Cmd-R. Reading `/Applications` asks macOS for nothing, so no click is needed first (C3 is about privacy prompts). The toolbar shows the spinner and "Listing apps" while it runs; the old list stays, dimmed.
+- **Detail.** Opening a row shows that app on the same screen: the toolbar keeps the title and holds the primary "Uninstall…" (it opens the confirm, and is off while nothing is ticked, while the app is open, while Tidy is looking, and while an uninstall runs, when it reads "Moving 3 of 10"). Under it a breadcrumb row "All apps > Slack" (as Folders mode; Cmd-Up and "All apps" go back). Then a 64 pt header: the app icon 40, the name 20 display bold, the meta line of the list row under it, and at the right the ticked total in the Figure role ("706 MB") over "selected". Rows are 44 pt, as Cleanup items: checkbox (a `Lock` for Report only rows), glyph tile 28 by kind (the app icon for the app row), the kind label 13/600 (`Slack.app` for the app row) with an optional tag ("Name match", "Review", "Report only", "Needs admin"), the meta line 12 (the path from `~` in mono, middle-truncated to fit, or the row's note in `text_2`, or a skip reason in `warning`), the size 13 tnum `text_2` in a 90 pt column ("Size unknown" when unreadable), and Reveal on hover. Clicking a row ticks it. Status bar: "9 of 10 selected, 706 MB".
+- **Looking.** Leftovers are found only when a row is opened (C48). While Tidy looks, the body says "Looking for its files" / "Tidy is looking for the files Slack left behind."; when they arrive the rows fade in over `CARD_IN` 200 ms (`enter` curve), keyed by the look and only within `CHANGE_GATE`, still under Reduce Motion. A late answer for an app that was closed is dropped.
+- **Open app** (C54). When the app or one of its helpers runs, the header's meta line turns `warning` and says "Quit Slack to uninstall it. Tidy checks again every few seconds." and Uninstall is off. The process list is read every 3 seconds while the detail is visible (the Cleanup watch, `CheckRunning`).
+- **Confirm** (C55). Always asked, like Large files (C14): the receipt dialog, titled "Uninstall Slack?", a line per item with its kind and size, the total, and "Nothing is deleted. Every item goes to the Trash and Tidy writes it in History, so you can put it back." When a launch agent is ticked it adds "Launch agents stop running after you log out or restart." Buttons: Cancel (focused), Move to Trash.
+- **During and after.** Rows fade out over `REMOVE` 140 ms as each reaches the Trash (the existing motion); a skipped row stays with its reason in the meta line, in `warning`. When the app itself went to the Trash and nothing was skipped, the screen goes back to the list, the app's row is gone, and the band says "Moved 706 MB to the Trash. Empty the Trash to free the space." with Empty Trash… and Show History (the same band as Cleanup). Otherwise the detail stays, with the same band, or "Tidy moved nothing. Each row says why." when nothing moved.
+- **Motion** (motion gate, `app-updates/docs/motion-gate.md`). One new motion: the rows' fade-in after a look (occasional, preventing a jarring change, 200 ms, an existing token). Rejected: a transition on the drill-down (list navigation, and Folders mode drills instantly) and moving rows when the sort changes (rows the user reads do not move for style). The trashed-row fade is `REMOVE`; the band and the receipt use their existing motion.
+
+### 19.2 Which apps are listed (C47)
+
+- Every `*.app` folder directly in `/Applications` and `~/Applications`, and one level down (`Utilities`, `Setapp`, `Chrome Apps.localized`). Under `TIDY_HOME` only `<scan root>/Applications` (the same folders `InstalledApps` reads). Links are not followed.
+- Left out, and never offered anywhere in the uninstaller: a bundle id that starts with `com.apple.`, a bundle signed by Apple itself (`anchor apple`), Tidy (`dev.sdusteric.tidy` and the shots build), the app Tidy runs from, and a bundle with no `Info.plist` or no bundle id.
+- Per app: name (`CFBundleDisplayName`, `CFBundleName`, file name), bundle id, `CFBundleShortVersionString`, the executable, the team id and team name from the code signature (none when unsigned), the allocated size of the bundle, the last-use date (Spotlight, else the bundle's file times, as Large files), the helper bundle ids (19.3), and whether Tidy can move it (19.4).
+
+### 19.3 What counts as a leftover (C49)
+
+All under `~/Library` (the scan root's `Library`), read only after a click. "Matches the app" means the entry's name, case-insensitively, equals one of the app's ids or starts with one of them followed by a dot. The ids are the app's bundle id and the bundle ids of its helpers: `Contents/PlugIns/*.appex`, `Contents/Library/LoginItems/*.app`, `Contents/Helpers/*.app`. An entry that also matches a longer id of another installed app belongs to that app instead, so uninstalling `com.google.Chrome` never takes `com.google.Chrome.canary`.
+
+| Kind | Where | Matched by |
+|---|---|---|
+| Application Support | `Application Support/<entry>` | ids; or the app's name |
+| Caches | `Caches/<entry>` | ids; or the app's name |
+| Preferences | `Preferences/<entry>.plist`, `Preferences/ByHost/<entry>.plist` | ids (the host UUID is the part after the id) |
+| Container | `Containers/<entry>` | ids |
+| Shared container | `Group Containers/<entry>` | `<team id>.<rest>` or `group.<id>` |
+| Application scripts | `Application Scripts/<entry>` | ids |
+| Saved window state | `Saved Application State/<id>.savedState` | ids |
+| Logs | `Logs/<entry>` | ids; or the app's name |
+| Web data | `HTTPStorages/<entry>` (folder and `.binarycookies`) | ids |
+| WebKit data | `WebKit/<entry>` | ids |
+| Launch agent | `LaunchAgents/*.plist` | the file name or `Label` matches the ids, or `Program` / `ProgramArguments[0]` lies inside the app bundle (a path with `..` never does) |
+
+- **Names.** Only Application Support, Caches and Logs folders match by name. A name match uses the display (or bundle) name, the file name and the executable, each at least 3 characters, never a vendor or framework word (`Google`, `Microsoft`, `Adobe`, `Apple`, `Mozilla`, `JetBrains`, `Electron`, `Python`, `Java`) and never a name another installed app (listed or not) or an app in `/System/Applications` also has. Name matches are ticked and carry the tag "Name match".
+- **Ids.** An app or helper whose bundle id is empty or has no dot is neither listed nor matched (an empty id would match `.GlobalPreferences.plist`). Helper ids under `com.apple.` are dropped, and no entry whose name starts with `com.apple.` is ever matched.
+- **A second copy.** When another installed bundle has one of the app's ids (`Slack 2.app`, or a direct download beside the App Store copy), every leftover is listed unticked with the tag "Review" and the note "Also used by Slack 2".
+- **Shared containers.** A `<team id>.<rest>` container is ticked when no other installed app has that team id, or when `<rest>` matches the app's ids. Otherwise it is listed unticked with the tag "Review" and the note "Shared with Word and Excel", because removing it would affect those apps.
+- **Outside the home folder** (C52). `/Library/LaunchAgents`, `/Library/LaunchDaemons`, `/Library/PrivilegedHelperTools` and `/Library/Application Support` entries that match the ids are listed as Report only (lock, no checkbox, tag "Report only", note "Needs an administrator, so Tidy leaves it. Remove it in Finder."), with Reveal. Under `TIDY_HOME` that folder is `$TIDY_HOME/system/Library`.
+- Sizes are allocated bytes (`walk::measure`, staying on the item's volume). An entry Tidy cannot read is listed with "Size unknown" and stays ticked; the move decides.
+- Not leftovers: anything else in the Library, Tidy's own folders, the Trash, Documents, and the app's files in other apps' folders.
+
+### 19.4 Removing (C50, C51, C53)
+
+- One `Uninstall { app, ids }` command. The core finds the leftovers again from scratch at that moment and moves only ids that are in the fresh result and selectable; any other id is skipped with "Tidy didn't find this again. Open the app again first." The app goes first, then the leftovers in list order.
+- Its own guard, not `trash::check`: the app sits outside the scan root, and `Containers` and `Group Containers` are on the hard denylist that `trash::check` enforces for Cleanup and Large files. The guard is an allowlist instead. The app bundle must still be a real folder (not a link) whose parent resolves to one of the app folders of 19.2, with the same bundle id, not left out by 19.2, and not running. A leftover must still match the app by 19.3, sit directly in its expected folder, and that folder must resolve to the expected place under the resolved scan root (a linked `Library/Caches` is refused). A leftover that is a link is moved as the link. Then the shared last gate (`MoveGate`): the ignore list read fresh, and the open files of the user's processes. Report only rows are never moved.
+- Running: the app's bundle id, its executable, and its helpers' ids and executables. When any runs, or the process list cannot be read, every item is skipped with "Quit Slack first" (or "Tidy couldn't check whether Slack is open").
+- **Needs admin** (C51). An app bundle Tidy's user cannot rename (`access(W_OK)` fails on the bundle or its folder, as with Mac App Store apps and installer packages) is a Report only row: "Tidy can't move this app without an administrator. Drag it to the Trash in Finder, which asks for your password." Its leftovers can still be moved. Tidy never asks for a password. When macOS refuses the move itself (App Management), the row says "macOS didn't let Tidy move the app. Drag it to the Trash in Finder."
+- Quitting Tidy stops an uninstall before its next item; the items left are skipped with "Tidy stopped before this item".
+- Launch agents are moved, not unloaded: Tidy runs no `launchctl` command (C53), and the confirm says when they stop.
+- History: one entry, action `uninstall`, source `uninstaller`, each item with its rule (`uninstall.app`, `uninstall.caches` and so on). History lists it as "Uninstaller"; Empty Trash counts its items like any other move.
+
+### 19.5 Core, CLI and tests (C56, C57)
+
+- `tidy-core::uninstall`: `list_apps(env, signer) -> AppList`, `find_leftovers(env, signer, app) -> UninstallPlan`, `uninstall(env, signer, app, ids, events) -> HistoryEntry`. The signer is a seam (`AppSigner`: Apple or not, team id, team name) with `CodeSign` in production and a fake in tests. Commands `ListApps { reply }` and `FindLeftovers { app, reply }` run beside the actor like `MeasureSystemData`; `Uninstall` is a queued action like `Clean`, ending in `CleanDone` with source `uninstaller`.
+- Acceptance: `scripts/accept.sh offline` adds AC10 (the core, tidyctl and app tests of the uninstaller), and AC9 now checks Cmd-1 to Cmd-6 and shoots six screens (twelve PNGs).
+- tidyctl: `apps` (the list), `leftovers APP` (the plan for an app path or bundle id), `uninstall APP [--ids ID,...]` (all ticked items by default). `uninstall` is destructive: it takes the lock and refuses the real home without `TIDY_HOME` or `--real` (exit 5), like `clean`.
+- Tests build fixture homes in temp folders: `Applications/*.app` with XML `Info.plist`s, a Library with each kind of leftover, look-alikes that must not match (`com.example.app2`, a longer id of another app, a shared team container, a vendor-named folder, a linked `Library/Caches`), and a `system/Library`. They never read the real `~/Library` or `/Applications`, never use the macOS Trash, and never run `codesign` on real apps (the fake signer answers).
+- Demo scenarios `uninstaller` (the list), `uninstaller-app` (zoom.us with name matches, a shared container under Review, a launch agent and two Report only rows) and `uninstaller-confirm` (its receipt) cover the screenshots. The demo shows glyph tiles where the real app shows app icons.
+
+### 19.6 Calls
+
+- C46. The uninstaller is a sixth screen, "Uninstaller", Cmd-6, after Security, with the app's details on the same screen behind a breadcrumb.
+- C47. It lists `/Applications` and `~/Applications` one level deep, and leaves out Apple's apps (id or signature), Tidy and the running copy of Tidy. Listing needs no click.
+- C48. Leftovers are looked for only when the user opens an app, since reading a sandboxed app's container may bring up macOS's "access data from other apps" prompt.
+- C49. Matching is by bundle id and helper ids with a dot boundary, the longest installed id wins, names only when unique and not a vendor word, and team containers only when no other installed app shares the team.
+- C50. The uninstaller has its own allowlist guard instead of the Cleanup denylist, because the app lives outside the home folder and containers are on that denylist.
+- C51. Apps Tidy cannot move without an administrator are Report only; their leftovers can still go.
+- C52. Matches in `/Library` are Report only.
+- C53. Launch agents are moved but not unloaded; Tidy runs no `launchctl`.
+- C54. An open app, or one of its helpers, blocks the whole uninstall until it quits.
+- C55. Uninstall always asks first, with the receipt.
+- C56. One new motion, the rows' fade-in after a look, on the existing `CARD_IN` token.
+- C57. `tidyctl apps`, `leftovers` and `uninstall`.

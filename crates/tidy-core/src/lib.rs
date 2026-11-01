@@ -33,6 +33,7 @@ pub mod shelf;
 pub mod store;
 pub mod sysdata;
 pub mod trash;
+pub mod uninstall;
 pub mod walk;
 
 pub use api::{Command, CoreHandle, Event, ScanKind};

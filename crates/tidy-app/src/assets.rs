@@ -25,7 +25,13 @@ icon_assets!(
         TabletSmartphone,
         Container,
         Layers,
-        Lightbulb
+        Lightbulb,
+        FolderCog,
+        ScrollText,
+        PanelsTopLeft,
+        Rocket,
+        FileCog,
+        Package
     ]
 );
 
@@ -78,6 +84,14 @@ mod tests {
             IconName::Container,
             IconName::Layers,
             IconName::Lightbulb,
+            IconName::FolderCog,
+            IconName::ScrollText,
+            IconName::PanelsTopLeft,
+            IconName::Rocket,
+            IconName::FileCog,
+            IconName::Package,
+            IconName::Settings,
+            IconName::Globe,
             // From gpui-kit's default set.
             IconName::Info,
             IconName::Ban,

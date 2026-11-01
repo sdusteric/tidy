@@ -3,7 +3,7 @@
 #
 #   scripts/accept.sh offline
 #
-# Prints PASS, FAIL or SKIP for each criterion id (AC1 to AC9) and exits nonzero on any FAIL.
+# Prints PASS, FAIL or SKIP for each criterion id (AC1 to AC10) and exits nonzero on any FAIL.
 # The criteria are in docs/superpowers/specs/2026-10-23-tidy-design.md, sections 13 and 16.
 #
 #   AC1  gates: build, fmt, clippy, tests
@@ -14,7 +14,9 @@
 #   AC6  Memory: grouping and Quit tests, tidyctl memory on this Mac against sysctl, vm_stat, top
 #   AC7  Security: parser, signer and diff tests, tidyctl security on this Mac (read-only)
 #   AC8  Check up: tidyctl checkup on the fixture home, reminder math and permission tests
-#   AC9  App: sidebar order and Cmd-1 to Cmd-5, long paths, shots of all five screens
+#   AC9  App: sidebar order and Cmd-1 to Cmd-6, long paths, shots of all six screens
+#   AC10 Uninstaller: matching and guard tests on fixture homes, tidyctl apps, leftovers and
+#        uninstall into the folder Trash, the refusal without TIDY_HOME, the screen's tests
 #   U1   update contract on the bundle of AC5: Sparkle embedded and signed, the contract key,
 #        only the app links Sparkle (scripts/check-updates.sh)
 #
@@ -918,7 +920,7 @@ ac8() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# AC9: the app, sidebar and screenshots of all five screens
+# AC9: the app, sidebar and screenshots of all six screens
 # ---------------------------------------------------------------------------------------------
 
 ac9() {
@@ -926,7 +928,7 @@ ac9() {
   local bad="" detail=""
 
   if run_named app-screens "-p tidy-app" \
-    the_sidebar_lists_five_screens_in_order_and_cmd_1_to_5_switch \
+    the_sidebar_lists_six_screens_in_order_and_cmd_1_to_6_switch \
     long_paths_in_large_files_are_fitted_to_the_row \
     cmd_r_rescans_each_new_screen; then
     detail="$detail sidebar-and-paths"
@@ -936,7 +938,7 @@ ac9() {
 
   if [ -n "${ACCEPT_SKIP_BUNDLE:-}" ]; then
     if [ -z "$bad" ]; then
-      skip AC9 "ACCEPT_SKIP_BUNDLE is set: the shots of the five screens were not made ($detail ran)"
+      skip AC9 "ACCEPT_SKIP_BUNDLE is set: the shots of the six screens were not made ($detail ran)"
     else
       fail AC9 "app:$detail$bad"
     fi
@@ -951,7 +953,7 @@ ac9() {
   : >"$stamp"
   sleep 1
   before=$(front)
-  if run_logged shots-m2 env SHOTS_RENDER=1 "$REPO/scripts/shots.sh" checkup memory security cleanup large; then
+  if run_logged shots-m2 env SHOTS_RENDER=1 "$REPO/scripts/shots.sh" checkup memory security cleanup large uninstaller; then
     detail="$detail shots"
   else
     bad="$bad [shots.sh failed, see $LAST_LOG]"
@@ -959,7 +961,7 @@ ac9() {
   after=$(front)
   [ "$before" = "$after" ] || bad="$bad [frontmost app changed: $before -> $after]"
   local f w h s sums="" dups scr
-  for scr in checkup cleanup large memory security; do
+  for scr in checkup cleanup large memory security uninstaller; do
     for s in light dark; do
       f="$scr-$s"
       if [ ! -s "$out/$f.png" ] || [ ! "$out/$f.png" -nt "$stamp" ]; then
@@ -973,14 +975,58 @@ ac9() {
 "
     done
   done
-  # Ten different pictures: a wrong scenario name or a stuck appearance would repeat one.
+  # Twelve different pictures: a wrong scenario name or a stuck appearance would repeat one.
   dups=$(printf '%s' "$sums" | sort | uniq -d | wc -l | tr -d ' ')
   [ "$dups" = 0 ] || bad="$bad [two shots are identical]"
 
   if [ -z "$bad" ]; then
-    pass AC9 "app:$detail; 10 shots at 1800x1240; frontmost app unchanged"
+    pass AC9 "app:$detail; 12 shots at 1800x1240; frontmost app unchanged"
   else
     fail AC9 "app:$detail$bad"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# AC10: the Uninstaller (design section 19)
+# ---------------------------------------------------------------------------------------------
+
+ac10() {
+  clear_tidy_env
+  local bad="" detail=""
+  if run_named uninstall-core "-p tidy-core --test uninstall" \
+    lists_apps_and_leaves_out_apple_and_tidy \
+    finds_each_kind_by_bundle_id \
+    longer_id_of_another_app_wins \
+    shared_team_container_is_review \
+    linked_library_folder_is_refused \
+    running_at_move_time_skips_everything \
+    unknown_ids_are_skipped \
+    moves_app_and_ticked_leftovers_to_dir_trash; then
+    detail="$detail core"
+  else
+    bad="$bad [uninstaller core tests failed, see $LAST_LOG]"
+  fi
+  if run_named uninstall-cli "-p tidy-cli --test cli" \
+    apps_and_leftovers_list_the_fixture_app \
+    uninstall_moves_the_app_and_its_leftovers \
+    destructive_commands_refuse_without_tidy_home; then
+    detail="$detail tidyctl"
+  else
+    bad="$bad [uninstaller tidyctl tests failed, see $LAST_LOG]"
+  fi
+  if run_named uninstall-app "-p tidy-app" \
+    the_uninstaller_lists_apps_when_opened_and_sorts_them \
+    opening_an_app_shows_its_files_ticked_as_found \
+    uninstall_asks_with_the_receipt_then_moves_and_goes_back \
+    an_open_app_turns_uninstall_off_until_it_quits; then
+    detail="$detail app"
+  else
+    bad="$bad [uninstaller app tests failed, see $LAST_LOG]"
+  fi
+  if [ -z "$bad" ]; then
+    pass AC10 "uninstaller:$detail"
+  else
+    fail AC10 "uninstaller:$detail$bad"
   fi
 }
 
@@ -997,6 +1043,7 @@ ac6
 ac7
 ac8
 ac9
+ac10
 
 echo
 echo "== summary"

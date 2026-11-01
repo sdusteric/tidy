@@ -109,10 +109,17 @@ pub enum Scenario {
     History,
     /// Cleanup with the keyboard on a row checkbox: the focus ring, and the row's actions.
     CleanupFocus,
+    /// The Uninstaller's list of apps (design section 19).
+    Uninstaller,
+    /// The Uninstaller with Zoom open: a by-name match, a shared container under Review, a
+    /// launch agent and two Report only rows in /Library.
+    UninstallerApp,
+    /// The same with the Uninstall receipt open.
+    UninstallerConfirm,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 22] = [
+    pub const ALL: [Scenario; 25] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -135,6 +142,9 @@ impl Scenario {
         Scenario::CleanupConfirm,
         Scenario::History,
         Scenario::CleanupFocus,
+        Scenario::Uninstaller,
+        Scenario::UninstallerApp,
+        Scenario::UninstallerConfirm,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -167,6 +177,9 @@ impl Scenario {
             Scenario::CleanupConfirm => "cleanup-confirm",
             Scenario::History => "history",
             Scenario::CleanupFocus => "cleanup-focus",
+            Scenario::Uninstaller => "uninstaller",
+            Scenario::UninstallerApp => "uninstaller-app",
+            Scenario::UninstallerConfirm => "uninstaller-confirm",
         }
     }
 
@@ -189,6 +202,9 @@ impl Scenario {
             | Scenario::MemoryCritical => Screen::Memory,
             Scenario::Security | Scenario::SecurityFirst | Scenario::SecurityItems => {
                 Screen::Security
+            }
+            Scenario::Uninstaller | Scenario::UninstallerApp | Scenario::UninstallerConfirm => {
+                Screen::Uninstaller
             }
             _ => Screen::Large,
         }
@@ -318,6 +334,7 @@ impl DemoState {
                     Some("Movies/2025/trip-raw.mov".to_string())
                 }
                 Scenario::SecurityItems => Some("user:com.dropbox.sync-agent".to_string()),
+                Scenario::UninstallerApp => Some(format!("{ROOT}/Library/Caches/us.zoom.xos")),
                 _ => None,
             },
             scroll_y: match scenario {
@@ -334,7 +351,10 @@ impl DemoState {
             },
             // Where the Spotify row's Details button sits: the popover's top right corner
             // hangs under it.
-            confirm: scenario == Scenario::CleanupConfirm,
+            confirm: matches!(
+                scenario,
+                Scenario::CleanupConfirm | Scenario::UninstallerConfirm
+            ),
             history: scenario == Scenario::History,
             focus_row: (scenario == Scenario::CleanupFocus)
                 .then(|| "clean:cache.app:Library/Caches/com.spotify.client".to_string()),
@@ -1331,6 +1351,15 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
             m.large.mode = LargeMode::Folders;
             m.large.folder = "Library".to_string();
         }
+        Scenario::Uninstaller => {
+            m.uninstall.list = Some(app_list());
+        }
+        Scenario::UninstallerApp | Scenario::UninstallerConfirm => {
+            m.uninstall.list = Some(app_list());
+            let plan = zoom_plan();
+            m.uninstall.open = Some(plan.app.path.clone());
+            m.set_uninstall_plan(Some(plan));
+        }
         _ => {}
     }
 }
@@ -1509,6 +1538,235 @@ pub fn start(scenario: Scenario, rt: tokio::runtime::Runtime, cx: &mut App) {
     .detach();
 }
 
+// ---------- Uninstaller ----------
+
+fn demo_app(
+    name: &str,
+    file: &str,
+    id: &str,
+    version: &str,
+    team: &str,
+    mb: u64,
+    days: u64,
+) -> tidy_core::uninstall::AppEntry {
+    tidy_core::uninstall::AppEntry {
+        path: PathBuf::from(format!("/Applications/{file}.app")),
+        name: name.to_string(),
+        bundle_id: id.to_string(),
+        version: Some(version.to_string()),
+        executable: Some(name.to_string()),
+        team_id: None,
+        team_name: (!team.is_empty()).then(|| team.to_string()),
+        bytes: mb * MB,
+        last_used: Some(NOW - days * DAY),
+        used_source: UseSource::Spotlight,
+        helpers: Vec::new(),
+        movable: true,
+    }
+}
+
+/// The apps the Uninstaller lists in the demo, by name.
+fn app_list() -> tidy_core::uninstall::AppList {
+    let mut apps = vec![
+        demo_app(
+            "1Password",
+            "1Password",
+            "com.1password.1password",
+            "8.10.48",
+            "AgileBits Inc.",
+            412,
+            0,
+        ),
+        demo_app(
+            "Blender",
+            "Blender",
+            "org.blenderfoundation.blender",
+            "4.2.3",
+            "Stichting Blender Foundation",
+            1_210,
+            160,
+        ),
+        demo_app(
+            "Discord",
+            "Discord",
+            "com.hnc.Discord",
+            "0.0.326",
+            "Discord, Inc.",
+            448,
+            12,
+        ),
+        demo_app(
+            "Docker",
+            "Docker",
+            "com.docker.docker",
+            "4.36.0",
+            "Docker Inc",
+            2_140,
+            75,
+        ),
+        demo_app(
+            "Figma",
+            "Figma",
+            "com.figma.Desktop",
+            "124.6.5",
+            "Figma, Inc.",
+            506,
+            3,
+        ),
+        demo_app(
+            "Google Chrome",
+            "Google Chrome",
+            "com.google.Chrome",
+            "131.0.6778.86",
+            "Google LLC",
+            1_480,
+            0,
+        ),
+        demo_app(
+            "Notion",
+            "Notion",
+            "notion.id",
+            "4.2.0",
+            "Notion Labs, Incorporated",
+            389,
+            30,
+        ),
+        demo_app(
+            "Raycast",
+            "Raycast",
+            "com.raycast.macos",
+            "1.86.1",
+            "Raycast Technologies Inc.",
+            296,
+            0,
+        ),
+        demo_app(
+            "Spotify",
+            "Spotify",
+            "com.spotify.client",
+            "1.2.50.335",
+            "Spotify",
+            341,
+            2,
+        ),
+        demo_app(
+            "Visual Studio Code",
+            "Visual Studio Code",
+            "com.microsoft.VSCode",
+            "1.95.3",
+            "Microsoft Corporation",
+            612,
+            1,
+        ),
+        demo_app(
+            "zoom.us",
+            "zoom.us",
+            "us.zoom.xos",
+            "6.2.11",
+            "Zoom Video Communications, Inc.",
+            381,
+            214,
+        ),
+    ];
+    let mut store = demo_app(
+        "Pixelmator Pro",
+        "Pixelmator Pro",
+        "com.pixelmatorteam.pixelmator.x",
+        "3.6.13",
+        "",
+        742,
+        96,
+    );
+    store.movable = false;
+    apps.push(store);
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    tidy_core::uninstall::AppList {
+        apps,
+        left_out: 31,
+        at: NOW - 120,
+    }
+}
+
+/// Zoom's files: what the Uninstaller found for it in the demo.
+fn zoom_plan() -> tidy_core::uninstall::UninstallPlan {
+    use tidy_core::uninstall::{Leftover, LeftoverKind as K, UninstallPlan};
+    let app = app_list()
+        .apps
+        .into_iter()
+        .find(|a| a.bundle_id == "us.zoom.xos")
+        .expect("zoom is in the demo list");
+    let lib = |rel: &str| format!("{ROOT}/Library/{rel}");
+    let row = |path: String, kind: K, bytes: u64| Leftover {
+        id: path.clone(),
+        path: PathBuf::from(path),
+        kind,
+        bytes: Some(bytes),
+        ticked: true,
+        selectable: true,
+        by_name: false,
+        note: None,
+    };
+    let mut items = vec![
+        row(app.path.to_string_lossy().into_owned(), K::App, app.bytes),
+        Leftover {
+            by_name: true,
+            ..row(lib("Application Support/zoom.us"), K::AppSupport, 212 * MB)
+        },
+        row(lib("Caches/us.zoom.xos"), K::Caches, 96 * MB),
+        row(lib("Preferences/us.zoom.xos.plist"), K::Preferences, 12_288),
+        Leftover {
+            ticked: false,
+            note: Some("Shared with Zoom Rooms".to_string()),
+            ..row(
+                lib("Group Containers/BJ4HAAB9B3.ZoomClient3rd"),
+                K::GroupContainer,
+                38 * MB,
+            )
+        },
+        row(
+            lib("Saved Application State/us.zoom.xos.savedState"),
+            K::SavedState,
+            41_000,
+        ),
+        Leftover {
+            by_name: true,
+            ..row(lib("Logs/zoom.us"), K::Logs, 14 * MB)
+        },
+        row(lib("HTTPStorages/us.zoom.xos"), K::WebData, 180_000),
+        row(lib("WebKit/us.zoom.xos"), K::WebKit, 3_100_000),
+        row(
+            lib("LaunchAgents/us.zoom.updater.login.check.plist"),
+            K::LaunchAgent,
+            4_096,
+        ),
+    ];
+    for path in [
+        "/Library/LaunchDaemons/us.zoom.ZoomDaemon.plist",
+        "/Library/PrivilegedHelperTools/us.zoom.ZoomDaemon",
+    ] {
+        items.push(Leftover {
+            ticked: false,
+            selectable: false,
+            note: Some(tidy_core::uninstall::NEEDS_ADMIN_NOTE.to_string()),
+            ..row(
+                path.to_string(),
+                K::System,
+                if path.ends_with("plist") {
+                    4_096
+                } else {
+                    1_400_000
+                },
+            )
+        });
+    }
+    UninstallPlan {
+        app,
+        items,
+        blocked: None,
+        root: PathBuf::from(ROOT),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,7 +1782,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 22);
+        assert_eq!(Scenario::ALL.len(), 25);
     }
 
     #[test]

@@ -47,6 +47,8 @@ pub enum DialogKind {
     ForceQuit { id: String },
     /// Move the launch agent with this key to the Trash (design section 5.4).
     TrashLoginItem { key: String },
+    /// Uninstall the open app with its ticked items (design section 19).
+    Uninstall,
 }
 
 /// The line under the receipt's total (Move to Trash dialogs).

@@ -1,5 +1,5 @@
-//! The sidebar (design section 11): 200 pt wide, the five screens (Check up, Cleanup, Large
-//! files, Memory, Security), and the free-space figure at the bottom.
+//! The sidebar (design section 11): 200 pt wide, the six screens (Check up, Cleanup, Large
+//! files, Memory, Security, Uninstaller), and the free-space figure at the bottom.
 
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -19,6 +19,7 @@ pub fn selector_for(screen: Screen) -> &'static str {
         Screen::Large => "sidebar-large",
         Screen::Memory => "sidebar-memory",
         Screen::Security => "sidebar-security",
+        Screen::Uninstaller => "sidebar-uninstaller",
     }
 }
 
@@ -30,6 +31,7 @@ pub fn figure_selector_for(screen: Screen) -> &'static str {
         Screen::Large => "sidebar-large-figure",
         Screen::Memory => "sidebar-memory-figure",
         Screen::Security => "sidebar-security-figure",
+        Screen::Uninstaller => "sidebar-uninstaller-figure",
     }
 }
 
@@ -40,7 +42,7 @@ pub fn figure_for(screen: Screen, m: &TidyModel) -> Option<String> {
     match screen {
         Screen::Cleanup => m.cleanup.safe_bytes().filter(|b| *b > 0).map(format::size),
         Screen::Large => m.large.item_count().map(|n| format::thousands(n as u64)),
-        Screen::Checkup | Screen::Memory | Screen::Security => None,
+        Screen::Checkup | Screen::Memory | Screen::Security | Screen::Uninstaller => None,
     }
 }
 

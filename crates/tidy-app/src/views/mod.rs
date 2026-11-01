@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod security;
 pub mod sidebar;
 pub mod trust;
+pub mod uninstaller;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;

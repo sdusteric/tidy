@@ -13,8 +13,8 @@ use tidy_core::api::Command;
 
 use crate::app::{
     DialogCancel, FocusNext, FocusPrev, GoCheckup, GoCleanup, GoLarge, GoMemory, GoSecurity,
-    MEMORY_PERIOD, MainWindow, Notice, ParentFolder, ROOT_CONTEXT, RUNNING_PERIOD, Rescan, Screen,
-    TidyModel, TrashSelection, background_mode, model, send,
+    GoUninstaller, MEMORY_PERIOD, MainWindow, Notice, ParentFolder, ROOT_CONTEXT, RUNNING_PERIOD,
+    Rescan, Screen, TidyModel, TrashSelection, background_mode, model, send,
 };
 use crate::format;
 use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
@@ -81,6 +81,9 @@ pub struct TidyView {
     pub(crate) cleanup_scroll: UniformListScrollHandle,
     pub(crate) large_scroll: UniformListScrollHandle,
     pub(crate) memory_scroll: UniformListScrollHandle,
+    /// The Uninstaller's app list and the open app's rows.
+    pub(crate) apps_scroll: UniformListScrollHandle,
+    pub(crate) leftovers_scroll: UniformListScrollHandle,
     pub(crate) security_scroll: ScrollHandle,
     pub(crate) checkup_scroll: ScrollHandle,
     pub(crate) sysdata_scroll: ScrollHandle,
@@ -209,7 +212,9 @@ impl TidyView {
                     cx.background_executor().timer(RUNNING_PERIOD).await;
                     let alive = this.update(cx, |v, cx| {
                         let m = v.model.read(cx);
-                        if m.screen == Screen::Cleanup && m.watches_running() {
+                        if (m.screen == Screen::Cleanup && m.watches_running())
+                            || (m.screen == Screen::Uninstaller && m.uninstall.watches_running())
+                        {
                             send(cx, Command::CheckRunning);
                         }
                     });
@@ -254,8 +259,18 @@ impl TidyView {
         }
         // The Move to Trash demo opens with its receipt showing.
         let dialog = crate::demo::state(cx).filter(|d| d.confirm).map(|_| {
-            let c = &model.read(cx).cleanup;
-            DialogSpec::review(&c.ticked_items())
+            let m = model.read(cx);
+            if m.screen == Screen::Uninstaller {
+                let name = m
+                    .uninstall
+                    .plan
+                    .as_ref()
+                    .map(|p| p.app.name.clone())
+                    .unwrap_or_default();
+                DialogSpec::uninstall(&name, &m.uninstall.ticked_rows())
+            } else {
+                DialogSpec::review(&m.cleanup.ticked_items())
+            }
         });
         TidyView {
             model,
@@ -263,6 +278,8 @@ impl TidyView {
             cleanup_scroll: UniformListScrollHandle::new(),
             large_scroll: UniformListScrollHandle::new(),
             memory_scroll: UniformListScrollHandle::new(),
+            apps_scroll: UniformListScrollHandle::new(),
+            leftovers_scroll: UniformListScrollHandle::new(),
             security_scroll,
             checkup_scroll,
             sysdata_scroll,
@@ -332,6 +349,7 @@ impl TidyView {
             Screen::Cleanup => Some((self.cleanup_scroll.clone(), metrics::CLEANUP_ROW_H)),
             Screen::Large => Some((self.large_scroll.clone(), metrics::LARGE_ROW_H)),
             Screen::Memory => Some((self.memory_scroll.clone(), metrics::CLEANUP_ROW_H)),
+            Screen::Uninstaller => Some(self.uninstall_list(cx)),
             Screen::Checkup | Screen::Security => None,
         }
     }
@@ -486,6 +504,9 @@ impl TidyView {
             }
             DialogKind::TrashLoginItem { key } => {
                 self.model.update(cx, |m, cx| m.trash_login_item(&key, cx));
+            }
+            DialogKind::Uninstall => {
+                self.model.update(cx, |m, cx| m.uninstall_ticked(cx));
             }
         }
         cx.notify();
@@ -943,6 +964,7 @@ impl Render for TidyView {
             Screen::Large => self.render_large(&t, cx),
             Screen::Memory => self.render_memory(&t, cx),
             Screen::Security => self.render_security(&t, cx),
+            Screen::Uninstaller => self.render_uninstaller(&t, cx),
         };
         let overlays = self.render_overlays(&t, cx);
         self.sync_layer_focus(window, cx);
@@ -990,6 +1012,12 @@ impl Render for TidyView {
             })
             .on_action({
                 let model = model.clone();
+                move |_: &GoUninstaller, _, cx| {
+                    model.update(cx, |m, cx| m.select_screen(Screen::Uninstaller, cx));
+                }
+            })
+            .on_action({
+                let model = model.clone();
                 move |_: &Rescan, _, cx| {
                     model.update(cx, |m, cx| m.rescan(cx));
                 }
@@ -997,7 +1025,13 @@ impl Render for TidyView {
             .on_action({
                 let model = model.clone();
                 move |_: &ParentFolder, _, cx| {
-                    model.update(cx, |m, cx| m.parent_folder(cx));
+                    model.update(cx, |m, cx| {
+                        if m.screen == Screen::Uninstaller {
+                            m.close_app(cx);
+                        } else {
+                            m.parent_folder(cx);
+                        }
+                    });
                 }
             })
             .on_action(cx.listener(|this, _: &TrashSelection, _, cx| this.trash_selection(cx)))

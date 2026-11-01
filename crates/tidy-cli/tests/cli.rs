@@ -160,6 +160,7 @@ fn destructive_commands_refuse_without_tidy_home() {
         ],
         vec!["trash", target.to_str().unwrap()],
         vec!["empty-trash"],
+        vec!["uninstall", "com.example.box"],
     ] {
         let run = f.tidyctl_with(&args, &vars);
         assert_eq!(run.code, 5, "{args:?}: {}", run.stdout);
@@ -362,4 +363,90 @@ fn bad_usage_exits_2() {
     }
     let help = f.tidyctl(&["--help"]);
     assert_eq!(help.code, 0);
+}
+
+/// Writes `Applications/Box.app` (bundle id `com.example.box`) and two of its leftovers into
+/// the fixture home, and returns the app's path.
+fn put_box(f: &Fixture) -> std::path::PathBuf {
+    let app = f.home.join("Applications/Box.app");
+    std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    std::fs::write(app.join("Contents/MacOS/Box"), vec![1u8; 8192]).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleIdentifier</key><string>com.example.box</string>\
+         <key>CFBundleName</key><string>Box</string>\
+         <key>CFBundleExecutable</key><string>Box</string></dict></plist>",
+    )
+    .unwrap();
+    for rel in [
+        "Library/Caches/com.example.box/a.bin",
+        "Library/Containers/com.example.box/Data/b.bin",
+    ] {
+        let p = f.home.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![2u8; 4096]).unwrap();
+    }
+    app
+}
+
+#[test]
+fn apps_and_leftovers_list_the_fixture_app() {
+    let f = Fixture::standard();
+    let app = put_box(&f);
+    let run = f.tidyctl(&["apps"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let apps = run.last();
+    assert_eq!(apps["event"], "apps");
+    let found: Vec<&str> = apps["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["bundle_id"].as_str().unwrap())
+        .collect();
+    assert!(found.contains(&"com.example.box"), "{found:?}");
+
+    let run = f.tidyctl(&["leftovers", "com.example.box"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let plan = run.last();
+    assert_eq!(plan["event"], "leftovers");
+    let kinds: Vec<&str> = plan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["app", "caches", "container"]);
+    assert_eq!(plan["app"]["path"], app.to_str().unwrap());
+
+    let run = f.tidyctl(&["leftovers", "com.example.nothing"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.last()["what"], "app");
+}
+
+#[test]
+fn uninstall_moves_the_app_and_its_leftovers() {
+    let f = Fixture::standard();
+    let app = put_box(&f);
+    let before = listing(&f.home);
+    let run = f.tidyctl(&["uninstall", "com.example.box"]);
+    assert_eq!(run.code, 0, "{}\n{}", run.stdout, run.stderr);
+    let done = run.last();
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["action"], "uninstall");
+    assert_eq!(done["source"], "uninstaller");
+    assert_eq!(done["trasher"], "dir");
+    assert_eq!(run.events("trashed").len(), 3);
+    assert_eq!(
+        names(&f.dir_trash()),
+        ["Box.app", "com.example.box", "com.example.box 2"]
+    );
+    assert!(!app.exists());
+    // Nothing else in the fixture home moved.
+    let after = listing(&f.home);
+    for p in before.keys().filter(|k| !after.contains_key(*k)) {
+        assert!(
+            p.contains("Box.app") || p.contains("com.example.box"),
+            "{p} moved"
+        );
+    }
 }

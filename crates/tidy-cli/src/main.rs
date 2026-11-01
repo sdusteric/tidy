@@ -64,6 +64,11 @@ commands:
   checkup [--include-updates]            Cleanup scan, Security checks and memory
   explain ID                             Why a Cleanup item is offered and what rebuilds it
   system-data                            What Tidy can measure of System Data (read-only)
+  apps                                   The apps the Uninstaller lists (read-only)
+  leftovers APP                          An app and the files it left in the Library (read-only)
+  uninstall APP [--ids ID,...] [--real]  Move an app and its ticked leftovers to the Trash
+
+APP is an app's path or bundle id.
 
 Destructive commands need TIDY_HOME, or --real to use the real home folder.";
 
@@ -120,15 +125,25 @@ enum Cmd {
         id: String,
     },
     SystemData,
+    Apps,
+    Leftovers {
+        app: String,
+    },
+    Uninstall {
+        app: String,
+        ids: Option<Vec<String>>,
+        real: bool,
+    },
 }
 
 impl Cmd {
     /// For a destructive command: whether `--real` was given.
     fn real(&self) -> Option<bool> {
         match self {
-            Cmd::Clean { real, .. } | Cmd::Trash { real, .. } | Cmd::EmptyTrash { real } => {
-                Some(*real)
-            }
+            Cmd::Clean { real, .. }
+            | Cmd::Trash { real, .. }
+            | Cmd::EmptyTrash { real }
+            | Cmd::Uninstall { real, .. } => Some(*real),
             _ => None,
         }
     }
@@ -261,8 +276,68 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
             None => Ok(Cmd::SystemData),
             Some(a) => Err(format!("system-data takes no arguments, got {a}")),
         },
+        "apps" => match it.next() {
+            None => Ok(Cmd::Apps),
+            Some(a) => Err(format!("apps takes no arguments, got {a}")),
+        },
+        "leftovers" => match (it.next(), it.next()) {
+            (Some(app), None) if !app.starts_with("--") => Ok(Cmd::Leftovers { app: app.clone() }),
+            (None, _) => Err("leftovers needs an app path or bundle id".into()),
+            _ => Err("leftovers takes one app".into()),
+        },
+        "uninstall" => {
+            let (mut app, mut ids, mut real) = (None, None, false);
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--ids" => {
+                        let list = it.next().ok_or("--ids needs a list of paths")?;
+                        ids.get_or_insert_with(Vec::new).extend(
+                            list.split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(String::from),
+                        );
+                    }
+                    "--real" => real = true,
+                    s if s.starts_with("--") => {
+                        return Err(format!("uninstall: unknown argument {s}"));
+                    }
+                    s if app.is_none() => app = Some(s.to_string()),
+                    _ => return Err("uninstall takes one app".into()),
+                }
+            }
+            let app = app.ok_or("uninstall needs an app path or bundle id")?;
+            Ok(Cmd::Uninstall { app, ids, real })
+        }
         other => Err(format!("unknown command {other}")),
     }
+}
+
+/// The plan of the listed app that `app` names, by path or bundle id (ignoring case). Prints
+/// the error line when there is none.
+fn find_plan(
+    rt: &tokio::runtime::Runtime,
+    core: &tidy_core::CoreHandle,
+    app: &str,
+) -> Option<tidy_core::uninstall::UninstallPlan> {
+    let as_path = std::path::Path::new(app);
+    let path = rt.block_on(core.apps()).and_then(|list| {
+        list.apps
+            .into_iter()
+            .find(|a| a.path == as_path || a.bundle_id.eq_ignore_ascii_case(app))
+            .map(|a| a.path)
+    });
+    let plan = match path {
+        Some(p) => rt.block_on(core.leftovers(p)).flatten(),
+        None => None,
+    };
+    if plan.is_none() {
+        print_line(&json!({
+            "event": "error", "what": "app",
+            "message": format!("{app} is not an app the Uninstaller lists"),
+        }));
+    }
+    plan
 }
 
 fn main() -> ExitCode {
@@ -509,6 +584,37 @@ fn with_core(cmd: Cmd) -> u8 {
                 line["measured_bytes"] = json!(report.measured_bytes());
                 print_line(&line);
                 code::OK
+            }
+            None => code::ERROR,
+        },
+        Cmd::Apps => match rt.block_on(core.apps()) {
+            Some(list) => {
+                print_line(&tagged("apps", &list));
+                code::OK
+            }
+            None => code::ERROR,
+        },
+        Cmd::Leftovers { app } => match find_plan(&rt, &core, &app) {
+            Some(plan) => {
+                print_line(&tagged("leftovers", &plan));
+                code::OK
+            }
+            None => code::ERROR,
+        },
+        Cmd::Uninstall { app, ids, .. } => match find_plan(&rt, &core, &app) {
+            Some(plan) => {
+                let ids = ids.unwrap_or_else(|| {
+                    plan.items
+                        .iter()
+                        .filter(|i| i.ticked)
+                        .map(|i| i.id.clone())
+                        .collect()
+                });
+                core.send(Command::Uninstall {
+                    app: plan.app.path,
+                    ids,
+                });
+                session.done()
             }
             None => code::ERROR,
         },
@@ -902,6 +1008,44 @@ mod tests {
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn parses_the_uninstaller_commands() {
+        assert_eq!(parse(&args("apps")), Ok(Cmd::Apps));
+        assert_eq!(
+            parse(&args("leftovers com.example.box")),
+            Ok(Cmd::Leftovers {
+                app: "com.example.box".into()
+            })
+        );
+        assert_eq!(
+            parse(&args("uninstall /Applications/Box.app --ids /a,/b --real")),
+            Ok(Cmd::Uninstall {
+                app: "/Applications/Box.app".into(),
+                ids: Some(vec!["/a".into(), "/b".into()]),
+                real: true,
+            })
+        );
+        for bad in [
+            "apps now",
+            "leftovers",
+            "uninstall",
+            "uninstall a b",
+            "uninstall a --x",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            Cmd::Uninstall {
+                app: "a".into(),
+                ids: None,
+                real: false
+            }
+            .real(),
+            Some(false)
+        );
+        assert_eq!(Cmd::Apps.real(), None);
     }
 
     #[test]

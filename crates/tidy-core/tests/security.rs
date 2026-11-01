@@ -967,6 +967,7 @@ fn a_fake_signature_checker_can_stand_in() {
             codesign::Signature {
                 signer: Signer::Team("Example Corp".into()),
                 notarized: Some(false),
+                team_id: None,
             }
         }
     }

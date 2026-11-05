@@ -10,6 +10,7 @@ pub mod memory;
 pub mod overlay;
 pub mod security;
 pub mod sidebar;
+pub mod size_map;
 pub mod trust;
 pub mod uninstaller;
 

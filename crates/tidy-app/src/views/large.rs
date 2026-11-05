@@ -20,6 +20,7 @@ use crate::format::{self, Glyph};
 use crate::theme::{DisplayType, MONO_FONT, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
+use crate::views::size_map::{self, FOLDER_MAP_H, MAP_BOTTOM, MapProps, MapTile, Seen, TileLook};
 use crate::views::{
     KeyStop, RowFocus, Segment, checkbox, glyph_tile, icon_button, plain_button, row_action,
     scroll_edge, segmented, tag,
@@ -46,6 +47,64 @@ pub fn glyph_icon(glyph: Glyph) -> IconName {
         Glyph::Folder => IconName::Folder,
         Glyph::Document => IconName::FileText,
     }
+}
+
+/// The key of the "smaller items" tile.
+pub const REST_KEY: &str = "\u{0}rest";
+
+/// The size map of the open folder (Folders mode): each row's tile, the smaller items last.
+/// A selected row is ink; a folder that opens shows a chevron.
+pub fn large_tiles(
+    rows: &[LargeRow],
+    selected: &BTreeSet<String>,
+    leaving: &std::collections::HashSet<String>,
+    w: f32,
+    h: f32,
+) -> Vec<MapTile> {
+    let sizes: Vec<f64> = rows
+        .iter()
+        .map(|r| match r {
+            LargeRow::Item(e) => e.bytes as f64,
+            LargeRow::Rest { bytes, .. } => *bytes as f64,
+        })
+        .collect();
+    let places = crate::treemap::squarify(&sizes, w, h);
+    rows.iter()
+        .zip(places)
+        .enumerate()
+        .map(|(i, (row, frac))| match row {
+            LargeRow::Item(e) => MapTile {
+                key: e.rel.clone(),
+                name: e.name.clone(),
+                size: format::size(e.bytes),
+                look: if selected.contains(&e.rel) {
+                    TileLook::Ticked
+                } else if e.drill {
+                    TileLook::Folder
+                } else {
+                    TileLook::Open
+                },
+                frac,
+                group: i.min(5),
+                leaving: leaving.contains(&e.rel),
+                tag: None,
+            },
+            LargeRow::Rest { count, bytes } => MapTile {
+                key: REST_KEY.to_string(),
+                name: format!(
+                    "{} smaller {}",
+                    format::thousands(*count),
+                    if *count == 1 { "item" } else { "items" }
+                ),
+                size: format::size(*bytes),
+                look: TileLook::Rest,
+                frac,
+                group: i.min(5),
+                leaving: false,
+                tag: None,
+            },
+        })
+        .collect()
 }
 
 /// What the render needs from the model, copied out so the borrow ends.
@@ -745,13 +804,14 @@ impl TidyView {
             )
         });
 
+        // The folder map sits between the breadcrumb and the rows, so the scrolled edge goes
+        // under the map (see `folder_map`).
         let breadcrumb = crumbs_shown.then(|| {
             div()
                 .flex_none()
                 .flex()
                 .flex_col()
                 .child(self.breadcrumb(t, &snap.crumbs, cx))
-                .child(scroll_edge(t, scrolled))
         });
 
         let items_empty = snap.item_count == 0 && snap.rows.is_empty();
@@ -840,7 +900,18 @@ impl TidyView {
             .pt(px(2.))
             .pb(px(8.))
             .when(dim, |l| l.opacity(0.5));
-            self.list_frame(list).into_any_element()
+            let map = (snap.mode == LargeMode::Folders).then(|| {
+                self.folder_map(t, &snap, cx)
+                    .child(scroll_edge(t, scrolled))
+            });
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(map)
+                .child(self.list_frame(list))
+                .into_any_element()
         };
 
         let left = snap.status_left();
@@ -887,6 +958,78 @@ impl TidyView {
             .child(body)
             .child(status)
             .into_any_element()
+    }
+
+    /// The open folder as a size map, above its rows (design section 20). A click on a folder
+    /// tile opens it; on a file or package it selects it, as the row's checkbox does.
+    fn folder_map(&mut self, t: &Theme, snap: &LargeView, cx: &mut Context<Self>) -> Div {
+        let w = self.map_width();
+        let tiles = large_tiles(&snap.rows, &snap.selected, &snap.leaving, w, FOLDER_MAP_H);
+        let opens: std::collections::HashSet<String> = snap
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                LargeRow::Item(e) if e.drill => Some(e.rel.clone()),
+                _ => None,
+            })
+            .collect();
+        let reduce_motion = cx.reduce_motion();
+        let result = snap.scanned_at.map(|at| at.to_string()).unwrap_or_default();
+        let view_key = format!("{:?}:{}", snap.mode, snap.min);
+        let folder = snap
+            .crumbs
+            .last()
+            .map(|(_, rel)| rel.clone())
+            .unwrap_or_default();
+        let groups = tiles.iter().map(|t| t.group + 1).max().unwrap_or(0);
+        self.large_map.observe(
+            Seen {
+                result: &result,
+                view: &view_key,
+                folder: &folder,
+                size: (w, FOLDER_MAP_H),
+                tiles: &tiles,
+                groups,
+            },
+            !reduce_motion,
+            &mut self.card_generation,
+        );
+        let live = self.large_map.live();
+        let model = self.model.clone();
+        let view = cx.entity().downgrade();
+        let map = size_map::render_map(
+            MapProps {
+                id: "folder-map",
+                tiles,
+                w,
+                h: FOLDER_MAP_H,
+                hovered: self.hovered.clone(),
+                live,
+                reduce_motion,
+                on_click: Rc::new(move |key, _, cx| {
+                    let opens = opens.contains(key);
+                    model.update(cx, |m, cx| {
+                        if opens {
+                            m.open_folder(key, cx);
+                        } else {
+                            m.toggle_select(key, cx);
+                        }
+                    });
+                }),
+                on_hover: Rc::new(move |key, h, _, cx| {
+                    let _ = view.update(cx, |v, cx| v.set_hovered(key, h, cx));
+                }),
+            },
+            t,
+        );
+        div().flex_none().flex().flex_col().child(
+            div()
+                .px(px(20.))
+                .pt(px(4.))
+                .pb(px(MAP_BOTTOM))
+                .when(snap.scanning.is_some(), |d| d.opacity(0.5))
+                .child(map),
+        )
     }
 
     /// The breadcrumb row of Folders mode: "Home > Library > Application Support". Earlier
@@ -1168,6 +1311,28 @@ mod tests {
             LargeRow::Rest { count, bytes } => assert_eq!((*count, *bytes), (6, 90 * MB)),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn folder_map_tiles_follow_the_rows() {
+        let mut l = state();
+        l.mode = LargeMode::Folders;
+        l.min = 100 * MB;
+        let rows = l.rows(NOW, 90);
+        let mut selected = BTreeSet::new();
+        selected.insert("Apps".to_string());
+        let tiles = large_tiles(&rows, &selected, &Default::default(), 600., 220.);
+        let look = |rel: &str| tiles.iter().find(|t| t.key == rel).map(|t| t.look);
+        assert_eq!(tiles.len(), rows.len());
+        // Library has contents, so its tile opens it; Movies is empty in the fixture.
+        assert_eq!(look("Library"), Some(TileLook::Folder));
+        assert_eq!(look("Movies"), Some(TileLook::Open));
+        assert_eq!(look("Apps"), Some(TileLook::Ticked));
+        let rest = tiles.last().unwrap();
+        assert_eq!(rest.key, REST_KEY);
+        assert_eq!(rest.look, TileLook::Rest);
+        assert!(!rest.look.clickable());
+        assert!(rest.name.ends_with("smaller items"));
     }
 
     #[test]

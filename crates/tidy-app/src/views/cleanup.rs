@@ -17,6 +17,9 @@ use crate::format;
 use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::dialogs::DialogSpec;
 use crate::views::main_window::TidyView;
+use crate::views::size_map::{
+    self, CLEANUP_MAP_H, GROUP_INSET, MAP_BOTTOM, MapProps, MapTile, Seen, TileLook,
+};
 use crate::views::{
     DOTS_W, KeyStop, RowFocus, check_dots, checkbox, icon_button, icon_button_at, large_button,
     plain_button, row_action, scroll_edge, tag,
@@ -180,6 +183,51 @@ pub fn cleanup_rows(c: &CleanupState) -> Vec<CleanRow> {
         }
     }
     rows
+}
+
+/// The size map's tiles: every item in the list that can be removed, grouped as the list
+/// groups them, in a `w` by `h` map. Report only items stay out: the map shows space you can
+/// get back. Collapsed groups keep their tiles.
+pub fn cleanup_tiles(c: &CleanupState, w: f32, h: f32) -> Vec<MapTile> {
+    let groups: Vec<Vec<&tidy_core::model::Item>> = c
+        .groups()
+        .into_iter()
+        .map(|g| {
+            c.visible_items(g)
+                .into_iter()
+                .filter(|i| i.class != Class::ReportOnly)
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .collect();
+    let sizes: Vec<Vec<f64>> = groups
+        .iter()
+        .map(|items| items.iter().map(|i| i.bytes_alloc as f64).collect())
+        .collect();
+    let places = crate::treemap::nested(&sizes, w, h, GROUP_INSET);
+    let mut tiles = Vec::new();
+    for (group, (items, places)) in groups.iter().zip(places).enumerate() {
+        for (item, frac) in items.iter().zip(places) {
+            let look = if !c.enabled(item) {
+                TileLook::Blocked
+            } else if c.is_ticked(item) {
+                TileLook::Ticked
+            } else {
+                TileLook::Open
+            };
+            tiles.push(MapTile {
+                key: item.id.clone(),
+                name: item.name.clone(),
+                size: format::size(item.bytes_alloc),
+                look,
+                frac,
+                group,
+                leaving: c.leaving.contains(&item.id),
+                tag: item.class.tag(),
+            });
+        }
+    }
+    tiles
 }
 
 /// What a row needs besides its own data.
@@ -811,12 +859,14 @@ impl TidyView {
             .pt(px(2.))
             .pb(px(8.))
             .when(dim, |l| l.opacity(0.5));
+            let map = self.cleanup_map(t, &snap, cx);
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .child(self.summary_strip(t, &snap, now))
+                .child(map)
                 .child(scroll_edge(t, scrolled))
                 .child(self.list_frame(list))
                 .into_any_element()
@@ -861,6 +911,58 @@ impl TidyView {
             .child(body)
             .child(status)
             .into_any_element()
+    }
+
+    /// The size map between the summary and the list (design section 20). A click on a tile
+    /// ticks its item, as the row's checkbox does.
+    fn cleanup_map(&mut self, t: &Theme, snap: &CleanupView, cx: &mut Context<Self>) -> Div {
+        let w = self.map_width();
+        let tiles = cleanup_tiles(&self.model.read(cx).cleanup, w, CLEANUP_MAP_H);
+        let reduce_motion = cx.reduce_motion();
+        let result = snap
+            .scanned_at
+            .map(|at| at.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let groups = tiles.iter().map(|t| t.group + 1).max().unwrap_or(0);
+        self.clean_map.observe(
+            Seen {
+                result: &result,
+                view: "",
+                folder: "",
+                size: (w, CLEANUP_MAP_H),
+                tiles: &tiles,
+                groups,
+            },
+            !reduce_motion,
+            &mut self.card_generation,
+        );
+        let live = self.clean_map.live();
+        let model = self.model.clone();
+        let view = cx.entity().downgrade();
+        let map = size_map::render_map(
+            MapProps {
+                id: "clean-map",
+                tiles,
+                w,
+                h: CLEANUP_MAP_H,
+                hovered: self.hovered.clone(),
+                live,
+                reduce_motion,
+                on_click: Rc::new(move |key, _, cx| {
+                    model.update(cx, |m, cx| m.toggle_item(key, cx));
+                }),
+                on_hover: Rc::new(move |key, h, _, cx| {
+                    let _ = view.update(cx, |v, cx| v.set_hovered(key, h, cx));
+                }),
+            },
+            t,
+        );
+        div()
+            .flex_none()
+            .px(px(20.))
+            .pb(px(MAP_BOTTOM))
+            .when(snap.scanning.is_some(), |d| d.opacity(0.5))
+            .child(map)
     }
 
     /// The Figure ("6.3 GB ready to clean"): Avenir Next at 800, the screen's one big number.
@@ -1046,6 +1148,30 @@ mod tests {
         m.load_demo(crate::app::Screen::Cleanup, Some(plan), None, None);
         std::mem::swap(&mut c, &mut m.cleanup);
         c
+    }
+
+    #[test]
+    fn map_tiles_follow_the_rows_state() {
+        let mut c = state();
+        c.leaving.insert("r:log".to_string());
+        let tiles = cleanup_tiles(&c, 600., 120.);
+        let look = |id: &str| tiles.iter().find(|t| t.key == id).map(|t| t.look);
+        assert_eq!(look("r:a"), Some(TileLook::Ticked));
+        assert_eq!(look("r:b"), Some(TileLook::Open));
+        assert_eq!(look("r:chrome"), Some(TileLook::Blocked));
+        // Report only items are never removed, so they have no tile.
+        assert_eq!(look("r:vm"), None);
+        assert_eq!(tiles.len(), 4);
+        assert!(tiles.iter().all(|t| t.frac.area() > 0.));
+        let log = tiles.iter().find(|t| t.key == "r:log").unwrap();
+        assert!(log.leaving);
+        // The biggest item gets the biggest tile.
+        let a = tiles.iter().find(|t| t.key == "r:a").unwrap();
+        assert!(tiles.iter().all(|t| t.frac.area() <= a.frac.area()));
+        assert_eq!(
+            tiles.iter().find(|t| t.key == "r:b").and_then(|t| t.tag),
+            Some("Review")
+        );
     }
 
     #[test]

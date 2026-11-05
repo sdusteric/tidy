@@ -461,7 +461,7 @@ Cards and groups (Check up cards, the reminder row, Memory figures and graph) sh
 
 **History sheet**: 560 x 480 pt, rows 44 pt: date 13/500, action and counts 12 `text_2`, size right; expanded items are 32 pt rows with mono paths.
 
-**Motion**: Haul's existing motions, plus two state changes. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. The reminder switch knob slides to its side over 160 ms (`enter` curve) after a click, and a Check up card fades its result in over 200 ms when its part reports; both play only within 400 ms of the change (`CHANGE_GATE`), so a window that opens on a settled state shows it still, and both are instant under Reduce Motion. Nothing counts up, nothing celebrates. Overlays (dialogs, History, System Data, the details popover) come in and leave as section 18.3 describes (C44).
+**Motion**: Haul's existing motions, plus two state changes. Row fade-out 140 ms when an item is trashed (send first, fade on `ItemTrashed`; restore the row with its skip reason on `ItemSkipped`). Notice band in 160 ms, out 200 ms. Indeterminate spinner while scanning. The reminder switch knob slides to its side over 160 ms (`enter` curve) after a click, and a Check up card fades its result in over 200 ms when its part reports; both play only within 400 ms of the change (`CHANGE_GATE`), so a window that opens on a settled state shows it still, and both are instant under Reduce Motion. Nothing counts up, nothing celebrates; the one exception is the disk bar moving after a clean (section 20, C61). Overlays (dialogs, History, System Data, the details popover) come in and leave as section 18.3 describes (C44).
 
 **Copy rules**: sentence case for text and labels, title case for buttons and menu items ("Open Network Settings", "Check Now", "Scan Home Folder"), plain words, sizes with one decimal above 1 GB ("6.3 GB", "640 MB"), dates as relative phrases ("8 months ago"), no exclamation marks. A button or menu item that opens a confirm ends in an ellipsis character ("Empty Trash…", "Move to Trash…", "Force Quit…"), and middle-truncated paths use it too (`~/Movies/2025/…/trip.mov`).
 
@@ -763,3 +763,35 @@ All under `~/Library` (the scan root's `Library`), read only after a click. "Mat
 - C55. Uninstall always asks first, with the receipt.
 - C56. One new motion, the rows' fade-in after a look, on the existing `CARD_IN` token.
 - C57. `tidyctl apps`, `leftovers` and `uninstall`.
+
+## 20. Size map (design note, 2026-11-04)
+
+The owner asked for more visuals and motion, and to see what can be deleted by size. Mockup: `docs/mockup/size-map.html` (and `size-map.png`).
+
+### 20.1 What it shows (C58, C59, C60)
+
+- A size map is a squarified treemap (`treemap::squarify`, `treemap::nested`): each tile's area is its size. Tiles sit in fractions of the map, so a resize keeps them in place. The map repeats the list and never replaces it: every tile is a row below it, and the list keeps the checkboxes, details and keyboard access.
+- **Cleanup** (C58): a 120 pt map between the summary line and the list, 20 pt margins, 12 pt below. Tiles are the items that can be removed, grouped as the list groups them (groups inset 2 pt, tiles 2 pt apart); a collapsed group keeps its tiles. Report only items stay off the map, since it shows space you can get back. A click on a tile ticks or unticks the item, as its checkbox does; a blocked tile takes no click.
+- **Large files, Folders mode** (C59): a 220 pt map of the open folder between the breadcrumb and the rows, the "smaller items" last. A click on a folder that has contents opens it, as the row's chevron does; on a file, package or empty folder it selects it. The smaller items tile takes no click. The scrolled hairline moves under the map.
+- **Look** (C60), in the Preflight tokens only: ink (`accent`, `on_accent` text) means ticked or selected, so it will move, as an ink checkbox does. Unticked tiles are `fill` with `text`. A blocked tile (quit the app first) is `fill` with a 1.5 pt `warning` outline and its size in `warning`. The smaller items tile is an outline in `separator` with `text_2`. Tiles have radius 6 (3 when under 24 pt), the name at 12/600 and the size at 12/600 tnum, the name only at 52 x 24 pt or more and the size only from 44 pt high. "Review" shows under the name from 60 pt high, and a folder that opens shows a `ChevronRight` from 72 pt wide. Hover draws a 2 pt ring (`text`, or `on_accent` at 70% on an ink tile) and lights the row; hovering a row rings its tile. A scan in progress dims the map to 50% with the list.
+
+### 20.2 Motion (C61)
+
+Checked against `app-updates/docs/motion-gate.md`. Each motion plays only on a change after the first frame, so a window that opens on a settled state, and a demo shot, show still; under Reduce Motion none of them plays.
+
+| Moment | Frequency | Purpose | Motion |
+|---|---|---|---|
+| Items reach the Trash | Occasional | Preventing a jarring change | The tile fades with its row (`REMOVE` 140 ms, `exit`), then the tiles left slide to their new places over `CARD_IN` 200 ms, `enter`. Only when the same result lost tiles and the map kept its size. |
+| Opening a folder tile, going back up | Occasional | Spatial consistency | The tile grows to fill the map over `ZOOM` 220 ms, `enter`; going up, the parent map starts with the child we left filling it and settles over the same time. A jump across, a new mode or a new threshold shows the new map at once. |
+| A scan result arrives | Occasional | Preventing a jarring change | Groups fade in `STAGGER` 40 ms apart, each over `CARD_IN`, `enter` (Large files: the first six tiles, then the rest with the sixth). Never blocks clicks. |
+| After a clean or a trash | Rare | State indication | The sidebar disk bar's used part moves to its new share over `DISK` 320 ms, `enter`; a move that is still playing starts again from where the bar is. The numbers change at once. |
+
+Rejected: counting the Figure up (a number the user reads), animating a tile on tick (tens a session), animating the Memory graph (live data), and any motion on Cmd-1 to Cmd-6.
+
+### 20.3 Calls
+
+- C58. Cleanup gets a size map of the removable items above the list; Report only items stay off it.
+- C59. Large files gets a size map in Folders mode only. Files mode stays a list, since its rows come from many folders and a map of them says less than the sorted list.
+- C60. Ink means "will move" on the map as on the checkboxes. No other color is added.
+- C61. Four motions on the existing curves, with three new durations (`ZOOM`, `STAGGER`, `DISK`). After a clean, only the disk bar moves, and it moves by the space freed.
+

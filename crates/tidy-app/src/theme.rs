@@ -432,6 +432,12 @@ pub mod motion {
     /// Play SWITCH or CARD_IN only within this time of the change, so a window that opens on
     /// a settled state (or a demo shot of it) shows it still.
     pub const CHANGE_GATE: Duration = Duration::from_millis(400);
+    /// The size map: a folder tile growing to fill the map, or shrinking back into its place.
+    pub const ZOOM: Duration = Duration::from_millis(220);
+    /// The size map: the gap between one group's tiles fading in and the next.
+    pub const STAGGER: Duration = Duration::from_millis(40);
+    /// The sidebar disk bar moving to its new used share after a clean or a trash.
+    pub const DISK: Duration = Duration::from_millis(320);
 
     fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> Easing {
         Easing::cubic_bezier(x1, y1, x2, y2).expect("control points are in range")

@@ -10,6 +10,7 @@ pub mod macos;
 pub mod motion;
 pub mod open_urls;
 pub mod theme;
+pub mod treemap;
 pub mod updates;
 pub mod views;
 

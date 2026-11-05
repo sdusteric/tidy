@@ -6,7 +6,7 @@ use gpui_kit::*;
 
 use crate::app::{Screen, TidyModel};
 use crate::format;
-use crate::theme::{DisplayType, Theme, metrics, tnum};
+use crate::theme::{DisplayType, Theme, metrics, motion as m, tnum};
 use crate::views::main_window::TidyView;
 use crate::views::trust::SYSDATA_LINK;
 use crate::views::{KeyStop, plain_button};
@@ -55,6 +55,9 @@ impl TidyView {
             .map(|s| (s, figure_for(s, model)))
             .collect();
         let disk = model.disk.clone();
+        let disk_fill = disk
+            .as_ref()
+            .map(|disk| self.disk_fill(t, disk.used_fraction(), cx));
         let link_model = self.model.clone();
 
         let drag = self.drag_area(
@@ -155,13 +158,7 @@ impl TidyView {
                                 .w_full()
                                 .rounded(px(2.))
                                 .bg(t.track)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(disk.used_fraction()))
-                                        .rounded(px(2.))
-                                        .bg(t.accent),
-                                ),
+                                .children(disk_fill),
                         )
                         .child(
                             div()
@@ -185,5 +182,46 @@ impl TidyView {
                         ))),
                 )
             })
+    }
+}
+
+impl TidyView {
+    /// The used part of the disk bar. After a clean or a trash it moves to the new share over
+    /// 320 ms (design section 20); a move that is still playing retargets from where it is.
+    /// The first frame, a demo and Reduce Motion show the share at once.
+    fn disk_fill(&mut self, t: &Theme, used: f32, cx: &mut Context<Self>) -> AnyElement {
+        let playing = |at: std::time::Instant| at.elapsed() < m::DISK;
+        if self.disk_move.is_some_and(|(at, _, _)| !playing(at)) {
+            self.disk_move = None;
+        }
+        if let Some(shown) = self.disk_shown
+            && (shown - used).abs() > 1e-4
+            && !cx.reduce_motion()
+            && crate::demo::state(cx).is_none()
+        {
+            // Start from where the bar is now, mid-move or not.
+            let from = match self.disk_move {
+                Some((at, _, from)) => {
+                    let d = m::enter().sample(at.elapsed().as_secs_f32() / m::DISK.as_secs_f32());
+                    from + (shown - from) * d
+                }
+                None => shown,
+            };
+            self.card_generation += 1;
+            self.disk_move = Some((std::time::Instant::now(), self.card_generation, from));
+        }
+        self.disk_shown = Some(used);
+        let fill = div().h_full().rounded(px(2.)).bg(t.accent);
+        match self.disk_move {
+            Some((_, generation, from)) => fill
+                .w(relative(from))
+                .with_animation(
+                    ("disk-bar", generation),
+                    Animation::new(m::DISK).with_easing(m::curve(m::enter())),
+                    move |el, d| el.w(relative(from + (used - from) * d)),
+                )
+                .into_any_element(),
+            None => fill.w(relative(used)).into_any_element(),
+        }
     }
 }

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tidy size map</title>
+<style>
+  :root {
+    --ground: #FAFAF8; --side: #F0F0EC; --ink: #0D0E0C; --on-ink: #FAFAF8;
+    --t2: #555852; --t3: #8A8C86; --line: #DADAD4; --band: #EFEFEB;
+    --ok: #0B7550; --amber: #A64B00; --dot: #CFCFC8;
+    --display: "Avenir Next", "Avenir", system-ui, sans-serif;
+    --body: -apple-system, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #E4E4DE; font-family: var(--body); color: var(--ink); padding: 32px; display: flex; flex-direction: column; gap: 40px; align-items: center; }
+  .label { font: 600 13px var(--body); color: var(--t2); width: 900px; margin-bottom: -28px; }
+  .win { width: 900px; height: 620px; background: var(--ground); border-radius: 12px; overflow: hidden; display: flex; box-shadow: 0 20px 50px rgba(0,0,0,.18), 0 0 0 .5px rgba(0,0,0,.2); }
+  .side { width: 200px; background: var(--side); border-right: 1px solid var(--line); padding: 52px 10px 16px; display: flex; flex-direction: column; }
+  .lights { position: absolute; }
+  .nav { display: flex; justify-content: space-between; padding: 0 12px; height: 34px; align-items: center; border-radius: 8px; font: 600 14px var(--display); color: var(--t2); margin-bottom: 4px; }
+  .nav.on { background: var(--ink); color: var(--on-ink); }
+  .nav small { font: 600 12px var(--display); font-variant-numeric: tabular-nums; }
+  .disk { margin-top: auto; padding: 0 6px; }
+  .disk b { font: 700 13px var(--display); }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; margin: 8px 0; display: flex; overflow: hidden; }
+  .bar i { display: block; background: var(--ink); }
+  .bar em { display: block; background: var(--ink); opacity: .35; }
+  .disk p { font-size: 12px; color: var(--t2); font-variant-numeric: tabular-nums; }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .head { padding: 18px 20px 0; display: flex; align-items: flex-start; }
+  .fig { font: 800 52px/1 var(--display); letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+  .fig span { font: 400 16px var(--body); color: var(--t2); letter-spacing: 0; margin-left: 6px; }
+  .btn { margin-left: auto; background: var(--ink); color: var(--on-ink); font: 700 14px var(--display); padding: 9px 16px; border-radius: 8px; }
+  .sub { padding: 8px 20px 12px; font-size: 12px; color: var(--t2); }
+  .map { position: relative; margin: 0 20px; }
+  .tile { position: absolute; border-radius: 5px; overflow: hidden; padding: 6px 8px; display: flex; flex-direction: column; justify-content: space-between; }
+  .tile .n { font: 600 12px/1.2 var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .s { font: 600 12px var(--display); font-variant-numeric: tabular-nums; }
+  .tile.pick { background: var(--ink); color: var(--on-ink); }
+  .tile.pick .s { opacity: .72; }
+  .tile.off { background: var(--band); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+  .tile.off .s { color: var(--t2); }
+  .tile.review { background: repeating-linear-gradient(135deg, var(--band) 0 6px, #E6E6E0 6px 7px); box-shadow: inset 0 0 0 1px var(--line); }
+  .tile.review .s { color: var(--t2); }
+  .tile.blocked { background: var(--band); box-shadow: inset 0 0 0 1.5px var(--amber); }
+  .tile.blocked .s { color: var(--amber); }
+  .tile.hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .tile.tiny { border-radius: 3px; }
+  .tile.tiny .n, .tile.tiny .s { display: none; }
+  .tile.small .s { display: none; }
+  .legend { display: flex; gap: 16px; padding: 10px 20px 0; font-size: 12px; color: var(--t2); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .rows { flex: 1; overflow: hidden; margin-top: 10px; border-top: 1px solid var(--line); }
+  .grp { margin: 8px 8px 0; background: var(--band); border-radius: 8px; height: 36px; display: flex; align-items: center; padding: 0 12px; gap: 10px; font: 700 14px var(--display); }
+  .grp small { font: 400 13px var(--body); color: var(--t2); }
+  .grp .sz { margin-left: auto; margin-right: 60px; }
+  .row { height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px 0 42px; margin: 0 8px; border-radius: 8px; }
+  .row.hover { background: var(--band); }
+  .cb { width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid rgba(0,0,0,.28); flex: none; }
+  .cb.on { background: var(--ink); border-color: var(--ink); }
+  .row .t { display: flex; flex-direction: column; }
+  .row .t b { font: 600 14px var(--display); }
+  .row .t span { font-size: 12px; color: var(--t2); }
+  .row .sz { margin-left: auto; margin-right: 60px; font: 700 14px var(--display); font-variant-numeric: tabular-nums; }
+  .status { height: 30px; background: var(--side); border-top: 1px solid var(--line); display: flex; align-items: center; padding: 0 20px; font-size: 12px; color: var(--t2); }
+  .status span:last-child { margin-left: auto; }
+  .tbar { height: 52px; display: flex; align-items: center; padding: 0 20px; gap: 8px; }
+  .tbar h1 { font: 700 18px var(--display); margin-right: auto; }
+  .seg { display: flex; background: var(--band); border-radius: 8px; padding: 2px; font: 600 13px var(--display); color: var(--t2); }
+  .seg span { padding: 4px 10px; border-radius: 6px; }
+  .seg .on { background: var(--ground); color: var(--ink); box-shadow: 0 0 0 .5px var(--line); }
+  .crumbs { padding: 0 20px 10px; font: 600 12px var(--display); color: var(--t2); }
+  .crumbs b { color: var(--ink); }
+  .tile.folder { background: var(--band); box-shadow: inset 0 0 0 1px var(--line); }
+  .tile.folder .s { color: var(--t2); }
+  .tile.folder.big { background: #E8E8E3; }
+  .tile.rest { background: transparent; box-shadow: inset 0 0 0 1px var(--line); color: var(--t2); }
+  .tile .chev { position: absolute; right: 8px; top: 6px; color: var(--t3); font-size: 12px; }
+  .tip { position: absolute; background: var(--ink); color: var(--on-ink); font-size: 12px; padding: 6px 9px; border-radius: 6px; white-space: nowrap; z-index: 5; font-variant-numeric: tabular-nums; }
+  .tip span { opacity: .7; }
+</style>
+</head>
+<body>
+
+<p class="label">1. Cleanup: the size map sits between the summary and the list. Ink tiles are ticked and will move.</p>
+<div class="win">
+  <div class="side">
+    <div class="nav">Check up</div>
+    <div class="nav on">Cleanup <small>6.3 GB</small></div>
+    <div class="nav">Large files</div>
+    <div class="nav">Memory</div>
+    <div class="nav">Security</div>
+    <div class="nav">Uninstaller</div>
+    <div class="disk"><b>Macintosh HD</b><div class="bar"><i style="width:78.8%"></i><em style="width:0.6%"></em></div><p>212 GB available of 1 TB</p></div>
+  </div>
+  <div class="main">
+    <div class="head"><div class="fig">6.3 GB<span>ready to clean</span></div><div class="btn">Clean 6.3 GB</div></div>
+    <div class="sub">19.4 GB more to review · Scanned 2 min ago</div>
+    <div class="map" id="cmap" style="height:150px"></div>
+    <div class="legend"><span><i style="background:var(--ink)"></i>Ticked, 6.3 GB</span><span><i style="background:repeating-linear-gradient(135deg,#EFEFEB 0 3px,#D6D6D0 3px 4px);box-shadow:inset 0 0 0 1px var(--line)"></i>Review, 19.4 GB</span><span><i style="box-shadow:inset 0 0 0 1.5px var(--amber)"></i>Quit the app first</span></div>
+    <div class="rows">
+      <div class="grp"><div class="cb on" style="opacity:.6"></div>AI models and large app data <small>2 items</small><span class="sz">12.9 GB</span></div>
+      <div class="row hover"><div class="cb"></div><div class="t"><b>Hugging Face cache</b><span>Downloaded models, fetched again on next use</span></div><span class="sz">8.2 GB</span></div>
+      <div class="row"><div class="cb"></div><div class="t"><b>Ollama models</b><span>llama3, not used for 62 days</span></div><span class="sz">4.7 GB</span></div>
+      <div class="grp"><div class="cb on" style="opacity:.6"></div>Developer <small>4 items</small><span class="sz">5.7 GB</span></div>
+      <div class="row"><div class="cb on"></div><div class="t"><b>Xcode DerivedData</b><span>Build output, not used for 7 days</span></div><span class="sz">2 GB</span></div>
+      <div class="row"><div class="cb"></div><div class="t"><b>pnpm store</b><span>Package cache, fetched again on install</span></div><span class="sz">1.8 GB</span></div>
+      <div class="row"><div class="cb on"></div><div class="t"><b>tidy (Rust target)</b><span>Build output, project not touched for 41 days</span></div><span class="sz">1.1 GB</span></div>
+    </div>
+    <div class="status"><span>7 selected, 6.3 GB</span><span>In the Trash from Tidy: 2.1 GB</span></div>
+  </div>
+</div>
+
+<p class="label">2. Large files, Folders mode: the folder as a map. Click a tile to go into it; the list below stays for checkboxes.</p>
+<div class="win">
+  <div class="side">
+    <div class="nav">Check up</div>
+    <div class="nav">Cleanup <small>6.3 GB</small></div>
+    <div class="nav on">Large files <small>9</small></div>
+    <div class="nav">Memory</div>
+    <div class="nav">Security</div>
+    <div class="nav">Uninstaller</div>
+    <div class="disk"><b>Macintosh HD</b><div class="bar"><i style="width:78.8%"></i></div><p>212 GB available of 1 TB</p></div>
+  </div>
+  <div class="main">
+    <div class="tbar"><h1>Large files</h1><div class="seg"><span>Files</span><span class="on">Folders</span></div><div class="seg"><span class="on">Over 500 MB</span></div></div>
+    <div class="crumbs">Home &nbsp;›&nbsp; <b>Movies</b> &nbsp;·&nbsp; 52.4 GB</div>
+    <div class="map" id="fmap" style="height:330px"></div>
+    <div class="rows" style="margin-top:12px">
+      <div class="row" style="padding-left:12px"><div class="cb"></div><div class="t"><b>2025</b><span>Folder, 3 items</span></div><span class="sz">21.6 GB</span></div>
+      <div class="row hover" style="padding-left:12px"><div class="cb on"></div><div class="t"><b>trip-raw.mov</b><span>Opened 2 months ago</span></div><span class="sz">12.4 GB</span></div>
+    </div>
+    <div class="status"><span>14 items, up to 52.4 GB</span><span>Move to Trash…</span></div>
+  </div>
+</div>
+
+<script>
+// Squarified treemap (Bruls et al.): lay out values inside a rect, rows along the short side.
+function squarify(items, x, y, w, h) {
+  const total = items.reduce((a, b) => a + b.v, 0);
+  const scale = (w * h) / total;
+  const nodes = items.map(i => ({ ...i, a: i.v * scale })).sort((a, b) => b.a - a.a);
+  const out = [];
+  let rx = x, ry = y, rw = w, rh = h;
+  let row = [];
+  const worst = (r, side) => {
+    const s = r.reduce((a, b) => a + b.a, 0);
+    const mx = Math.max(...r.map(n => n.a)), mn = Math.min(...r.map(n => n.a));
+    return Math.max((side * side * mx) / (s * s), (s * s) / (side * side * mn));
+  };
+  const flush = () => {
+    const s = row.reduce((a, b) => a + b.a, 0);
+    if (rw >= rh) { const cw = s / rh; let cy = ry; for (const n of row) { const ch = n.a / cw; out.push({ ...n, x: rx, y: cy, w: cw, h: ch }); cy += ch; } rx += cw; rw -= cw; }
+    else { const ch = s / rw; let cx = rx; for (const n of row) { const cw = n.a / ch; out.push({ ...n, x: cx, y: ry, w: cw, h: ch }); cx += cw; } ry += ch; rh -= ch; }
+    row = [];
+  };
+  for (const n of nodes) {
+    const side = Math.min(rw, rh);
+    if (row.length === 0 || worst([...row, n], side) <= worst(row, side)) row.push(n);
+    else { flush(); row.push(n); }
+  }
+  if (row.length) flush();
+  return out;
+}
+function draw(el, rects, gap) {
+  for (const r of rects) {
+    const d = document.createElement('div');
+    const w = r.w - gap, h = r.h - gap;
+    d.className = 'tile ' + r.cls + (w < 46 || h < 22 ? ' tiny' : (w < 92 || h < 40 ? ' small' : ''));
+    Object.assign(d.style, { left: r.x + 'px', top: r.y + 'px', width: w + 'px', height: h + 'px' });
+    d.innerHTML = `<span class="n">${r.n}</span><span class="s">${r.s}</span>` + (r.chev ? '<span class="chev">›</span>' : '');
+    d.title = r.n + ', ' + r.s;
+    el.appendChild(d);
+  }
+}
+// Cleanup: groups first, then items inside each group.
+const groups = [
+  { n: 'AI models', items: [
+    { n: 'Hugging Face cache', s: '8.2 GB', v: 8.2, cls: 'review hover' },
+    { n: 'Ollama models', s: '4.7 GB', v: 4.7, cls: 'review' } ] },
+  { n: 'Developer', items: [
+    { n: 'Xcode DerivedData', s: '2 GB', v: 2.0, cls: 'pick' },
+    { n: 'pnpm store', s: '1.8 GB', v: 1.8, cls: 'review' },
+    { n: 'tidy (Rust target)', s: '1.1 GB', v: 1.1, cls: 'pick' },
+    { n: 'npm cache', s: '756 MB', v: 0.756, cls: 'pick' } ] },
+  { n: 'Caches', items: [
+    { n: 'Spotify', s: '1.4 GB', v: 1.4, cls: 'pick' },
+    { n: 'Google Chrome', s: 'Quit first', v: 1.2, cls: 'blocked' },
+    { n: 'Slack', s: '842 MB', v: 0.842, cls: 'pick' },
+    { n: 'com.example.updater', s: '210 MB', v: 0.21, cls: 'review' } ] },
+  { n: 'Installers', items: [
+    { n: 'Xcode_16.xip', s: '2.4 GB', v: 2.4, cls: 'review' },
+    { n: 'Docker.dmg', s: '980 MB', v: 0.98, cls: 'review' } ] },
+  { n: 'Trash', items: [ { n: 'Trash', s: '1.1 GB', v: 1.1, cls: 'review' } ] },
+  { n: 'Logs', items: [
+    { n: 'App logs', s: '164 MB', v: 0.164, cls: 'pick' },
+    { n: 'Crash reports', s: '38 MB', v: 0.038, cls: 'pick' } ] },
+];
+const cmap = document.getElementById('cmap');
+const W = 900 - 200 - 40;
+const outer = squarify(groups.map(g => ({ ...g, v: g.items.reduce((a, b) => a + b.v, 0) })), 0, 0, W, 150);
+for (const g of outer) draw(cmap, squarify(g.items, g.x, g.y, g.w - 4, g.h - 4), 2);
+
+const fmap = document.getElementById('fmap');
+draw(fmap, squarify([
+  { n: '2025', s: '21.6 GB', v: 21.6, cls: 'folder big', chev: true },
+  { n: 'trip-raw.mov', s: '12.4 GB', v: 12.4, cls: 'pick hover' },
+  { n: 'Final Cut Libraries', s: '8.9 GB', v: 8.9, cls: 'folder', chev: true },
+  { n: 'demo-2025-04.mov', s: '1.8 GB', v: 1.8, cls: 'off' },
+  { n: 'Screen Recordings', s: '3.3 GB', v: 3.3, cls: 'folder', chev: true },
+  { n: 'iMovie Library', s: '2.1 GB', v: 2.1, cls: 'folder', chev: true },
+  { n: '38 smaller items', s: '2.3 GB', v: 2.3, cls: 'rest' },
+], 0, 0, W, 330), 3);
+</script>
+</body>
+</html>

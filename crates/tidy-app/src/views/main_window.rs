@@ -120,6 +120,14 @@ pub struct TidyView {
     pub(crate) updates_flipped: Option<(std::time::Instant, usize)>,
     /// The overlays' enter and exit motion (dialogs, History, System Data, the popover).
     pub(crate) overlays: crate::views::overlay::OverlayState,
+    /// The width of the screen right of the sidebar, from the last frame.
+    pub(crate) content_w: f32,
+    /// The size maps' memory between frames (design section 20).
+    pub(crate) clean_map: crate::views::size_map::MapState,
+    pub(crate) large_map: crate::views::size_map::MapState,
+    /// The disk bar's used share as last drawn, and the move to a new share when one plays.
+    pub(crate) disk_shown: Option<f32>,
+    pub(crate) disk_move: Option<(std::time::Instant, usize, f32)>,
     /// Set on a mouse-down on empty toolbar space; the first move then drags the window.
     should_move: bool,
     /// Whether macOS is showing any part of the window. False while it is minimized, hidden,
@@ -307,6 +315,11 @@ impl TidyView {
             switch_flipped: None,
             updates_flipped: None,
             overlays: Default::default(),
+            content_w: f32::from(window.viewport_size().width) - metrics::SIDEBAR_W,
+            clean_map: Default::default(),
+            large_map: Default::default(),
+            disk_shown: None,
+            disk_move: None,
             should_move: false,
             window_visible: window.is_visible(),
             list_focus: cx.focus_handle(),
@@ -314,6 +327,11 @@ impl TidyView {
             layers: Vec::new(),
             _subs: vec![observed, appearance, activation, visibility, focus_lost],
         }
+    }
+
+    /// The size maps' width: the screen less its 20 pt margins.
+    pub(crate) fn map_width(&self) -> f32 {
+        (self.content_w - 40.).max(200.)
     }
 
     pub fn set_hovered(&mut self, key: &str, hovered: bool, cx: &mut Context<Self>) {
@@ -955,6 +973,7 @@ impl TidyView {
 impl Render for TidyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::of(window);
+        self.content_w = f32::from(window.viewport_size().width) - metrics::SIDEBAR_W;
         self.keyboard_row = crate::views::RowFocus::focused(window, cx);
         let screen = self.model.read(cx).screen;
         let sidebar = self.render_sidebar(&t, cx);

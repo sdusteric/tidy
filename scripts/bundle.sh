@@ -4,7 +4,7 @@
 #
 # Test overrides (all optional):
 #   TIDY_BUNDLE_BIN  use this binary instead of running cargo build
-#   INSTALL_DIR      install target dir (default: $HOME/Applications)
+#   INSTALL_DIR      install target dir (default: /Applications)
 #   SIGN_ID          signing identity SHA-1 or name (default: the Developer ID Application cert of team
 #                    8N9KUZLT8N when the keychain has one, else the Apple Development cert)
 #   TIDY_BUNDLE_ID   CFBundleIdentifier (default dev.sdusteric.tidy). scripts/shots-bundle.sh
@@ -145,7 +145,7 @@ sign --entitlements "$REPO/resources/Tidy.entitlements" "$OUT"
 codesign --verify --deep --strict --verbose=2 "$OUT"
 
 if [ "$INSTALL" = 1 ]; then
-  DEST_DIR="${INSTALL_DIR:-$HOME/Applications}"
+  DEST_DIR="${INSTALL_DIR:-/Applications}"
   DEST="$DEST_DIR/Tidy.app"
   mkdir -p "$DEST_DIR"
   # Unregister the build copy so LaunchServices does not offer two Tidy.app's.

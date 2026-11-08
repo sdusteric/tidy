@@ -13,7 +13,7 @@ Six screens in the sidebar:
 - Large files: the biggest files and folders, or the ones not opened lately, with Reveal and Move to Trash. Folders mode shows the open folder as a size map; a click on a folder tile opens it.
 - Memory: a verdict from memory pressure, Pressure, Swap used and Compressed, a pressure graph, and the top apps by memory with Relaunch and a polite Quit. Chrome, Edge, Brave and Arc rows above 4 GB name the browser's own memory setting. This is the only screen that polls (every 2 seconds, only while visible).
 - Security: FileVault, Firewall, Gatekeeper, System Integrity Protection, XProtect, macOS updates (on demand), login items and Chrome extensions, with New and Changed marks against your last check.
-- Uninstaller: the apps in `/Applications` and `~/Applications` with their sizes, sorted by name, size or last opened (the ones you haven't opened come first). Open one to see the app and what it left in your Library (Application Support, Caches, Preferences, Containers and Group Containers, Saved Application State, Logs, HTTPStorages, WebKit data and launch agents), matched by bundle ID, helper IDs and signing team, each with its size. Uninstall shows a receipt first and moves everything to the Trash. Apple's apps and Tidy are never listed, an open app can't be uninstalled until it quits, and files in `/Library` are listed but left alone.
+- Uninstaller: the apps in `/Applications` and `~/Applications` with their sizes, sorted by name, size or last opened (the ones you haven't opened come first). Open one to see the app and what it left in your Library (Application Support, Caches, Preferences, Containers and Group Containers, Saved Application State, Logs, HTTPStorages, WebKit data and launch agents), matched by bundle ID, helper IDs and signing team, each with its size. Uninstall shows a receipt first and moves everything to the Trash. Apple's apps and Tidy are never listed, an open app can't be uninstalled until it quits, and files in `/Library` are listed but left alone. An app that needs your password (App Store apps, installer packages) goes to Finder, which asks for it; the first time, macOS asks whether Tidy may control Finder.
 
 Other behavior:
 
@@ -49,7 +49,7 @@ A focus ring shows only while the last input was a key press. Dialogs open with 
 
 ## Install and updates
 
-Build and install to `~/Applications`:
+Build and install to `/Applications`:
 
 ```sh
 scripts/bundle.sh --release --install

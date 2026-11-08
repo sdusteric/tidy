@@ -46,6 +46,9 @@ pub const APP_NEEDS_ADMIN: &str = "Tidy can't move this app without an administr
 pub const APP_MOVE_REFUSED: &str =
     "macOS didn't let Tidy move the app. Drag it to the Trash in Finder.";
 
+/// The certificate name Apple signs Mac App Store apps with.
+const APP_STORE_SIGNER: &str = "Apple Mac OS Application Signing";
+
 /// Words that name a vendor or a framework, never one app, so a folder with that name is not
 /// taken as an app's by name.
 const VENDOR_WORDS: [&str; 9] = [
@@ -409,6 +412,9 @@ fn entry(env: &Env, b: &Bundle, measure_bundle: bool) -> AppEntry {
         ),
     };
     let team_name = match &b.sign.signer {
+        // Apple signs every Mac App Store app with this certificate, so it names the store,
+        // not the developer.
+        Signer::Team(name) if name == APP_STORE_SIGNER => Some("App Store".to_string()),
         Signer::Team(name) => Some(name.clone()),
         _ => None,
     };

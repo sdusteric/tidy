@@ -4292,6 +4292,11 @@ fn the_uninstaller_lists_apps_when_opened_and_sorts_them(cx: &mut TestAppContext
     assert!(y(cx, "alpha") < y(cx, "beta") && y(cx, "beta") < y(cx, "gamma"));
     click(cx, "sort-size");
     assert!(y(cx, "beta") < y(cx, "gamma") && y(cx, "gamma") < y(cx, "alpha"));
+    click(cx, "sort-opened");
+    assert_eq!(
+        model(cx).read_with(cx, |m, _| m.uninstall.sort),
+        crate::views::uninstaller::AppSort::LastOpened
+    );
     let status = model(cx).read_with(cx, |m, _| m.uninstall.list_status());
     assert_eq!(
         status,

@@ -824,3 +824,13 @@ fn a_stopped_uninstall_moves_nothing_more() {
     assert!(entry.items.iter().all(|i| i.result == ItemResult::Skipped));
     assert!(app.exists() && cache.exists());
 }
+
+#[test]
+fn app_store_apps_say_app_store_not_apples_signing_name() {
+    let f = Fixture::new();
+    let app = f.app("Store", "com.example.store", "Store", "Store");
+    let signer = FakeSigner::default().team(&app, "ABCDE12345", "Apple Mac OS Application Signing");
+    let list = list_apps(&f.env(), &signer);
+    assert_eq!(list.apps[0].team_name.as_deref(), Some("App Store"));
+    assert_eq!(list.apps[0].team_id.as_deref(), Some("ABCDE12345"));
+}

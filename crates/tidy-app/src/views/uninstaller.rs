@@ -19,7 +19,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use tidy_core::api::Command;
-use tidy_core::model::{HistoryEntry, ItemResult, RunningSet};
+use tidy_core::model::{HistoryEntry, ItemResult, RunningSet, UseSource};
 use tidy_core::uninstall::{AppEntry, AppList, Leftover, LeftoverKind, UninstallPlan};
 
 use crate::app::{
@@ -67,6 +67,9 @@ pub enum AppSort {
     #[default]
     Name,
     Size,
+    /// What was not used first: apps with no open on record (their file date, oldest first),
+    /// then the apps opened longest ago.
+    LastOpened,
 }
 
 #[derive(Default)]
@@ -111,8 +114,18 @@ impl UninstallState {
             .iter()
             .filter(|a| !self.removed.contains(&a.path))
             .collect();
-        if self.sort == AppSort::Size {
-            apps.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+        match self.sort {
+            AppSort::Name => {}
+            AppSort::Size => {
+                apps.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+            }
+            AppSort::LastOpened => apps.sort_by_key(|a| {
+                (
+                    a.used_source == UseSource::Spotlight,
+                    a.last_used.unwrap_or(0),
+                    a.name.to_lowercase(),
+                )
+            }),
         }
         apps
     }
@@ -681,7 +694,8 @@ impl TidyView {
             self.busy_controls(t, "Listing apps".to_string(), cx)
                 .into_any_element()
         } else if has_list {
-            let (by_name, by_size, rescan) = (model.clone(), model.clone(), model.clone());
+            let (by_name, by_size, by_opened, rescan) =
+                (model.clone(), model.clone(), model.clone(), model.clone());
             div()
                 .flex()
                 .items_center()
@@ -703,6 +717,15 @@ impl TidyView {
                             selector: "sort-size".to_string(),
                             on_click: Box::new(move |_, cx| {
                                 by_size.update(cx, |m, cx| m.set_app_sort(AppSort::Size, cx));
+                            }),
+                        },
+                        Segment {
+                            label: "Last opened",
+                            selected: sort == AppSort::LastOpened,
+                            selector: "sort-opened".to_string(),
+                            on_click: Box::new(move |_, cx| {
+                                by_opened
+                                    .update(cx, |m, cx| m.set_app_sort(AppSort::LastOpened, cx));
                             }),
                         },
                     ],
@@ -1405,7 +1428,6 @@ fn meta_text(text: String, color: Hsla) -> Div {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
-    use tidy_core::model::UseSource;
 
     fn app(name: &str, bytes: u64) -> AppEntry {
         AppEntry {
@@ -1467,6 +1489,42 @@ mod tests {
         assert_eq!(names(&u), ["Beta", "Gamma", "Alpha"]);
         u.removed.insert(PathBuf::from("/Applications/Beta.app"));
         assert_eq!(names(&u), ["Gamma", "Alpha"]);
+    }
+
+    #[test]
+    fn sorting_by_last_opened_puts_what_was_not_used_first() {
+        let used = |name: &str, days_ago: u64, source: UseSource| {
+            let mut a = app(name, 1);
+            a.last_used = Some(100_000_000 - days_ago * 86_400);
+            a.used_source = source;
+            a
+        };
+        let mut none = app("Nodate", 1);
+        none.last_used = None;
+        none.used_source = UseSource::FileTimes;
+        let u = UninstallState {
+            list: Some(AppList {
+                apps: vec![
+                    used("Daily", 0, UseSource::Spotlight),
+                    used("Old", 200, UseSource::Spotlight),
+                    used("Updated", 2, UseSource::FileTimes),
+                    used("Stale", 400, UseSource::FileTimes),
+                    none,
+                    used("Month", 30, UseSource::Spotlight),
+                ],
+                left_out: 0,
+                at: 0,
+            }),
+            sort: AppSort::LastOpened,
+            ..UninstallState::default()
+        };
+        let names: Vec<String> = u.apps().iter().map(|a| a.name.clone()).collect();
+        // No open on record first (no date at all, then the oldest file date), then the
+        // apps opened longest ago.
+        assert_eq!(
+            names,
+            ["Nodate", "Stale", "Updated", "Old", "Month", "Daily"]
+        );
     }
 
     #[test]

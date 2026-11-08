@@ -4,6 +4,7 @@
 //! | Seam | Production | Fake |
 //! |---|---|---|
 //! | [`Trasher`] | `SystemTrash` (NSFileManager) | [`DirTrash`] (a folder) |
+//! | [`Trasher`] as `admin_trasher` | `FinderTrash` (Finder, for an app bundle) | `NoFinder` |
 //! | [`ProcessProbe`] | the libc probe in `procs` | [`FixedProbe`] |
 //! | [`Clock`] | [`SystemClock`] | [`FixedClock`] |
 //! | [`LastUsed`] | Spotlight in `lastused` | [`FileTimesOnly`] |
@@ -796,6 +797,9 @@ pub struct Env {
     pub root: PathBuf,
     pub paths: AppPaths,
     pub trasher: Arc<dyn Trasher>,
+    /// Finder, for an app bundle Tidy cannot move itself (design 19.4). [`crate::trash::NoFinder`]
+    /// under `TIDY_HOME` and in [`Env::for_tests`].
+    pub admin_trasher: Arc<dyn Trasher>,
     pub procs: Arc<dyn ProcessProbe>,
     pub clock: Arc<dyn Clock>,
     pub last_used: Arc<dyn LastUsed>,
@@ -855,6 +859,11 @@ impl Env {
             None => AppPaths::system(),
         };
         let trasher = make_trasher(spec.tidy_home.is_some(), &paths);
+        let admin_trasher: Arc<dyn Trasher> = if spec.tidy_home.is_some() {
+            Arc::new(crate::trash::NoFinder)
+        } else {
+            Arc::new(crate::trash::FinderTrash)
+        };
         let procs: Arc<dyn ProcessProbe> = match spec.running {
             Some(set) => Arc::new(FixedProbe::new(set)),
             None => system.procs,
@@ -903,6 +912,7 @@ impl Env {
             overridden: paths.overridden,
             paths,
             trasher,
+            admin_trasher,
             procs,
             clock,
             last_used,
@@ -923,6 +933,7 @@ impl Env {
         Env {
             root: fake_home.to_path_buf(),
             trasher: Arc::new(DirTrash::new(paths.dir_trash())),
+            admin_trasher: Arc::new(crate::trash::NoFinder),
             paths,
             procs: Arc::new(FixedProbe::default()),
             clock: Arc::new(FixedClock::new(TEST_NOW)),
@@ -938,6 +949,11 @@ impl Env {
 
     pub fn with_trasher(mut self, trasher: Arc<dyn Trasher>) -> Env {
         self.trasher = trasher;
+        self
+    }
+
+    pub fn with_admin_trasher(mut self, admin_trasher: Arc<dyn Trasher>) -> Env {
+        self.admin_trasher = admin_trasher;
         self
     }
 

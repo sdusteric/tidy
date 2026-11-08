@@ -449,7 +449,7 @@ fn system_library_is_report_only() {
 }
 
 #[test]
-fn root_owned_app_is_not_movable() {
+fn root_owned_app_is_offered_through_finder() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let app = f.app("Store", "com.example.store", "Store", "Store");
@@ -457,8 +457,8 @@ fn root_owned_app_is_not_movable() {
     fs::set_permissions(&app, fs::Permissions::from_mode(0o555)).unwrap();
     let p = plan(&f, &FakeSigner::default(), &app);
     let a = &p.items[0];
-    assert!(!a.selectable && !a.ticked);
-    assert_eq!(a.note.as_deref(), Some(uninstall::APP_NEEDS_ADMIN));
+    assert!(a.selectable && a.ticked);
+    assert_eq!(a.note.as_deref(), Some(uninstall::APP_FINDER_NOTE));
     assert!(!p.app.movable);
     assert!(item(&p, &cache).ticked);
     fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
@@ -711,18 +711,105 @@ impl tidy_core::env::Trasher for RefusingTrash {
     }
 }
 
+/// Stands in for Finder: records what it was asked to move and moves nothing, or fails with
+/// the sentence Finder's error maps to.
+#[derive(Default)]
+struct FakeFinder {
+    asked: std::sync::Mutex<Vec<PathBuf>>,
+    fails_with: Option<String>,
+}
+
+impl tidy_core::env::Trasher for FakeFinder {
+    fn trash(&self, path: &Path) -> std::io::Result<Option<PathBuf>> {
+        self.asked.lock().unwrap().push(path.to_path_buf());
+        match &self.fails_with {
+            Some(m) => Err(std::io::Error::other(m.clone())),
+            None => Ok(Some(
+                PathBuf::from("/fake/.Trash").join(path.file_name().unwrap()),
+            )),
+        }
+    }
+}
+
 #[test]
-fn a_refused_app_move_says_to_use_finder() {
+fn a_refused_app_move_goes_to_finder() {
     let f = Fixture::new();
     let app = f.app("Slack", "com.tinyspeck.slackmacgap", "Slack", "Slack");
-    let env = f.env().with_trasher(Arc::new(RefusingTrash));
+    let finder = Arc::new(FakeFinder::default());
+    let env = f
+        .env()
+        .with_trasher(Arc::new(RefusingTrash))
+        .with_admin_trasher(finder.clone());
+    let id = app.to_string_lossy().into_owned();
+    let entry = uninstall::uninstall(&env, &FakeSigner::default(), &app, &[id], &mut |_| {});
+    assert_eq!(
+        entry.items[0].result,
+        ItemResult::Trashed,
+        "{:?}",
+        entry.items[0]
+    );
+    assert_eq!(
+        entry.items[0].trash_path.as_deref(),
+        Some(Path::new("/fake/.Trash/Slack.app"))
+    );
+    assert_eq!(*finder.asked.lock().unwrap(), [app.canonicalize().unwrap()]);
+}
+
+#[test]
+fn a_needs_admin_app_goes_straight_to_finder_and_leftovers_never_do() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let app = f.app("Store", "com.example.store", "Store", "Store");
+    let cache = f.folder("Caches/com.example.store");
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o555)).unwrap();
+    let finder = Arc::new(FakeFinder::default());
+    let env = f.env().with_admin_trasher(finder.clone());
+    let p = find_leftovers(&env, &FakeSigner::default(), &app).unwrap();
+    let entry = uninstall::uninstall(
+        &env,
+        &FakeSigner::default(),
+        &app,
+        &ticked_ids(&p),
+        &mut |_| {},
+    );
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        entry.items.iter().all(|i| i.result == ItemResult::Trashed),
+        "{:?}",
+        entry.items
+    );
+    // Finder was asked for the app only; the cache went to Tidy's own Trash.
+    assert_eq!(*finder.asked.lock().unwrap(), [app.canonicalize().unwrap()]);
+    assert!(!cache.exists());
+}
+
+#[test]
+fn a_canceled_finder_prompt_keeps_the_app_and_says_why() {
+    let f = Fixture::new();
+    let app = f.app("Slack", "com.tinyspeck.slackmacgap", "Slack", "Slack");
+    let finder = Arc::new(FakeFinder {
+        fails_with: Some(tidy_core::trash::FINDER_CANCELED.to_string()),
+        ..FakeFinder::default()
+    });
+    let env = f
+        .env()
+        .with_trasher(Arc::new(RefusingTrash))
+        .with_admin_trasher(finder);
     let id = app.to_string_lossy().into_owned();
     let entry = uninstall::uninstall(&env, &FakeSigner::default(), &app, &[id], &mut |_| {});
     assert_eq!(entry.items[0].result, ItemResult::Failed);
     assert_eq!(
         entry.items[0].reason.as_deref(),
-        Some(uninstall::APP_MOVE_REFUSED)
+        Some(tidy_core::trash::FINDER_CANCELED)
     );
+    assert!(app.exists());
+}
+
+#[test]
+fn the_test_env_never_reaches_finder() {
+    let f = Fixture::new();
+    let app = f.app("Slack", "com.tinyspeck.slackmacgap", "Slack", "Slack");
+    assert!(f.env().admin_trasher.trash(&app).is_err());
     assert!(app.exists());
 }
 

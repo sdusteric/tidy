@@ -250,8 +250,8 @@ pub const NEVER: [(&str, &str); 6] = [
         "Nothing starts at login or runs after you quit.",
     ),
     (
-        "Use sudo or ask for your password",
-        "No helper tools and no admin rights.",
+        "Use sudo or a helper tool",
+        "Tidy never sees your password. When an app needs it, Finder asks.",
     ),
     (
         "Delete outside the Trash",
@@ -1184,7 +1184,7 @@ mod tests {
             [
                 "Ask for Full Disk Access",
                 "Run in the background",
-                "Use sudo or ask for your password",
+                "Use sudo or a helper tool",
                 "Delete outside the Trash",
                 "Empty the Trash on its own",
                 "Use scare tactics"

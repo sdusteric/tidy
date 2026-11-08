@@ -259,7 +259,7 @@ pub fn row_label(item: &Leftover) -> String {
 pub fn row_tag(item: &Leftover) -> Option<&'static str> {
     match item.kind {
         LeftoverKind::System => Some("Report only"),
-        LeftoverKind::App if !item.selectable => Some("Needs admin"),
+        LeftoverKind::App if item.note.is_some() => Some("Needs admin"),
         _ if item.selectable && item.note.is_some() => Some("Review"),
         _ if item.by_name => Some("Name match"),
         _ => None,
@@ -305,6 +305,12 @@ impl DialogSpec {
         }
         let total: u64 = ticked.iter().map(|i| i.bytes.unwrap_or(0)).sum();
         let mut notes = Vec::new();
+        if ticked
+            .iter()
+            .any(|i| i.kind == LeftoverKind::App && i.note.is_some())
+        {
+            notes.push(format!("Finder will ask for your password to move {name}."));
+        }
         if ticked.iter().any(|i| i.kind == LeftoverKind::LaunchAgent) {
             notes.push(LAUNCH_AGENT_NOTE.to_string());
         }
@@ -1562,8 +1568,13 @@ mod tests {
         system.note = Some("Needs an administrator".to_string());
         assert_eq!(row_tag(&system), Some("Report only"));
         let mut stuck = leftover("/Applications/X.app", LeftoverKind::App, 1);
-        stuck.selectable = false;
+        stuck.note = Some(tidy_core::uninstall::APP_FINDER_NOTE.to_string());
         assert_eq!(row_tag(&stuck), Some("Needs admin"));
+        let finder = DialogSpec::uninstall("X", &[&stuck]);
+        assert_eq!(
+            finder.notes,
+            ["Finder will ask for your password to move X."]
+        );
         let mut named = leftover("/x", LeftoverKind::Caches, 1);
         named.by_name = true;
         assert_eq!(row_tag(&named), Some("Name match"));

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- None. Tidy is not sandboxed and uses no device, JIT or dynamic library. -->
+  <!-- Tidy is not sandboxed and uses no device, JIT or dynamic library. The one entitlement
+       lets the Uninstaller ask Finder to move an app that needs an administrator to the Trash
+       (design 19.4); Finder asks for the password, never Tidy. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

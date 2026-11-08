@@ -30,6 +30,8 @@
   <string>Tidy measures the size of files on your Desktop to find large files.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Tidy measures the size of files in Downloads to find large files and old installers.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>When an app you uninstall needs your password, Tidy asks Finder to move it to the Trash. Finder asks for the password, not Tidy.</string>
   <!-- Quick actions Shelf may offer (tidy://checkup, tidy://check-for-updates). Shelf reads this
        key from the installed bundle and hides any action an older build lacks. -->
   <key>SDShelfActions</key>

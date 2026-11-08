@@ -425,9 +425,17 @@ pub(crate) fn move_checked(
     env: &Env,
     at: &Path,
 ) -> Result<(Option<PathBuf>, Option<FileId>), (ItemResult, String)> {
+    move_with(env.trasher.as_ref(), at)
+}
+
+/// [`move_checked`] through a given trasher (the uninstaller's Finder for an app bundle).
+pub(crate) fn move_with(
+    trasher: &dyn crate::trash::Trasher,
+    at: &Path,
+) -> Result<(Option<PathBuf>, Option<FileId>), (ItemResult, String)> {
     // Read before the move: the Trash path may be unreadable once the item is there.
     let moved_id = FileId::of(at).ok();
-    env.trasher.trash(at).map(|tp| (tp, moved_id)).map_err(|e| {
+    trasher.trash(at).map(|tp| (tp, moved_id)).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             (ItemResult::Missing, GONE.to_string())
         } else {

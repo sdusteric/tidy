@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::Event;
 use crate::clean::{
     GONE, IGNORE_LIST_STOPPED, IGNORE_LIST_UNREADABLE, MoveGate, STOPPED, finish, move_checked,
-    record, touches_tidy,
+    move_with, record, touches_tidy,
 };
 use crate::env::{Env, file_time};
 use crate::model::{
@@ -40,11 +40,8 @@ pub const NOT_FOUND_AGAIN: &str = "Tidy didn't find this again. Open the app aga
 /// The note on a Report only row outside the home folder (C52).
 pub const NEEDS_ADMIN_NOTE: &str =
     "Needs an administrator, so Tidy leaves it. Remove it in Finder.";
-/// The note on an app bundle Tidy's user cannot rename (C51).
-pub const APP_NEEDS_ADMIN: &str = "Tidy can't move this app without an administrator. Drag it to the Trash in Finder, which asks for your password.";
-/// The skip reason when macOS refused the move of the app itself.
-pub const APP_MOVE_REFUSED: &str =
-    "macOS didn't let Tidy move the app. Drag it to the Trash in Finder.";
+/// The note on an app bundle Tidy's user cannot rename (C51): Finder moves it instead.
+pub const APP_FINDER_NOTE: &str = "Finder asks for your password to move it.";
 
 /// The certificate name Apple signs Mac App Store apps with.
 const APP_STORE_SIGNER: &str = "Apple Mac OS Application Signing";
@@ -825,10 +822,10 @@ pub fn find_leftovers(env: &Env, signer: &dyn Signatures, app: &Path) -> Option<
         path: entry.path.clone(),
         kind: LeftoverKind::App,
         bytes: Some(entry.bytes),
-        ticked: entry.movable,
-        selectable: entry.movable,
+        ticked: true,
+        selectable: true,
         by_name: false,
-        note: (!entry.movable).then(|| APP_NEEDS_ADMIN.to_string()),
+        note: (!entry.movable).then(|| APP_FINDER_NOTE.to_string()),
     }];
     let mut found = find_in_library(env, &m);
     if !m.sharers.is_empty() {
@@ -897,9 +894,6 @@ fn guard(env: &Env, plan: &UninstallPlan, item: &Leftover) -> Result<PathBuf, Re
             }
             if bundle_id_of(path).as_deref() != Some(plan.app.bundle_id.as_str()) {
                 return Err((ItemResult::Skipped, NOT_FOUND_AGAIN.to_string()));
-            }
-            if !plan.app.movable {
-                return Err((ItemResult::Skipped, APP_NEEDS_ADMIN.to_string()));
             }
             Ok(parent.join(name))
         }
@@ -995,7 +989,24 @@ pub fn uninstall_until(
             _ => Err((ItemResult::Skipped, NOT_FOUND_AGAIN.to_string())),
         };
         let is_app = item.is_some_and(|i| i.kind == LeftoverKind::App);
-        match at.and_then(|at| move_checked(env, &at)) {
+        let needs_admin = plan.as_ref().is_some_and(|p| !p.app.movable);
+        let moved = at.and_then(|at| {
+            if !is_app {
+                return move_checked(env, &at);
+            }
+            // The app bundle: Finder moves it when Tidy's user cannot rename it, and when
+            // macOS refuses Tidy's own move (App Management). Finder asks for the password.
+            if needs_admin {
+                return move_with(env.admin_trasher.as_ref(), &at);
+            }
+            match move_checked(env, &at) {
+                Err((ItemResult::Failed, reason)) if refused_by_macos(&reason) => {
+                    move_with(env.admin_trasher.as_ref(), &at)
+                }
+                other => other,
+            }
+        });
+        match moved {
             Ok((trash_path, moved_id)) => {
                 out.push(record(
                     &path,
@@ -1009,12 +1020,6 @@ pub fn uninstall_until(
                 events(Event::ItemTrashed { id, trash_path });
             }
             Err((result, reason)) => {
-                let reason = if is_app && result == ItemResult::Failed && refused_by_macos(&reason)
-                {
-                    APP_MOVE_REFUSED.to_string()
-                } else {
-                    reason
-                };
                 out.push(record(
                     &path,
                     None,

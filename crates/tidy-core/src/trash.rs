@@ -83,6 +83,93 @@ impl Trasher for SystemTrash {
     }
 }
 
+// ---------- Finder ----------
+
+/// What an app row says when the user canceled Finder's password prompt.
+pub const FINDER_CANCELED: &str = "You canceled the password prompt, so the app stayed.";
+/// What an app row says when macOS does not let Tidy control Finder (Automation is off).
+pub const FINDER_NOT_ALLOWED: &str = "Tidy isn't allowed to control Finder. Turn it on in System Settings > Privacy & Security > Automation.";
+/// What an app row says for any other Finder failure.
+pub const FINDER_FAILED: &str = "Finder couldn't move the app. Drag it to the Trash in Finder.";
+/// The error of the stand-in that tests and `TIDY_HOME` runs get in Finder's place.
+pub const FINDER_OFF: &str = "Finder isn't used under TIDY_HOME or in tests";
+
+/// The script [`FinderTrash`] runs with `osascript`, one `-e` per line. The path is the first
+/// argument, never spliced into the script. Finder's `delete` moves the item to the Trash
+/// (it never deletes for good) and asks for an administrator's password itself when the
+/// item needs one.
+pub const FINDER_SCRIPT: [&str; 10] = [
+    "on run argv",
+    "tell application \"Finder\"",
+    "set moved to delete (POSIX file (item 1 of argv) as alias)",
+    "try",
+    "return POSIX path of (moved as alias)",
+    "on error",
+    "return \"\"",
+    "end try",
+    "end tell",
+    "end run",
+];
+
+/// Finder, asked through Apple Events to move an app bundle to the Trash (design 19.4, C51).
+/// Used only for an app bundle that Tidy's user cannot rename, or whose move macOS refused:
+/// Finder shows its own password prompt, Tidy never sees the password, and Finder's Put Back
+/// works. The first use asks the user once whether Tidy may control Finder.
+///
+/// Like [`SystemTrash`], it refuses whenever `TIDY_HOME` is set, and in this crate's tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FinderTrash;
+
+impl Trasher for FinderTrash {
+    fn trash(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        if cfg!(test) {
+            return Err(io::Error::other(FINDER_OFF));
+        }
+        if let Some(e) = system_trash_refusal(std::env::var_os(HOME_ENV).as_deref()) {
+            return Err(e);
+        }
+        let mut cmd = std::process::Command::new("/usr/bin/osascript");
+        for line in FINDER_SCRIPT {
+            cmd.arg("-e").arg(line);
+        }
+        let out = cmd.arg(path).output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(path = %path.display(), "Finder did not move it: {}", stderr.trim());
+            return Err(io::Error::other(finder_error(&stderr)));
+        }
+        let moved = String::from_utf8_lossy(&out.stdout);
+        let moved = moved.trim().trim_end_matches('/');
+        Ok((!moved.is_empty()).then(|| PathBuf::from(moved)))
+    }
+
+    fn kind(&self) -> TrasherKind {
+        TrasherKind::System
+    }
+}
+
+/// The sentence for an `osascript` failure, from the AppleScript error number at the end of
+/// its message: -128 is a canceled prompt, -1743 is Automation turned off for Tidy.
+pub fn finder_error(stderr: &str) -> &'static str {
+    if stderr.contains("(-128)") {
+        FINDER_CANCELED
+    } else if stderr.contains("(-1743)") {
+        FINDER_NOT_ALLOWED
+    } else {
+        FINDER_FAILED
+    }
+}
+
+/// What tests and `TIDY_HOME` runs get in Finder's place: every move fails with [`FINDER_OFF`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoFinder;
+
+impl Trasher for NoFinder {
+    fn trash(&self, _path: &Path) -> io::Result<Option<PathBuf>> {
+        Err(io::Error::other(FINDER_OFF))
+    }
+}
+
 /// A stand-in Trash for tests and `TIDY_HOME` runs (`$TIDY_HOME/data/trash`). It renames
 /// each item into its folder, adding " 2", " 3" and so on when the name is taken, and records
 /// every move. It never touches the macOS Trash, and it never copies: a move across volumes
@@ -383,6 +470,35 @@ pub fn trash_paths(trasher: &dyn Trasher, root: &Path, paths: &[PathBuf]) -> Tra
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn finder_errors_become_sentences() {
+        assert_eq!(
+            finder_error("execution error: Finder got an error: User canceled. (-128)"),
+            FINDER_CANCELED
+        );
+        assert_eq!(
+            finder_error("execution error: Not authorized to send Apple events to Finder. (-1743)"),
+            FINDER_NOT_ALLOWED
+        );
+        assert_eq!(finder_error("something else (-10000)"), FINDER_FAILED);
+    }
+
+    #[test]
+    fn finder_is_never_asked_from_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = FinderTrash.trash(dir.path()).unwrap_err();
+        assert_eq!(err.to_string(), FINDER_OFF);
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn the_finder_script_takes_the_path_as_an_argument() {
+        assert!(FINDER_SCRIPT.iter().all(|l| !l.contains('/')));
+        assert!(FINDER_SCRIPT.iter().any(|l| l.contains("item 1 of argv")));
+        assert!(FINDER_SCRIPT.iter().any(|l| l.contains("delete")));
+    }
+
     use super::*;
 
     fn touch(p: &Path) {

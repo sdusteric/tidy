@@ -63,7 +63,7 @@ Tidy updates itself with Sparkle from the public sdusteric/app-updates feed (`ht
 
 - macOS, Rust (edition 2024), the Xcode command line tools.
 - `../app-updates` checked out next to this repo for `Sparkle.framework` 2.10.0, or `SPARKLE_FRAMEWORK` set. The build stops with a message when it is missing.
-- An Apple Development signing identity for `scripts/bundle.sh`.
+- A signing identity for `scripts/bundle.sh`. Set `SIGN_ID` to yours (a name or SHA-1 from `security find-identity -v -p codesigning`).
 
 ## Build and check
 

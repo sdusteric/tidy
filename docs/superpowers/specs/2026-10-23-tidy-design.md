@@ -2,7 +2,7 @@
 
 Date: 2026-10-23. Status: approved for milestone 1 (the user asked for the recommended option on every open choice).
 
-Tidy is a personal macOS utility that replaces CleanMyMac for one person on one Mac. It is a Rust + GPUI app built on the same stack, crate split and look as Haul (`/Users/ericlee/Documents/projects/haul`). This document is the contract for building it. Where it says "C<n>", that is a call made by the agent on the user's behalf, listed in section 15 so the user can check them in one place.
+Tidy is a personal macOS utility that replaces CleanMyMac for one person on one Mac. It is a Rust + GPUI app built on the same stack, crate split and look as Haul (`/Users/x/Documents/projects/haul`). This document is the contract for building it. Where it says "C<n>", that is a call made by the agent on the user's behalf, listed in section 15 so the user can check them in one place.
 
 ## 1. Intent
 
@@ -328,8 +328,8 @@ Project roots: `~/Documents/projects`, `~/Developer`, `~/Projects`, `~/src`, `~/
 
 ```json
 {"id":"2026-10-23T14:02:11Z-1","at":1792764131,"action":"clean","source":"cleanup","trasher":"system",
- "items":[{"path":"/Users/ericlee/Library/Caches/node-gyp","trash_path":"/Users/ericlee/.Trash/node-gyp","bytes":135266304,"rule":"dev.node-gyp","result":"trashed"},
-          {"path":"/Users/ericlee/Library/Caches/Google/Chrome/Default","trash_path":null,"bytes":1857028096,"rule":"cache.chrome","result":"skipped","reason":"Google Chrome is running"}],
+ "items":[{"path":"/Users/x/Library/Caches/node-gyp","trash_path":"/Users/x/.Trash/node-gyp","bytes":135266304,"rule":"dev.node-gyp","result":"trashed"},
+          {"path":"/Users/x/Library/Caches/Google/Chrome/Default","trash_path":null,"bytes":1857028096,"rule":"cache.chrome","result":"skipped","reason":"Google Chrome is running"}],
  "trashed_bytes":135266304}
 ```
 

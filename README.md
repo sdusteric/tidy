@@ -160,3 +160,7 @@ Without `TIDY_HOME`, test hooks are ignored and logged, and destructive `tidyctl
 - Never request notification permission (tests use the fake `Notifier`) and never let Sparkle start (`FakeUpdates`, `TIDY_NO_UPDATES=1`).
 - Never run `softwareupdate`, `tmutil` or `docker` against this Mac. `SystemRunner` refuses them in tests and under `TIDY_HOME`; tests replay output through `TIDY_TEST_COMMANDS` or `ReplayRunner`.
 - Security reads of the real Mac are read-only and limited to the status commands, the XProtect plist, launch agent and daemon folders, `launchctl print`, signature checks and a copy of Chrome's Secure Preferences.
+
+## License
+
+MIT. See `LICENSE`.

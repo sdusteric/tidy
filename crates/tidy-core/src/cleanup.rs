@@ -623,10 +623,7 @@ impl Cand {
         {
             return false;
         }
-        if self.in_use && uses_path(&ctx.running, &self.path) {
-            return false;
-        }
-        true
+        !(self.in_use && uses_path(&ctx.running, &self.path))
     }
 
     /// Step 3 for one candidate.

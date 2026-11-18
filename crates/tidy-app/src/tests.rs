@@ -4462,3 +4462,72 @@ fn an_open_app_turns_uninstall_off_until_it_quits(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!h.drain().iter().any(|c| matches!(c, Command::CheckRunning)));
 }
+
+// ---------- Clear file cache ----------
+
+#[::gpui::test]
+fn clear_file_cache_asks_first_then_reports_what_it_cleared(cx: &mut TestAppContext) {
+    use tidy_core::memory::FileCacheResult;
+    let (mut h, view, cx) = on_memory(cx);
+    click(cx, "clear-file-cache");
+    let spec = dialog_of(&view, cx).expect("the confirm");
+    assert_eq!(spec.kind, DialogKind::ClearFileCache);
+    assert_eq!(spec.confirm, "Clear File Cache");
+    assert!(h.drain().is_empty(), "nothing runs before the confirm");
+    // Cancel has the focus; Tab to Clear File Cache, then Return.
+    tab(cx);
+    press(cx, "enter");
+    assert!(
+        h.drain()
+            .iter()
+            .any(|c| matches!(c, Command::ClearFileCache))
+    );
+    assert!(model(cx).read_with(cx, |m, _| m.memory.clearing));
+    assert!(has(cx, "busy"), "the toolbar says it is waiting");
+
+    push(
+        &h,
+        cx,
+        vec![Event::FileCacheCleared(FileCacheResult::Cleared {
+            before: 5 * GB,
+            after: 3 * GB,
+        })],
+    );
+    let notice = model(cx).read_with(cx, |m, _| m.memory.notice.clone());
+    assert_eq!(
+        notice,
+        Some(Notice::Info(
+            "Cleared 2 GB of file cache. macOS fills it again as you open files.".to_string()
+        ))
+    );
+    assert!(!model(cx).read_with(cx, |m, _| m.memory.clearing));
+    assert!(
+        h.drain().iter().any(is_snapshot),
+        "the figures are read again"
+    );
+}
+
+#[::gpui::test]
+fn a_canceled_password_prompt_leaves_no_notice(cx: &mut TestAppContext) {
+    use tidy_core::memory::FileCacheResult;
+    let (h, view, cx) = on_memory(cx);
+    view.update(cx, |v, cx| v.request_clear_file_cache(cx));
+    view.update(cx, |v, cx| v.confirm_dialog(cx));
+    push(
+        &h,
+        cx,
+        vec![Event::FileCacheCleared(FileCacheResult::Canceled)],
+    );
+    assert!(model(cx).read_with(cx, |m, _| m.memory.notice.is_none() && !m.memory.clearing));
+    push(
+        &h,
+        cx,
+        vec![Event::FileCacheCleared(FileCacheResult::Failed {
+            message: "macOS didn't clear the file cache.".into(),
+        })],
+    );
+    assert_eq!(
+        model(cx).read_with(cx, |m, _| m.memory.notice.clone()),
+        Some(Notice::Error("macOS didn't clear the file cache.".into()))
+    );
+}

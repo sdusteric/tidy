@@ -1474,6 +1474,7 @@ impl TidyModel {
                     self.settings = settings;
                 }
                 Event::MemorySnapshot(snapshot) => self.on_memory_snapshot(snapshot, cx),
+                Event::FileCacheCleared(result) => self.on_file_cache(result, cx),
                 Event::SecurityProgress { done, total } => {
                     self.security.running = Some((done, total));
                 }

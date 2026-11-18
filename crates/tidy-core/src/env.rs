@@ -593,10 +593,13 @@ pub const TMUTIL_LIST: [&str; 2] = ["listlocalsnapshots", "/"];
 /// - `softwareupdate` and `tmutil` under `TIDY_HOME` (or in tests), so tests and agents never
 ///   ask the real Mac;
 /// - `tmutil` with anything but [`TMUTIL_LIST`], always: Tidy never changes snapshots;
-/// - `docker`, always: Tidy only shows Docker commands for the user to copy (design section 4).
+/// - `docker`, always: Tidy only shows Docker commands for the user to copy (design section 4);
+/// - `osascript` with anything but the Clear File Cache script, always, and that one too under
+///   `TIDY_HOME` (or in tests): it asks for the password and runs `purge` as root (section 21).
 pub fn runner_refuses(program: &str, args: &[&str], tidy_home_set: bool) -> bool {
     let guarded = tidy_home_set || cfg!(test);
     match file_name(program) {
+        "osascript" => guarded || args != ["-e", crate::memory::PURGE_SCRIPT],
         "softwareupdate" => guarded,
         "tmutil" => guarded || args != TMUTIL_LIST,
         "docker" => true,
@@ -1406,6 +1409,33 @@ mod tests {
                 &["--list"],
                 Duration::from_secs(1),
             )
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn system_runner_runs_osascript_only_for_the_purge_and_never_in_tests() {
+        let purge = ["-e", crate::memory::PURGE_SCRIPT];
+        assert!(runner_refuses("/usr/bin/osascript", &purge, true));
+        assert!(
+            runner_refuses("/usr/bin/osascript", &purge, false),
+            "always in tests"
+        );
+        for args in [
+            &[
+                "-e",
+                "do shell script \"rm -rf ~\" with administrator privileges",
+            ][..],
+            &["-e", crate::memory::PURGE_SCRIPT, "-e", "beep"],
+            &[],
+        ] {
+            assert!(
+                runner_refuses("/usr/bin/osascript", args, false),
+                "{args:?}"
+            );
+        }
+        let e = SystemRunner
+            .run("/usr/bin/osascript", &purge, Duration::from_secs(1))
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
     }

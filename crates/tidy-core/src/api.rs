@@ -114,6 +114,10 @@ pub enum Command {
         reply: oneshot::Sender<SystemDataReport>,
     },
 
+    /// Clear File Cache on the Memory screen (design section 21): runs `purge` behind macOS's
+    /// password prompt, beside the actor, at most one at a time. Answered with
+    /// [`Event::FileCacheCleared`].
+    ClearFileCache,
     // ----- Uninstaller (design section 19) -----
     /// List the apps in the application folders, each measured (C47). Read-only, beside the
     /// actor like [`Command::MeasureSystemData`].
@@ -178,6 +182,8 @@ pub enum Event {
         checkup: Checkup,
         reminder: ReminderDate,
     },
+    /// A Clear File Cache ended (cleared, canceled at the password prompt, or failed).
+    FileCacheCleared(crate::memory::FileCacheResult),
     /// Something the user asked for could not be done. `what` names the action (`scan`,
     /// `large`, `clean`, `trash`, `empty_trash`, `settings`, and from M2 `memory`,
     /// `security`, `checkup`), `message` is a plain sentence.

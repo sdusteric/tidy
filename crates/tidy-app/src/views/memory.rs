@@ -22,6 +22,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use tidy_core::api::Command;
+use tidy_core::memory::FileCacheResult;
 use tidy_core::model::{AppMemory, MemoryKind, MemorySnapshot, Pressure};
 
 use crate::app::{Notice, QUIT_WAIT, Screen, TidyModel, send, terminator};
@@ -144,12 +145,36 @@ pub struct MemoryState {
     icons_tried: HashSet<PathBuf>,
     pub notice: Option<Notice>,
     pub notice_leaving: Option<Notice>,
+    /// Clear File Cache is running: macOS's password prompt may be open (design section 21).
+    pub clearing: bool,
 }
 
 impl MemoryState {
     /// The state of a row's Quit, if one is in progress.
     pub fn quit_state(&self, id: &str) -> Option<QuitState> {
         self.quits.get(id).map(|q| q.state)
+    }
+}
+
+/// Below this, Clear File Cache says there was little to clear rather than "Cleared 0 KB".
+pub const FILE_CACHE_SMALL: u64 = 10_000_000;
+
+/// What the band says after Clear File Cache. Nothing after a canceled prompt.
+pub fn file_cache_notice(result: &FileCacheResult) -> Option<Notice> {
+    match result {
+        FileCacheResult::Cleared { before, after } => {
+            let cleared = before.saturating_sub(*after);
+            Some(Notice::Info(if cleared >= FILE_CACHE_SMALL {
+                format!(
+                    "Cleared {} of file cache. macOS fills it again as you open files.",
+                    format::size(cleared)
+                )
+            } else {
+                "The file cache was already small, so there was little to clear.".to_string()
+            }))
+        }
+        FileCacheResult::Canceled => None,
+        FileCacheResult::Failed { message } => Some(Notice::Error(message.clone())),
     }
 }
 
@@ -495,6 +520,27 @@ impl TidyModel {
     }
 
     /// Dismisses the notice band.
+    /// The confirm's Clear File Cache: the core runs `purge` behind macOS's password prompt.
+    pub fn clear_file_cache(&mut self, cx: &mut Context<Self>) {
+        if self.memory.clearing {
+            return;
+        }
+        if send(cx, Command::ClearFileCache) {
+            self.memory.clearing = true;
+            self.memory.notice = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_file_cache(&mut self, result: FileCacheResult, cx: &mut Context<Self>) {
+        self.memory.clearing = false;
+        self.memory.notice = file_cache_notice(&result);
+        if !matches!(result, FileCacheResult::Canceled) {
+            self.snapshot_memory(cx);
+        }
+        cx.notify();
+    }
+
     pub fn dismiss_memory_notice(&mut self, cx: &mut Context<Self>) {
         self.memory.notice = None;
         self.memory.notice_leaving = None;
@@ -674,6 +720,21 @@ impl TidyView {
         cx.notify();
     }
 
+    /// Clear File Cache… in the toolbar: says what it does and does not do before macOS asks
+    /// for the password.
+    pub fn request_clear_file_cache(&mut self, cx: &mut Context<Self>) {
+        let m = &self.model.read(cx).memory;
+        if m.clearing {
+            return;
+        }
+        let cache = m
+            .snapshot
+            .as_ref()
+            .map(|s| s.pages.external.saturating_mul(s.pages.page_size))
+            .filter(|b| *b > 0);
+        self.open_dialog(DialogSpec::clear_file_cache(cache), cx);
+    }
+
     /// "Force Quit…" in the menu: asks first, because unsaved changes are lost.
     fn request_force_quit(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.memory_menu.take() else {
@@ -765,17 +826,40 @@ impl TidyView {
         let model = self.model.clone();
         let view = cx.entity().downgrade();
 
+        let clearing = self.model.read(cx).memory.clearing;
         let controls = {
             let refresh = model.clone();
-            icon_button(
-                "memory-refresh",
-                "memory-refresh".to_string(),
-                IconName::RefreshCw,
-                t,
-                move |_, cx| {
-                    refresh.update(cx, |m, cx| m.snapshot_memory(cx));
-                },
-            )
+            let clear_view = view.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(if clearing {
+                    self.busy_controls(t, "Clearing the file cache".to_string(), cx)
+                        .into_any_element()
+                } else {
+                    text_button(
+                        "clear-file-cache",
+                        "clear-file-cache".to_string(),
+                        "Clear File Cache\u{2026}",
+                        false,
+                        snap.snapshot.is_some(),
+                        t,
+                        move |_, cx| {
+                            let _ = clear_view.update(cx, |v, cx| v.request_clear_file_cache(cx));
+                        },
+                    )
+                    .into_any_element()
+                })
+                .child(icon_button(
+                    "memory-refresh",
+                    "memory-refresh".to_string(),
+                    IconName::RefreshCw,
+                    t,
+                    move |_, cx| {
+                        refresh.update(cx, |m, cx| m.snapshot_memory(cx));
+                    },
+                ))
         };
         // The figures stay put above the list; the scrolled edge is under the list header.
         let toolbar = self.toolbar(t, "Memory", false, controls, cx);

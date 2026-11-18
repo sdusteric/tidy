@@ -440,6 +440,7 @@ fn event_line(ev: &Event) -> Value {
             json!({"event": "security_progress", "done": done, "total": total})
         }
         Event::SecurityResult(report) => tagged("security", report),
+        Event::FileCacheCleared(result) => tagged("file_cache", result),
         Event::CheckupDone { checkup, reminder } => checkup_line(checkup, reminder),
         Event::Failed { what, message } => {
             json!({"event": "error", "what": what, "message": message})

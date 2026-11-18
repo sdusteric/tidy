@@ -95,6 +95,69 @@ pub fn take(env: &Env) -> io::Result<MemorySnapshot> {
     snapshot(env.memory.as_ref(), env.now())
 }
 
+// ---------- Clear file cache ----------
+
+/// The one script Tidy runs with administrator rights (design section 21): macOS's own
+/// `purge`, behind macOS's own password prompt. [`crate::env::SystemRunner`] runs `osascript`
+/// with nothing else, and never under `TIDY_HOME` or in tests.
+pub const PURGE_SCRIPT: &str = "do shell script \"/usr/sbin/purge\" with prompt \"Tidy wants to clear the file cache.\" with administrator privileges";
+/// `osascript`, which shows the password prompt and runs [`PURGE_SCRIPT`].
+pub const OSASCRIPT: &str = "/usr/bin/osascript";
+/// How long the prompt may stay open before Tidy gives up on it.
+pub const PURGE_TIMEOUT: Duration = Duration::from_secs(180);
+/// What the Memory screen says when the purge did not run for another reason than a cancel.
+pub const FILE_CACHE_FAILED: &str = "macOS didn't clear the file cache.";
+
+/// How a Clear File Cache ended.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum FileCacheResult {
+    /// `purge` ran. The file cache (file-backed pages) before and right after, in bytes.
+    Cleared {
+        before: u64,
+        after: u64,
+    },
+    /// The password prompt was canceled; nothing ran.
+    Canceled,
+    Failed {
+        message: String,
+    },
+}
+
+/// The file cache in `vm`: file-backed pages times the page size.
+pub fn file_cache_bytes(vm: &VmStats) -> u64 {
+    vm.pages.external.saturating_mul(vm.pages.page_size)
+}
+
+/// Runs `purge` behind macOS's password prompt, and reads the file cache before and after.
+/// Only ever on a click and a confirm; nothing else in Tidy runs as root.
+pub fn clear_file_cache(env: &Env) -> FileCacheResult {
+    let read = || env.memory.vm().ok().map(|vm| file_cache_bytes(&vm));
+    let before = read();
+    match env
+        .runner
+        .run(OSASCRIPT, &["-e", PURGE_SCRIPT], PURGE_TIMEOUT)
+    {
+        Ok(out) if out.success() => FileCacheResult::Cleared {
+            before: before.unwrap_or(0),
+            after: read().unwrap_or(0),
+        },
+        Ok(out) if out.stderr.contains("(-128)") => FileCacheResult::Canceled,
+        Ok(out) => {
+            tracing::warn!("purge failed: {}", out.stderr.trim());
+            FileCacheResult::Failed {
+                message: FILE_CACHE_FAILED.to_string(),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("purge did not run: {e}");
+            FileCacheResult::Failed {
+                message: FILE_CACHE_FAILED.to_string(),
+            }
+        }
+    }
+}
+
 // ---------- Grouping ----------
 
 /// Groups a process table into rows, largest footprint first: up to [`TOP_ROWS`] app or

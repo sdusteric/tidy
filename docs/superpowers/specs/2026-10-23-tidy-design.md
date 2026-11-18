@@ -46,7 +46,7 @@ Tidy must never do these, and a change that does one is a bug:
 - Prompt for, require, or nag about Full Disk Access. Tidy works with what macOS grants a normal app, and says plainly when something is out of reach.
 - Show false or inflated alarms ("Your Mac is infected", "3,412 junk files are slowing your Mac", red badges for normal states). Compressed memory and file cache are normal and are described as normal.
 - Nag: no Dock badge for cleanable space, no notifications other than the opt-in weekly reminder, no "upgrade" or "act now" copy, no reminder more than once a week.
-- Use `sudo`, a privileged helper, a launch daemon, or a launch agent.
+- Use `sudo`, a privileged helper, a launch daemon, or a launch agent. (One exception since 2026-11-17: Clear File Cache runs `purge` through macOS's own administrator prompt, after a click and a confirm; section 21.)
 - Kill a process. Quitting is a polite request (`NSRunningApplication.terminate`), and Force Quit needs an explicit confirm (M2).
 - Run cleanup commands implicitly (`brew cleanup`, `pnpm store prune`, `simctl delete`, `purge`, `tmutil`). If Tidy suggests one, it shows the exact command for the user to copy.
 
@@ -128,7 +128,7 @@ Purpose: answer "why is my Mac slow right now" and let the user quit what is hea
 - **Top apps by memory**: processes grouped under their responsible app (`responsibility_get_pid_responsible_for_pid` via `dlsym`, falling back to the parent chain and then to the `.app` prefix of `proc_pidpath`). Each row: app icon, name, footprint ("4.2 GB"), number of helper processes, and a Quit button. Rows for processes Tidy cannot attribute show the process name. Root-owned and other users' processes cannot be read by an app; they are summed into one row "System processes" (sized with `top`, see the M2 notes), without a Quit button.
 - **Quit** sends `terminate`. The row shows "Quit requested" and then disappears when the app exits. After 10 seconds without exit, the row shows "Still open. The app may be asking to save." and the "..." menu offers Force Quit with a confirm ("Unsaved changes in X will be lost."). Tidy itself, Finder, WindowServer and loginwindow have no Quit button.
 - Refresh every 2 seconds while the screen is visible; nothing runs when it is not.
-- No "Free up RAM" button, because there is no honest user-level way to do it (`purge` needs root and only drops file cache).
+- No "Free up RAM" button, because there is no honest user-level way to do it (`purge` needs root and only drops file cache). Section 21 adds Clear File Cache, which runs `purge` and says it frees file cache, not app memory.
 - Relaunch next to Quit, a tip about the browser's own memory setting on Chromium browser rows above 4 GB, and a "What would help" line while pressure is not Normal: section 18.2 (C41 to C43).
 
 ### 5.4 Security (M2)
@@ -651,7 +651,7 @@ From the user research (`reddit/tidy.md`, gap rows 3, 5, 6, 11 and 18): people t
 ### 17.3 What Tidy never does (C31)
 
 - The last block on Check up, after the System Data row: the heading "What Tidy never does" 13/600 `text` 20 pt from the row above, then one `card_bg` card (radius 10, padding 14) holding a two-column grid of six items, 12 pt column gap, 10 pt row gap. Each item: a `Ban` icon 14 `text_3`, a title 13/500 `text`, and a note 12 `text_2`.
-- Items: "Ask for Full Disk Access" / "It works with what macOS gives every app."; "Run in the background" / "Nothing starts at login or runs after you quit."; "Use sudo or a helper tool" / "Tidy never sees your password. When an app needs it, Finder asks." (reworded 2026-11-08 with the Finder hand-off, 19.4); "Delete outside the Trash" / "Items go to the Trash. You can put them back until you empty it."; "Empty the Trash on its own" / "Emptying it is a separate step you confirm."; "Use scare tactics" / "No red badges, countdowns or alarm words."
+- Items: "Ask for Full Disk Access" / "It works with what macOS gives every app."; "Run in the background" / "Nothing starts at login or runs after you quit."; "Ask for your password itself" / "When something needs it, macOS or Finder asks. Tidy never sees it." (reworded 2026-11-08 with the Finder hand-off, 19.4, and 2026-11-17 with Clear File Cache, 21); "Delete outside the Trash" / "Items go to the Trash. You can put them back until you empty it."; "Empty the Trash on its own" / "Emptying it is a separate step you confirm."; "Use scare tactics" / "No red badges, countdowns or alarm words."
 - Demo scenarios `cleanup-why`, `system-data`, `system-data-report` (the sheet scrolled to Docker and the snapshots) and `checkup-trust` (Check up scrolled to the end) cover the three surfaces in the screenshots.
 
 ## 18. Mole lessons, more coverage, Relaunch and overlay motion (design note, 2026-10-25)
@@ -794,4 +794,15 @@ Rejected: counting the Figure up (a number the user reads), animating a tile on 
 - C59. Large files gets a size map in Folders mode only. Files mode stays a list, since its rows come from many folders and a map of them says less than the sorted list.
 - C60. Ink means "will move" on the map as on the checkboxes. No other color is added.
 - C61. Four motions on the existing curves, with three new durations (`ZOOM`, `STAGGER`, `DISK`). After a clean, only the disk bar moves, and it moves by the space freed.
+
+## 21. Clear file cache (design note, 2026-11-17)
+
+The user asked for a way to reclaim memory without quitting or relaunching, as CleanMyMac's Free Up RAM does. No normal app can take memory back from another app. What memory cleaners do is either `purge` (drops macOS's file cache, needs root) or a trick that allocates a large block so macOS compresses or swaps other apps, which makes those apps slower; Tidy will never do the second. The user chose the honest form of the first.
+
+- **Where.** A secondary "Clear File Cache…" button in the Memory toolbar, left of Refresh, enabled once a snapshot is in.
+- **Confirm first.** The dialog "Clear the file cache?" says: "macOS keeps files you used lately in memory and gives that memory to apps on its own when they need it. Clearing it raises free memory for a while, then files load from disk again. It doesn't make apps that are short on memory faster." It shows "File cache now" (file-backed pages times the page size) and "macOS asks for your password. Tidy never sees it." Buttons: Cancel (focused), Clear File Cache.
+- **Run.** `ClearFileCache` runs beside the core's actor, one at a time: `/usr/bin/osascript -e 'do shell script "/usr/sbin/purge" with prompt "Tidy wants to clear the file cache." with administrator privileges'`, a 180 s limit for the prompt. macOS shows its own password dialog; no helper, no stored rights, nothing runs as root on its own. `SystemRunner` runs `osascript` with exactly that script and nothing else, and never under `TIDY_HOME` or in tests. While it runs, the toolbar shows the spinner and "Clearing the file cache".
+- **Result.** The file cache is read before and right after. The Memory band says "Cleared 2.1 GB of file cache. macOS fills it again as you open files.", or "The file cache was already small, so there was little to clear." under 10 MB, or "macOS didn't clear the file cache." on failure; a canceled prompt says nothing. The figures are read again at once.
+- **What changed elsewhere.** Section 4's no-sudo rule gains this one exception, after a click, a confirm and macOS's prompt. The "What Tidy never does" item is now "Ask for your password itself" / "When something needs it, macOS or Finder asks. Tidy never sees it." tidyctl prints the result as `file_cache` but has no command for it.
+- **Motion.** None new: the spinner, the dialog and the band use their existing motion.
 

@@ -721,3 +721,70 @@ fn the_real_probe_reads_sane_numbers() {
         assert!(!a.quittable || a.kind == MemoryKind::App);
     }
 }
+
+// ---------- Clear file cache ----------
+
+/// A memory probe whose file cache shrinks by 2 GB after the first read, as `purge` would.
+struct Shrinking(std::sync::atomic::AtomicU32);
+
+impl MemoryProbe for Shrinking {
+    fn processes(&self) -> Vec<ProcInfo> {
+        Vec::new()
+    }
+    fn vm(&self) -> io::Result<tidy_core::model::VmStats> {
+        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut vm = tidy_core::model::VmStats::default();
+        vm.pages.page_size = 16_384;
+        let gb = 1_000_000_000 / 16_384;
+        vm.pages.external = if n == 0 { 5 * gb } else { 3 * gb };
+        Ok(vm)
+    }
+}
+
+fn purge_env(reply: tidy_core::env::Replay) -> (tempfile::TempDir, tidy_core::Env) {
+    use tidy_core::env::{ReplayRunner, command_line};
+    let dir = tempfile::tempdir().unwrap();
+    let runner = ReplayRunner::new();
+    runner.set(
+        &command_line(
+            "/usr/bin/osascript",
+            &["-e", tidy_core::memory::PURGE_SCRIPT],
+        ),
+        reply,
+    );
+    let env = tidy_core::Env::for_tests(&dir.path().join("home"), &dir.path().join("tidy"))
+        .with_runner(Arc::new(runner))
+        .with_memory(Arc::new(Shrinking(Default::default())));
+    (dir, env)
+}
+
+#[test]
+fn clearing_the_file_cache_reports_what_left() {
+    use tidy_core::env::{CommandOutput, Replay};
+    use tidy_core::memory::{FileCacheResult, clear_file_cache};
+    let (_dir, env) = purge_env(Replay::Output(CommandOutput::ok("")));
+    match clear_file_cache(&env) {
+        FileCacheResult::Cleared { before, after } => {
+            assert!(before > after, "{before} {after}");
+            assert_eq!(before - after, 2_000_000_000 / 16_384 * 16_384);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_canceled_password_prompt_clears_nothing() {
+    use tidy_core::env::{CommandOutput, Replay};
+    use tidy_core::memory::{FileCacheResult, clear_file_cache};
+    let (_dir, env) = purge_env(Replay::Output(CommandOutput::exit(
+        1,
+        "",
+        "execution error: User canceled. (-128)",
+    )));
+    assert_eq!(clear_file_cache(&env), FileCacheResult::Canceled);
+    let (_dir, env) = purge_env(Replay::Output(CommandOutput::exit(1, "", "purge: oops")));
+    assert!(matches!(
+        clear_file_cache(&env),
+        FileCacheResult::Failed { .. }
+    ));
+}

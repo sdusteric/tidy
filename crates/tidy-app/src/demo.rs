@@ -116,10 +116,12 @@ pub enum Scenario {
     UninstallerApp,
     /// The same with the Uninstall receipt open.
     UninstallerConfirm,
+    /// Memory with the Clear File Cache confirm open (design section 21).
+    MemoryClear,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 25] = [
+    pub const ALL: [Scenario; 26] = [
         Scenario::Cleanup,
         Scenario::CleanupDone,
         Scenario::CleanupEmpty,
@@ -145,6 +147,7 @@ impl Scenario {
         Scenario::Uninstaller,
         Scenario::UninstallerApp,
         Scenario::UninstallerConfirm,
+        Scenario::MemoryClear,
     ];
 
     /// Parses a `TIDY_DEMO` value (case-insensitive). None for an unknown name.
@@ -180,6 +183,7 @@ impl Scenario {
             Scenario::Uninstaller => "uninstaller",
             Scenario::UninstallerApp => "uninstaller-app",
             Scenario::UninstallerConfirm => "uninstaller-confirm",
+            Scenario::MemoryClear => "memory-clear",
         }
     }
 
@@ -199,7 +203,8 @@ impl Scenario {
             Scenario::Memory
             | Scenario::MemoryTight
             | Scenario::MemoryRelaunch
-            | Scenario::MemoryCritical => Screen::Memory,
+            | Scenario::MemoryCritical
+            | Scenario::MemoryClear => Screen::Memory,
             Scenario::Security | Scenario::SecurityFirst | Scenario::SecurityItems => {
                 Screen::Security
             }
@@ -353,7 +358,7 @@ impl DemoState {
             // hangs under it.
             confirm: matches!(
                 scenario,
-                Scenario::CleanupConfirm | Scenario::UninstallerConfirm
+                Scenario::CleanupConfirm | Scenario::UninstallerConfirm | Scenario::MemoryClear
             ),
             history: scenario == Scenario::History,
             focus_row: (scenario == Scenario::CleanupFocus)
@@ -1300,14 +1305,21 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
         Scenario::Memory
         | Scenario::MemoryTight
         | Scenario::MemoryRelaunch
-        | Scenario::MemoryCritical => {
+        | Scenario::MemoryCritical
+        | Scenario::MemoryClear => {
             use crate::views::memory::QuitState;
             let pressure = match scenario {
-                Scenario::Memory => Pressure::Normal,
+                Scenario::Memory | Scenario::MemoryClear => Pressure::Normal,
                 Scenario::MemoryCritical => Pressure::Critical,
                 _ => Pressure::Warning,
             };
-            m.memory.snapshot = Some(memory_snapshot(pressure));
+            let mut snapshot = memory_snapshot(pressure);
+            if scenario == Scenario::MemoryClear {
+                // 6.2 GB of file cache, for the confirm's "File cache now" line.
+                snapshot.pages.page_size = 16_384;
+                snapshot.pages.external = 6_200 * MB / 16_384;
+            }
+            m.memory.snapshot = Some(snapshot);
             m.memory.history = pressure_history(pressure != Pressure::Normal);
             if pressure == Pressure::Critical {
                 // The last 16 seconds went very tight.
@@ -1317,7 +1329,7 @@ fn load(scenario: Scenario, m: &mut crate::app::TidyModel) {
             }
             // Rows show the states of Quit and Relaunch.
             let states: &[(&str, QuitState)] = match scenario {
-                Scenario::Memory => &[("Slack", QuitState::Requested)],
+                Scenario::Memory | Scenario::MemoryClear => &[("Slack", QuitState::Requested)],
                 Scenario::MemoryTight => &[("Spotify", QuitState::StillOpen)],
                 Scenario::MemoryRelaunch => &[
                     ("Xcode", QuitState::Relaunching),
@@ -1782,7 +1794,7 @@ mod tests {
             Some(Scenario::LargeFolders)
         );
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::ALL.len(), 25);
+        assert_eq!(Scenario::ALL.len(), 26);
     }
 
     #[test]

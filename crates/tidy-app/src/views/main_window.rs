@@ -268,7 +268,15 @@ impl TidyView {
         // The Move to Trash demo opens with its receipt showing.
         let dialog = crate::demo::state(cx).filter(|d| d.confirm).map(|_| {
             let m = model.read(cx);
-            if m.screen == Screen::Uninstaller {
+            if m.screen == Screen::Memory {
+                let cache = m
+                    .memory
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.pages.external.saturating_mul(s.pages.page_size))
+                    .filter(|b| *b > 0);
+                DialogSpec::clear_file_cache(cache)
+            } else if m.screen == Screen::Uninstaller {
                 let name = m
                     .uninstall
                     .plan
@@ -525,6 +533,9 @@ impl TidyView {
             }
             DialogKind::Uninstall => {
                 self.model.update(cx, |m, cx| m.uninstall_ticked(cx));
+            }
+            DialogKind::ClearFileCache => {
+                self.model.update(cx, |m, cx| m.clear_file_cache(cx));
             }
         }
         cx.notify();

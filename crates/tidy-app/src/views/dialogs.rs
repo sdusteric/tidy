@@ -49,7 +49,14 @@ pub enum DialogKind {
     TrashLoginItem { key: String },
     /// Uninstall the open app with its ticked items (design section 19).
     Uninstall,
+    /// Run `purge` behind macOS's password prompt (design section 21).
+    ClearFileCache,
 }
+
+/// What Clear File Cache does and does not do (design section 21).
+pub const FILE_CACHE_BODY: &str = "macOS keeps files you used lately in memory and gives that memory to apps on its own when they need it. Clearing it raises free memory for a while, then files load from disk again. It doesn't make apps that are short on memory faster.";
+/// Who asks for the password.
+pub const FILE_CACHE_PASSWORD: &str = "macOS asks for your password. Tidy never sees it.";
 
 /// The line under the receipt's total (Move to Trash dialogs).
 pub const RECEIPT_FOOTER: &str = "Nothing is deleted. Every item goes to the Trash and Tidy writes it in History, so you can put it back.";
@@ -178,6 +185,23 @@ impl DialogSpec {
             confirm: "Move to Trash".to_string(),
             destructive: false,
             receipt: Some(receipt),
+        }
+    }
+
+    /// The confirm for Clear File Cache (design section 21): what it does, what it does not,
+    /// and who asks for the password. `cache` is the file cache now, when known.
+    pub fn clear_file_cache(cache: Option<u64>) -> DialogSpec {
+        DialogSpec {
+            kind: DialogKind::ClearFileCache,
+            title: "Clear the file cache?".to_string(),
+            body: Some(FILE_CACHE_BODY.to_string()),
+            rows: cache
+                .map(|b| vec![("File cache now".to_string(), format::size(b))])
+                .unwrap_or_default(),
+            notes: vec![FILE_CACHE_PASSWORD.to_string()],
+            confirm: "Clear File Cache".to_string(),
+            destructive: false,
+            receipt: None,
         }
     }
 

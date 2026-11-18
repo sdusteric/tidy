@@ -83,6 +83,7 @@ pub fn start_with_sources(
         job: None,
         queue: VecDeque::new(),
         memory_busy: false,
+        purging: Arc::new(AtomicBool::new(false)),
         memory_failing: false,
         security_busy: false,
         checkup: None,
@@ -160,6 +161,8 @@ struct Actor {
     queue: VecDeque<Job>,
     /// A memory snapshot is being read.
     memory_busy: bool,
+    /// Clear File Cache is running (its password prompt may be open).
+    purging: Arc<AtomicBool>,
     /// The last snapshot failed, so a failing probe reports once, not every 2 s.
     memory_failing: bool,
     /// A Security run (not the check up's) is going.
@@ -213,6 +216,20 @@ impl Actor {
             Command::TrashPaths { paths } => self.enqueue(Job::Trash(paths)),
             Command::EmptyTidyTrash => self.enqueue(Job::EmptyTrash),
             Command::Uninstall { app, ids } => self.enqueue(Job::Uninstall(app, ids)),
+            Command::ClearFileCache => {
+                if self.purging.swap(true, Ordering::SeqCst) {
+                    tracing::debug!("the file cache is already being cleared");
+                    return;
+                }
+                let env = self.env.clone();
+                let events = self.events.clone();
+                let purging = self.purging.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::memory::clear_file_cache(&env);
+                    purging.store(false, Ordering::SeqCst);
+                    let _ = events.send(Event::FileCacheCleared(result));
+                });
+            }
             Command::ListApps { reply } => {
                 let env = self.env.clone();
                 let signatures = self.sources.signatures.clone();

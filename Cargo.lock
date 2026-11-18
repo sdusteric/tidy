@@ -6538,7 +6538,7 @@ dependencies = [
 
 [[package]]
 name = "tidy-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -6562,7 +6562,7 @@ dependencies = [
 
 [[package]]
 name = "tidy-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6575,7 +6575,7 @@ dependencies = [
 
 [[package]]
 name = "tidy-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -6596,7 +6596,7 @@ dependencies = [
 
 [[package]]
 name = "tidy-fixtures"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "libc",

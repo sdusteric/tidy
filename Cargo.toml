@@ -5,7 +5,7 @@ members = ["crates/tidy-core", "crates/tidy-app", "crates/tidy-cli", "crates/tid
 # CFBundleShortVersionString comes from the VERSION file (scripts/bundle.sh); keep the two equal.
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 
 # Pins copied from Haul (../haul/Cargo.toml) so the lockfile and the gpui screenshot path stay
 # the same. Tidy has no network crates: no librqbit, reqwest, axum or tower-http.

@@ -540,6 +540,7 @@ impl TidyModel {
         if !send(cx, Command::Uninstall { app, ids }) {
             return false;
         }
+        self.jobs.push_back(crate::app::JobOwner::Uninstaller);
         self.uninstall.removing = Some((0, total));
         self.uninstall.notice = None;
         self.begin_activity();

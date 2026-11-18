@@ -88,6 +88,7 @@ pub fn start_with_sources(
         security_busy: false,
         checkup: None,
         checkup_scanning: false,
+        checkup_waiting: None,
         shelf,
     };
     rt.spawn(actor.run(cmd_rx, done_rx));
@@ -172,6 +173,9 @@ struct Actor {
     /// The running check up is still in its Cleanup scan. A `ScanCleanup` then waits for
     /// that scan's plan instead of starting a second scan.
     checkup_scanning: bool,
+    /// A check up was asked for while a Cleanup scan or a Security run of its own kind was
+    /// going. It starts when they end (the value is `include_updates`), so two never run at once.
+    checkup_waiting: Option<bool>,
     /// What Shelf's status file says now (None until a check up has finished).
     shelf: Option<ShelfState>,
 }
@@ -486,6 +490,12 @@ impl Actor {
             tracing::debug!("a check up is already going");
             return;
         }
+        if self.cleanup_scan.is_some() || self.security_busy {
+            tracing::debug!("the check up waits for the scan or security run that is going");
+            self.checkup_waiting = Some(include_updates);
+            return;
+        }
+        self.checkup_waiting = None;
         let stop = Arc::new(CheckupStop::new());
         self.checkup = Some(stop.clone());
         self.checkup_scanning = true;
@@ -584,6 +594,12 @@ impl Actor {
 
     // ----- Results -----
 
+    fn start_waiting_checkup(&mut self) {
+        if let Some(include_updates) = self.checkup_waiting {
+            self.start_checkup(include_updates);
+        }
+    }
+
     fn finish(&mut self, done: Done) {
         match done {
             Done::Cleanup { plan, cancelled } => {
@@ -599,6 +615,7 @@ impl Actor {
                     }
                     None => self.failed("scan", "The scan stopped unexpectedly."),
                 }
+                self.start_waiting_checkup();
             }
             Done::Large { scan, failed } => {
                 self.large_scan = None;
@@ -651,6 +668,7 @@ impl Actor {
                     Some(report) => self.emit(Event::SecurityResult(report)),
                     None => self.failed("security", "The security check stopped unexpectedly."),
                 }
+                self.start_waiting_checkup();
             }
             Done::CheckupEvent(event) => {
                 match &event {
@@ -1674,6 +1692,31 @@ mod tests {
         assert_eq!(v["reclaimable_bytes"], 0);
         assert_eq!(v["last_check_at"], crate::model::format_utc(TEST_NOW));
         assert!(!v.to_string().contains("_cacache"));
+    }
+
+    #[test]
+    fn a_check_up_asked_during_a_security_run_waits_for_it() {
+        let mut m = running_m2(Arc::new(FixedProbe::default()));
+        m.r.put(".npm/_cacache/a.bin", 2 * MIB);
+        m.r.core.send(Command::RunSecurity {
+            include_updates: false,
+        });
+        m.r.core.send(Command::RunCheckup {
+            include_updates: false,
+        });
+        let events = m.r.until(|e| matches!(e, Event::CheckupDone { .. }));
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::CleanupPlan(_) => Some("plan"),
+                Event::SecurityResult(_) => Some("security"),
+                Event::MemorySnapshot(_) => Some("memory"),
+                Event::CheckupDone { .. } => Some("done"),
+                Event::Failed { .. } => Some("failed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["security", "plan", "security", "memory", "done"]);
     }
 
     #[test]

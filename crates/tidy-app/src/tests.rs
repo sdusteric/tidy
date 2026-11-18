@@ -679,6 +679,23 @@ fn safe_items_clean_at_once_without_a_dialog(cx: &mut TestAppContext) {
 }
 
 #[::gpui::test]
+fn progress_goes_to_the_job_that_is_running_not_the_first_busy_screen(cx: &mut TestAppContext) {
+    let (mut h, _view, cx) = open_with_plan(cx);
+    click(cx, "clean-button");
+    h.drain();
+    // A Large Files trash was sent before the clean, so the core runs it first.
+    model(cx).update(cx, |m, _| {
+        m.jobs.push_front(crate::app::JobOwner::Large);
+        m.large.trashing = Some((0, 3));
+    });
+    push(&h, cx, vec![Event::CleanProgress { done: 1, total: 3 }]);
+    model(cx).read_with(cx, |m, _| {
+        assert_eq!(m.large.trashing, Some((1, 3)));
+        assert_eq!(m.cleanup.cleaning, Some((0, 2)));
+    });
+}
+
+#[::gpui::test]
 fn review_items_ask_first(cx: &mut TestAppContext) {
     let (mut h, view, cx) = open_with_plan(cx);
     click(cx, "clean-check:r:b");

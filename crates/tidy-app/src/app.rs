@@ -4,7 +4,7 @@
 //! The app never trashes anything itself. Every change to the disk goes out as a
 //! [`Command`]; the model only reflects the [`Event`]s that come back.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -207,6 +207,17 @@ pub fn background_from(background: Option<&str>, demo: Option<&str>) -> bool {
 }
 
 /// Sends a command to the core. Returns false when there is no core or it stopped.
+/// The screen that asked for a job. The core runs jobs one at a time in the order they were
+/// sent, so the front of `TidyModel::jobs` is the one its progress and failure belong to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobOwner {
+    Cleanup,
+    Large,
+    Security,
+    Uninstaller,
+    EmptyTrash,
+}
+
 pub fn send(cx: &App, cmd: Command) -> bool {
     match cx.try_global::<Core>() {
         Some(core) => core.0.send(cmd),
@@ -701,6 +712,8 @@ pub struct TidyModel {
     pub disk: Option<DiskInfo>,
     /// Number of applied batches (tests check the pump's throttle with it).
     pub applies: usize,
+    /// Jobs sent to the core that have not ended, oldest first.
+    pub(crate) jobs: VecDeque<JobOwner>,
     activity: Option<macos::ActivityToken>,
 }
 
@@ -720,6 +733,7 @@ impl TidyModel {
             uninstall: UninstallState::default(),
             disk: None,
             applies: 0,
+            jobs: VecDeque::new(),
             activity: None,
         }
     }
@@ -1018,6 +1032,7 @@ impl TidyModel {
         if !send(cx, Command::Clean { item_ids: ids }) {
             return false;
         }
+        self.jobs.push_back(JobOwner::Cleanup);
         self.cleanup.cleaning = Some((0, total));
         self.cleanup.notice = None;
         self.begin_activity();
@@ -1039,7 +1054,9 @@ impl TidyModel {
     }
 
     pub fn empty_trash(&mut self, cx: &mut Context<Self>) {
-        send(cx, Command::EmptyTidyTrash);
+        if send(cx, Command::EmptyTidyTrash) {
+            self.jobs.push_back(JobOwner::EmptyTrash);
+        }
     }
 
     /// Dismisses the band: it fades out over 200 ms (at once under Reduce Motion).
@@ -1240,6 +1257,7 @@ impl TidyModel {
         if !send(cx, Command::TrashPaths { paths }) {
             return false;
         }
+        self.jobs.push_back(JobOwner::Large);
         self.large.trashing = Some((0, total));
         self.large.notice = None;
         self.begin_activity();
@@ -1318,6 +1336,13 @@ impl TidyModel {
         }
     }
 
+    /// The oldest job of `owner` ended (done or failed).
+    fn job_ended(&mut self, owner: JobOwner) {
+        if let Some(at) = self.jobs.iter().position(|o| *o == owner) {
+            self.jobs.remove(at);
+        }
+    }
+
     /// Applies one coalesced batch of core events.
     pub fn apply(&mut self, batch: Batch, cx: &mut Context<Self>) {
         let mut leaving_cleanup = Vec::new();
@@ -1367,7 +1392,16 @@ impl TidyModel {
                     ScanKind::Large => self.large.scanning = None,
                 },
                 Event::CleanProgress { done, total } => {
-                    if self.uninstall.removing.is_some() {
+                    // The running job is the oldest one sent. With none on record (the demo,
+                    // or events pushed without a command) the first busy screen takes it.
+                    let owner = self.jobs.front().copied();
+                    if owner == Some(JobOwner::Cleanup) {
+                        self.cleanup.cleaning = Some((done, total));
+                    } else if owner == Some(JobOwner::Large) {
+                        self.large.trashing = Some((done, total));
+                    } else if matches!(owner, Some(JobOwner::Security | JobOwner::EmptyTrash)) {
+                        // Neither shows a count.
+                    } else if self.uninstall.removing.is_some() {
                         self.uninstall.removing = Some((done, total));
                     } else if self.cleanup.cleaning.is_some() {
                         self.cleanup.cleaning = Some((done, total));
@@ -1420,8 +1454,14 @@ impl TidyModel {
                 }
                 Event::CleanDone(entry) if self.security_trash_done(&entry) => {
                     // A login item went to the Trash from the Security screen.
+                    self.job_ended(JobOwner::Security);
                 }
                 Event::CleanDone(entry) => {
+                    self.job_ended(match entry.source {
+                        Source::Cleanup => JobOwner::Cleanup,
+                        Source::Large => JobOwner::Large,
+                        Source::Uninstaller => JobOwner::Uninstaller,
+                    });
                     self.cleanup.trash.items += entry.trashed().count() as u64;
                     self.cleanup.trash.bytes += entry.trashed_bytes;
                     let notice = Notice::Moved {
@@ -1441,6 +1481,7 @@ impl TidyModel {
                     refresh_disk = true;
                 }
                 Event::EmptyTrashDone(entry) => {
+                    self.job_ended(JobOwner::EmptyTrash);
                     let failed = entry.message.is_some()
                         || entry.items.iter().any(|i| i.result == ItemResult::Failed);
                     let deleted = entry
@@ -1492,11 +1533,26 @@ impl TidyModel {
                         self.large.notice = Some(Notice::Error(message));
                     }
                     "clean" => {
+                        self.job_ended(JobOwner::Cleanup);
                         self.cleanup.cleaning = None;
                         self.cleanup.notice = Some(Notice::Error(message));
                     }
                     "trash" => {
-                        if self.security.trashing.take().is_some() {
+                        // Security and Large both trash paths: the oldest of the two failed.
+                        let owner = self
+                            .jobs
+                            .iter()
+                            .copied()
+                            .find(|o| matches!(o, JobOwner::Security | JobOwner::Large));
+                        if let Some(owner) = owner {
+                            self.job_ended(owner);
+                        }
+                        let security = match owner {
+                            Some(owner) => owner == JobOwner::Security,
+                            None => self.security.trashing.is_some(),
+                        };
+                        if security {
+                            self.security.trashing = None;
                             self.security.notice = Some(Notice::Error(message));
                         } else {
                             self.large.trashing = None;
@@ -1504,6 +1560,7 @@ impl TidyModel {
                         }
                     }
                     "empty_trash" => {
+                        self.job_ended(JobOwner::EmptyTrash);
                         self.cleanup.notice = Some(Notice::Error(if message.is_empty() {
                             EMPTY_TRASH_REFUSED.to_string()
                         } else {
@@ -1512,6 +1569,7 @@ impl TidyModel {
                     }
                     "memory" => self.memory.notice = Some(Notice::Error(message)),
                     "uninstall" => {
+                        self.job_ended(JobOwner::Uninstaller);
                         self.uninstall.removing = None;
                         self.uninstall.notice = Some(Notice::Error(message));
                     }

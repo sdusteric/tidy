@@ -162,6 +162,7 @@ impl TidyModel {
                 paths: vec![path.clone()],
             },
         ) {
+            self.jobs.push_back(crate::app::JobOwner::Security);
             self.security.trashing = Some(Trashing {
                 key: key.to_string(),
                 path,
